@@ -16,6 +16,7 @@ from nuplan.planning.utils.serialization.scene import EgoScene, GoalScene, Traje
 
 tracked_object_types = {
     'vehicles': TrackedObjectType.VEHICLE,
+    'pseudo_ego': TrackedObjectType.PSEUDO_EGO,
     'pedestrians': TrackedObjectType.PEDESTRIAN,
     'bicycles': TrackedObjectType.BICYCLE,
     'genericobjects': TrackedObjectType.GENERIC_OBJECT,

@@ -640,6 +640,7 @@ class SimulationTile:
         :param hidden_glyph_names: A list of glyph names to be hidden.
         """
         if self._async_rendering:
+        # if False:
             # Spawn 2 child threads to load the data for plots and render them once they are available.
             # We don't wait for the threads to join so this function can immediately return, shortening the time the
             # loading indicator is shown to the user.
@@ -648,11 +649,9 @@ class SimulationTile:
                 """Wrapper for the non-map-dependent parts of the rendering logic."""
                 main_figure.update_data_sources()
                 self._render_expert_trajectory(main_figure=main_figure)
-
                 mission_goal = main_figure.scenario.get_mission_goal()
                 if mission_goal is not None:
                     main_figure.render_mission_goal(mission_goal_state=mission_goal)
-
                 self._render_plots(main_figure=main_figure, frame_index=0, hidden_glyph_names=hidden_glyph_names)
 
             def render_map_dependent() -> None:

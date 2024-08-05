@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Callable, List
-
+import copy
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
 from nuplan.planning.simulation.planner.abstract_planner import AbstractPlanner
 from nuplan.planning.simulation.runner.abstract_runner import AbstractRunner
@@ -109,8 +109,11 @@ class SimulationRunner(AbstractRunner):
             # Execute specific callback
             self._simulation.callback.on_planner_start(self.simulation.setup, self.planner)
 
+            #Get IDM predictions for planner
+            preds = self.simulation._observations.get_observation()
+
             # Plan path based on all planner's inputs
-            trajectory = self.planner.compute_trajectory(planner_input)
+            trajectory = self.planner.compute_trajectory(planner_input,preds)
 
             # Propagate simulation based on planner trajectory
             self._simulation.callback.on_planner_end(self.simulation.setup, self.planner, trajectory)

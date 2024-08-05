@@ -15,6 +15,7 @@ class TrackedObjectType(Enum):
     CZONE_SIGN = 5, 'czone_sign'
     GENERIC_OBJECT = 6, 'generic_object'
     EGO = 7, 'ego'
+    PSEUDO_EGO = 8, 'pseudo_ego'
 
     def __int__(self) -> int:
         """
@@ -55,6 +56,7 @@ AGENT_TYPES: Set[TrackedObjectType] = {
     TrackedObjectType.PEDESTRIAN,
     TrackedObjectType.BICYCLE,
     TrackedObjectType.EGO,
+    TrackedObjectType.PSEUDO_EGO,
 }
 
 STATIC_OBJECT_TYPES: Set[TrackedObjectType] = {

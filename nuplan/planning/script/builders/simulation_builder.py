@@ -90,7 +90,6 @@ def build_simulations(
             planners = build_planners(cfg.planner, scenario)
         else:
             planners = pre_built_planners
-
         for planner in planners:
             # Ego Controller
             ego_controller: AbstractEgoController = instantiate(cfg.ego_controller, scenario=scenario)
@@ -102,7 +101,7 @@ def build_simulations(
 
             # Perception
             observations: AbstractObservation = build_observations(cfg.observation, scenario=scenario)
-
+            
             # Metric Engine
             metric_engine = metric_engines_map.get(scenario.scenario_type, None)
             if metric_engine is not None:

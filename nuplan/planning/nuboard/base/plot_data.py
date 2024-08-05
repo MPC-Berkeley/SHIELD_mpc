@@ -99,8 +99,7 @@ class TrafficLightMapLine(MapPoint):
     """Line plot data in traffic light map."""
 
     line_colors: List[str] = field(default_factory=list)  # A list of color hex codes.
-    line_color_alphas: List[float] = field(default_factory=list)  # A list of color alphas.
-
+    line_color_alphas: List[float] = field(default_factory=list)  # A list of color alphas.    
 
 @dataclass
 class BaseScenarioPlot(abc.ABC):
@@ -189,7 +188,8 @@ class TrafficLightPlot(BaseScenarioPlot):
                         path = lane_connector.baseline_path.discrete_path
                         points = [Point2D(x=pose.x, y=pose.y) for pose in path]
                         traffic_light_map_line.line_colors.append(traffic_light.status.name)
-                        traffic_light_map_line.line_color_alphas.append(lane_connector_colors["line_color_alpha"])
+                        # traffic_light_map_line.line_color_alphas.append(lane_connector_colors["line_color_alpha"])
+                        traffic_light_map_line.line_color_alphas.append(0.0)
                         traffic_light_map_line.point_2d.append(points)
 
                 line_source = ColumnDataSource(
@@ -451,7 +451,7 @@ class AgentStatePlot(BaseScenarioPlot):
                 for category, data_source in data_sources.items():
                     plot = self.plots.get(category, None)
                     data = dict(data_source.data)
-                    if plot is None:
+                    if plot is None:                
                         agent_color = simulation_tile_agent_style.get(category)
                         self.plots[category] = main_figure.multi_polygons(
                             xs="xs",
@@ -635,7 +635,6 @@ class AgentStateHeadingPlot(BaseScenarioPlot):
                 self.data_sources[frame_index] = frame_dict
                 self.data_source_condition.notify()
 
-
 @dataclass
 class SimulationFigure:
     """Simulation figure data."""
@@ -669,6 +668,10 @@ class SimulationFigure:
     ego_state_trajectory_plot: Optional[EgoStateTrajectoryPlot] = None  # Ego state trajectory plot
     agent_state_plot: Optional[AgentStatePlot] = None  # Agent state plot
     agent_state_heading_plot: Optional[AgentStateHeadingPlot] = None  # Agent state heading plot
+    mm_pred1_plot: GlyphRenderer = None
+    mm_pred2_plot: GlyphRenderer = None
+    mm_pred3_plot: GlyphRenderer = None
+    mm_pred4_plot: GlyphRenderer = None
 
     # Optional simulation data
     lane_connectors: Optional[Dict[str, LaneConnector]] = None  # Lane connector id: lane connector
@@ -808,6 +811,7 @@ class SimulationFigure:
         Render expert trajectory.
         :param expert_ego_trajectory_state: A list of trajectory states.
         """
+
         self.expert_trajectory_plot = self.figure.line(
             x="xs",
             y="ys",
@@ -817,6 +821,81 @@ class SimulationFigure:
             source=expert_ego_trajectory_state,
         )
 
+        # x_init = 664428.16
+        # y_init = 3997808.38
+        # dy = 0.4
+        # dx = 1
+
+        # #lane 2 mode
+        # self.mm_pred2_plot = self.figure.ellipse(
+        #     x = [x_init + 4, x_init + 6 + dx, x_init + 4 + 5*dx,x_init + 4 + 7*dx, x_init + 4 + 9*dx,x_init + 4 + 11*dx,x_init + 4 + 13*dx,x_init + 4 + 15*dx,x_init + 4 + 17*dx,x_init + 4 + 19*dx,x_init + 4 + 21*dx,x_init + 4 + 23.5*dx,x_init + 4 + 25.5*dx,x_init + 4 + 27.5*dx,x_init + 4 + 29.5*dx,x_init + 4 + 31.5*dx], 
+        #     y = [y_init + dy +0.5, y_init + 4.7*dy, y_init + 6.4*dy, y_init + 8.1*dy, y_init + 10.1*dy,y_init +4.6,y_init + 4.9,y_init +5.5,y_init + 5.9,y_init + 6.6,y_init + 7.4,y_init + 8.5,y_init + 9.5,y_init + 10.4,y_init +11.5,y_init + 12.6], 
+        #     width = 5, 
+        #     height = 2, 
+        #     angle = [12, 18, 14, 15, 16, 12, 12.5,13.5,14,15,17,18,20,23,28,33], 
+        #     angle_units='deg', 
+        #     fill_alpha = 0.9,
+        #     color = "#000000", 
+        #     fill_color="#FFD858",
+        #     line_width=1,
+        #     )
+        # #lane 1 mode
+        # self.expert_trajectory_plot = self.figure.ellipse(
+        #     x = [x_init + 4, x_init + 6 + dx, x_init + 4 + 5*dx,x_init + 4 + 7*dx, x_init + 4 + 9*dx,x_init + 4 + 11*dx,x_init + 4 + 13*dx,x_init + 4 + 15*dx,x_init + 4 + 17*dx,x_init + 4 + 19*dx,x_init + 4 + 21*dx,x_init + 4 + 22.5*dx], 
+        #     y = [y_init + dy +0.5, y_init + 4.7*dy, y_init + 6.4*dy, y_init + 8.1*dy, y_init + 10.1*dy,y_init + 12.1*dy,y_init + 14.8*dy,y_init +17.9*dy,y_init + 21.3*dy,y_init + 25.4*dy,y_init + 31.4*dy,y_init + 36.4*dy], 
+        #     width = 5, 
+        #     height = 2, 
+        #     angle = [12, 18, 18.2, 21.2, 23.5, 26.5, 29,30,35,40,47.5,55], 
+        #     angle_units='deg', 
+        #     fill_alpha = 0.9,
+        #     color = "#000000", 
+        #     fill_color="#386CB0",
+        #     line_width=1,
+        #     )
+
+        # #Stopping mode
+        # self.mm_pred1_plot = self.figure.ellipse(
+        #     x = [x_init + 3, x_init + 5, x_init + 7.5,x_init + 9.2, x_init + 10.8, x_init + 11.7, x_init + 12.4], 
+        #     y = [y_init + dy, y_init + 2.8*dy, y_init + 5.0*dy, y_init + 6.8*dy, y_init + 8.1*dy,y_init + 8.9*dy,y_init + 9.8*dy],
+        #     width = 4, 
+        #     height = 1.8, 
+        #     angle = [12, 16.5,17, 18.2, 18.7, 19.5, 20], 
+        #     angle_units='deg', 
+        #     fill_alpha = 0.9,
+        #     color = "#000000", 
+        #     fill_color="#8B0000", 
+        #     line_width=1,
+        #     )
+        
+        # ddx = 4
+        # ddy = 8
+
+        # self.mm_pred3_plot = self.figure.ellipse(
+        #     x = [x_init + 2+ddx, x_init + 2.5 + dx+ddx, x_init + 2.5 + 4*dx+ddx,x_init + 2.5 + 6*dx+ddx, x_init + 2.5 + 8*dx+ddx,x_init + 2.5 + 10*dx+ddx,x_init + 2.5 + 12*dx+ddx,x_init + 2.5 + 14*dx+ddx,x_init + 2.5 + 16*dx+ddx,x_init + 2.5 + 17.4*dx+ddx], 
+        #     y = [y_init + dy+ddy, y_init + 3.2*dy+ddy, y_init + 6.5*dy+ddy, y_init + 9.8*dy+ddy, y_init + 13.2*dy+ddy,y_init + 17.5*dy+ddy,y_init + 22.3*dy+ddy,y_init +28*dy+ddy,y_init + 35*dy+ddy,y_init + 42*dy+ddy], 
+        #     width = 5, 
+        #     height = 2, 
+        #     angle = [18, 20, 25, 30, 38, 39, 40,48,54,65], 
+        #     angle_units='deg', 
+        #     fill_alpha = 0.9,
+        #     color = "#000000", 
+        #     fill_color="#386CB0",
+        #     line_width=1,
+        #     )
+        
+        # #Stopping mode   
+        # self.mm_pred4_plot = self.figure.ellipse(
+        #     x = [x_init +ddx, x_init + 2+ddx, x_init + 4.5+ddx,x_init + 6.2+ddx, x_init + 7.8+ddx, x_init + 8.7+ddx, x_init + 9.4+ddx], 
+        #     y = [y_init + dy+ddy-0.3, y_init + 2.8*dy+ddy-0.6, y_init + 5.0*dy+ddy-0.4, y_init + 6.8*dy+ddy-0.2, y_init + 8.1*dy+ddy+0.2,y_init + 8.9*dy+ddy+0.5,y_init + 9.8*dy+ddy+0.7],
+        #     width = 4, 
+        #     height = 1.8, 
+        #     angle = [15, 18.5,19, 23.2, 26.2, 28.5, 30],  
+        #     angle_units='deg', 
+        #     fill_alpha = 0.9,
+        #     color = "#000000", 
+        #     fill_color="#8B0000", 
+        #     line_width=1,
+        #     )
     @staticmethod
     def _update_glyph_visibility(glyphs: List[Optional[GlyphRenderer]]) -> None:
         """
@@ -866,6 +945,14 @@ class SimulationFigure:
         """
         if glyph_name == 'Expert Trajectory':
             return [self.expert_trajectory_plot if self.expert_trajectory_plot is not None else None]
+        # elif glyph_name == 'MM Pred1':
+        #     return [self.mm_pred1_plot if self.mm_pred1_plot is not None else None]
+        # elif glyph_name == 'MM Pred2':
+        #     return [self.mm_pred2_plot if self.mm_pred2_plot is not None else None]
+        # elif glyph_name == 'MM Pred3':
+        #     return [self.mm_pred1_plot if self.mm_pred1_plot is not None else None]
+        # elif glyph_name == 'MM Pred4':
+        #     return [self.mm_pred2_plot if self.mm_pred2_plot is not None else None]
         elif glyph_name == 'Ego Trajectory':
             return [self.ego_state_trajectory_plot.plot if self.ego_state_trajectory_plot is not None else None]
         elif glyph_name == 'Goal':
@@ -900,6 +987,7 @@ class SimulationFigure:
         for glyph_name in glyph_names:
             if glyph_name == 'Ego':
                 glyphs += [self.ego_state_plot.plot if self.ego_state_plot is not None else None]
+            # elif glyph_name in ['Expert Trajectory', 'Ego Trajectory', 'Goal', 'Traffic Light', 'MM Pred1', 'MM Pred2','MM Pred3','MM Pred4']:
             elif glyph_name in ['Expert Trajectory', 'Ego Trajectory', 'Goal', 'Traffic Light']:
                 glyphs += self._get_trajectory_glyph_to_update(glyph_name=glyph_name)
             elif glyph_name in ['Vehicle', 'Pedestrian', 'Bicycle', 'Generic', 'Traffic Cone', 'Barrier', 'Czone Sign']:
@@ -957,6 +1045,14 @@ class SimulationFigure:
         if self.expert_trajectory_plot is not None:
             legend_items.append(("Expert traj", [self.expert_trajectory_plot]))
 
+        # if self.mm_pred1_plot is not None:
+        #     legend_items.append(("MM1 traj", [self.mm_pred1_plot]))
+        # if self.mm_pred2_plot is not None:
+        #     legend_items.append(("MM2 traj", [self.mm_pred2_plot]))
+        # if self.mm_pred3_plot is not None:
+        #     legend_items.append(("MM3 traj", [self.mm_pred3_plot]))
+        # if self.mm_pred4_plot is not None:
+        #     legend_items.append(("MM4 traj", [self.mm_pred4_plot]))
         legend_items += agent_legends
         legend_items += map_polygon_legend_items
         legend_items += map_line_legend_items

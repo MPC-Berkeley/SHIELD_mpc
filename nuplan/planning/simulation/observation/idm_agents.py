@@ -1,5 +1,6 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Type
+import copy
 
 from nuplan.common.actor_state.tracked_objects import TrackedObject
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
@@ -109,7 +110,6 @@ class IDMAgents(AbstractObservation):
     def initialize(self) -> None:
         """Inherited, see superclass."""
         pass
-
     def get_observation(self) -> DetectionsTracks:
         """Inherited, see superclass."""
         detections = self._get_idm_agent_manager().get_active_agents(
@@ -151,4 +151,4 @@ class IDMAgents(AbstractObservation):
         :return: A list of TrackedObjects.
         """
         detections = self._scenario.get_tracked_objects_at_iteration(iteration)
-        return detections.tracked_objects.get_tracked_objects_of_types(self._open_loop_detections_types)  # type: ignore
+        return detections.tracked_objects.get_tracked_objects_of_types(self._open_loop_detections_types)  # type: ignore   

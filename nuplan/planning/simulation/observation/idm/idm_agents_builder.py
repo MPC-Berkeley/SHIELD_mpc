@@ -100,7 +100,6 @@ def build_idm_agents_on_map_rails(
         if agent.track_token not in unique_agents:
 
             route, progress = get_starting_segment(agent, map_api)
-
             # Ignore agents that a baseline path cannot be built for
             if route is None:
                 continue
@@ -148,5 +147,4 @@ def build_idm_agents_on_map_rails(
                 policy=IDMPolicy(target_velocity, min_gap_to_lead_agent, headway_time, accel_max, decel_max),
                 minimum_path_length=minimum_path_length,
             )
-
     return unique_agents, occupancy_map

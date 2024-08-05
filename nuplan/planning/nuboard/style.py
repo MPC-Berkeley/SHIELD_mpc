@@ -52,9 +52,16 @@ simulation_tile_trajectory_style: Dict[str, Any] = {
     "ego": {"line_color": "#00C8C8", "line_alpha": 0.8, "line_width": 2},
     "expert_ego": {"line_color": "#FA9600", "line_alpha": 0.8, "line_width": 2},
 }
+# simulation_tile_trajectory_style: Dict[str, Any] = {
+    # "ego": {"line_color": "#00C8C8", "line_alpha": 0.0, "line_width": 2},
+    # "TV": {"line_color": "#00C8C8", "line_alpha": 0.8, "line_width": 2},
+    # "expert_ego": {"line_color": "#FA9600", "line_alpha": 0.8, "line_width": 2},
+# }
 
 simulation_tile_agent_style: Dict[str, Any] = {
     "ego": {"fill_color": "#FFFFFF", "fill_alpha": 1.0, "line_color": "#808080", "line_width": 2},
+    "pseudo_ego": {"fill_color": "#FFFFFF", "fill_alpha": 1.0, "line_color": "#808080", "line_width": 2},
+    # "ego": {"fill_color": "#84E573", "fill_alpha": 0.5, "line_color": "#84E573", "line_width": 1},
     "vehicles": {"fill_color": "#84E573", "fill_alpha": 0.5, "line_color": "#84E573", "line_width": 1},
     "pedestrians": {"fill_color": "#4D83E1", "fill_alpha": 0.5, "line_color": "#4D83E1", "line_width": 1},
     "bicycles": {"fill_color": "#FF4D4D", "fill_alpha": 0.5, "line_color": "#FF4D4D", "line_width": 1},
@@ -66,13 +73,17 @@ simulation_tile_agent_style: Dict[str, Any] = {
 
 simulation_map_layer_color: Dict[SemanticMapLayer, Any] = {
     SemanticMapLayer.LANE: {"fill_color": "#4D6680", "fill_color_alpha": 0.5, "line_color": "#2d3ea7"},
+    # SemanticMapLayer.LANE: {"fill_color": "#4D6680", "fill_color_alpha": 0.0, "line_color": "#2d3ea7"},
     SemanticMapLayer.WALKWAYS: {"fill_color": "#7e772e", "fill_color_alpha": 0.5, "line_color": "#7e772e"},
     SemanticMapLayer.CARPARK_AREA: {"fill_color": "#ff7f00", "fill_color_alpha": 0.5, "line_color": "#ff7f00"},
     SemanticMapLayer.PUDO: {"fill_color": "#AF75A7", "fill_color_alpha": 0.3, "line_color": "#AF75A7"},
     SemanticMapLayer.INTERSECTION: {"fill_color": "#7C8691", "fill_color_alpha": 0.5, "line_color": "#2d3ea7"},
+    # SemanticMapLayer.INTERSECTION: {"fill_color": "#7C8691", "fill_color_alpha": 0.0, "line_color": "#2d3ea7"},
     SemanticMapLayer.STOP_LINE: {"fill_color": "#FF0101", "fill_color_alpha": 0.5, "line_color": "#FF0101"},
+    # SemanticMapLayer.STOP_LINE: {"fill_color": "#FF0101", "fill_color_alpha": 0.0, "line_color": "#00FFFFFF","line_color_alpha": 0.0},
     SemanticMapLayer.CROSSWALK: {"fill_color": "#B5B5B5", "fill_color_alpha": 0.3, "line_color": "#B5B5B5"},
     SemanticMapLayer.ROADBLOCK: {"fill_color": "#0000C0", "fill_color_alpha": 0.2, "line_color": "#0000C0"},
+    # SemanticMapLayer.ROADBLOCK: {"fill_color": "#0000C0", "fill_color_alpha": 0.0, "line_color": "#00FFFFFF","line_color_alpha": 0.0},
     SemanticMapLayer.BASELINE_PATHS: {"line_color": "#CBCBCB", "line_color_alpha": 1.0},
     SemanticMapLayer.LANE_CONNECTOR: {"line_color": "#CBCBCB", "line_color_alpha": 1.0},
 }

@@ -67,6 +67,7 @@ class IDMAgent:
         # This variable is used to trigger when the _full_agent_state needs to be recalculated
         self._requires_state_update: bool = True
         self._full_agent_state: Optional[Agent] = None
+        self._prediction_computation: bool = False
 
     def propagate(self, lead_agent: IDMLeadAgentState, tspan: float) -> None:
         """
@@ -188,6 +189,7 @@ class IDMAgent:
         :param sampling_time: [s] time interval of sequence to sample from.
         :return: the agent's trajectory as a list of Agent
         """
+        self._prediction_computation = True
         return self._get_agent_at_progress(self._get_bounded_progress(), num_samples, sampling_time)
 
     def plan_route(self, traffic_light_status: Dict[TrafficLightStatusType, List[str]]) -> None:
@@ -237,7 +239,7 @@ class IDMAgent:
         :return: the agent as a Agent object at the given progress
         """
         # Caching
-        if not self._requires_state_update:
+        if not self._requires_state_update and not self._prediction_computation:
             return self._full_agent_state
 
         if self._path is not None:

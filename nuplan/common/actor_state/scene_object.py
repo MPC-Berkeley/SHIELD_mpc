@@ -11,7 +11,8 @@ from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
+# @dataclass(frozen=True)
 class SceneObjectMetadata:
     """
     Metadata for every object
@@ -85,6 +86,14 @@ class SceneObject:
         :return: The object classification type
         """
         return self._tracked_object_type
+    
+    @tracked_object_type.setter
+    def tracked_object_type(self, tracked_object_type: TrackedObjectType) -> None:
+        """
+        Setter for object classification type
+        :param tracked_object_type: The object classification type
+        """
+        self._tracked_object_type = tracked_object_type
 
     @property
     def box(self) -> OrientedBox:
@@ -93,6 +102,13 @@ class SceneObject:
         :return: The object oriented box
         """
         return self._box
+    @box.setter
+    def box(self, box: OrientedBox) -> None:
+        """
+        Setter for object OrientedBox
+        :param box: The object oriented box
+        """
+        self._box = box
 
     @property
     def center(self) -> StateSE2:

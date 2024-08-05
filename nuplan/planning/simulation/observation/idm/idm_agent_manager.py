@@ -62,7 +62,6 @@ class IDMAgentManager:
             self.agent_occupancy.insert(track.track_token, track.box.geometry)
 
         self._filter_agents_out_of_range(ego_state, radius)
-
         for agent_token, agent in self.agents.items():
             if agent.is_active(iteration) and agent.has_valid_path():
                 agent.plan_route(traffic_light_status)

@@ -31,4 +31,5 @@ _ext
 .tox/*
 .pytest_cache/*
 docs/_build/
+nuplan/dataset/
 docs/generated/

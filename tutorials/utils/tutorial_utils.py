@@ -16,34 +16,41 @@ from bokeh.io import show
 from bokeh.io.state import curstate
 from bokeh.layouts import column
 
-from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
-from nuplan.common.maps.nuplan_map.map_factory import NuPlanMapFactory, get_maps_db
+from nuplan.common.actor_state.vehicle_parameters import \
+    get_pacifica_parameters
+from nuplan.common.maps.nuplan_map.map_factory import (NuPlanMapFactory,
+                                                       get_maps_db)
 from nuplan.database.nuplan_db.nuplan_db_utils import get_lidarpc_sensor_data
 from nuplan.database.nuplan_db.nuplan_scenario_queries import (
     get_lidarpc_tokens_with_scenario_tag_from_db,
-    get_sensor_data_token_timestamp_from_db,
-    get_sensor_token_map_name_from_db,
-)
-from nuplan.planning.nuboard.base.data_class import NuBoardFile, SimulationScenarioKey
-from nuplan.planning.nuboard.base.experiment_file_data import ExperimentFileData
+    get_sensor_data_token_timestamp_from_db, get_sensor_token_map_name_from_db)
+from nuplan.planning.nuboard.base.data_class import (NuBoardFile,
+                                                     SimulationScenarioKey)
+from nuplan.planning.nuboard.base.experiment_file_data import \
+    ExperimentFileData
 from nuplan.planning.nuboard.base.simulation_tile import SimulationTile
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
-from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario import NuPlanScenario
-from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_filter_utils import discover_log_dbs
+from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario import \
+    NuPlanScenario
+from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_filter_utils import \
+    discover_log_dbs
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_utils import (
-    DEFAULT_SCENARIO_NAME,
-    ScenarioExtractionInfo,
-)
-from nuplan.planning.simulation.controller.perfect_tracking import PerfectTrackingController
-from nuplan.planning.simulation.history.simulation_history import SimulationHistory, SimulationHistorySample
-from nuplan.planning.simulation.history.simulation_history_buffer import SimulationHistoryBuffer
-from nuplan.planning.simulation.observation.tracks_observation import TracksObservation
+    DEFAULT_SCENARIO_NAME, ScenarioExtractionInfo)
+from nuplan.planning.simulation.controller.perfect_tracking import \
+    PerfectTrackingController
+from nuplan.planning.simulation.history.simulation_history import (
+    SimulationHistory, SimulationHistorySample)
+from nuplan.planning.simulation.history.simulation_history_buffer import \
+    SimulationHistoryBuffer
+from nuplan.planning.simulation.observation.idm_agents import IDMAgents
+from nuplan.planning.simulation.observation.tracks_observation import \
+    TracksObservation
 from nuplan.planning.simulation.planner.simple_planner import SimplePlanner
 from nuplan.planning.simulation.simulation_log import SimulationLog
-from nuplan.planning.simulation.simulation_time_controller.step_simulation_time_controller import (
-    StepSimulationTimeController,
-)
-from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
+from nuplan.planning.simulation.simulation_time_controller.step_simulation_time_controller import \
+    StepSimulationTimeController
+from nuplan.planning.simulation.trajectory.interpolated_trajectory import \
+    InterpolatedTrajectory
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +191,16 @@ def serialize_scenario(
     simulation_history = SimulationHistory(scenario.map_api, scenario.get_mission_goal())
     ego_controller = PerfectTrackingController(scenario)
     simulation_time_controller = StepSimulationTimeController(scenario)
+
+    # observations = IDMAgents(target_velocity=5.0,
+    #           min_gap_to_lead_agent=5.0,
+    #           headway_time=0.2,
+    #           accel_max=2.0,
+    #           decel_max=3.0,
+    #           open_loop_detections_types=['vehicle','ego'],
+    #           scenario=scenario,
+    #           planned_trajectory_samples=10,
+    #           planned_trajectory_sample_interval=0.5)
     observations = TracksObservation(scenario)
 
     # Dummy history buffer
@@ -194,8 +211,65 @@ def serialize_scenario(
         iteration = simulation_time_controller.get_iteration()
         ego_state = ego_controller.get_state()
         observation = observations.get_observation()
-        traffic_light_status = list(scenario.get_traffic_light_status_at_iteration(iteration.index))
 
+
+        #For Borrelli ACC Visualization
+        
+        # import copy
+        # from nuplan.common.actor_state.tracked_objects import TrackedObjects
+        # from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
+        # from nuplan.common.actor_state.state_representation import StateSE2  
+
+        # #Spawn fake vehicles
+        # token_list = ['a114d09062c359de','e07c833ec070592f','b2d1029ebc61565d','159ba03a7f7b56f4']
+        # for j, token in enumerate(token_list):
+        #     # observation_copy = copy.deepcopy(observation)
+        #     try:
+        #         temp2 = [agent.track_token for agent in observation.tracked_objects.get_agents()].index(token)    
+        #     except:
+        #         temp2 = None
+        #     if temp2 is not None:
+        #         dx = [[0,0,-3.2,-3.2,3.4,3.5,7],[20,18.5],[24,26],[21,22,25]]
+        #         dy = [[7,14,7,13,5.5,11.7,-0.7],[2.5,-5],[0.4,0.7],[-0.2,-0.15,-2.4]]
+        #         dheading = [[0,0,0,0,0,0,0],[0.0872665,0.0872665],[0,-0.1],[0,0,0.1]]
+        #         for i in range(len(dx[j])):
+        #             agent_copy = copy.deepcopy(observation.tracked_objects.get_agents()[temp2])
+        #             #modify agent_copy
+        #             agent_copy.metadata.track_token = 'dybi' + str(j+1) + str(i+1)
+                    
+        #             #modify agent state
+        #             pose = agent_copy.center
+        #             new_pose = StateSE2(x=pose.x + dx[j][i], y=pose.y + dy[j][i], heading=pose.heading + dheading[j][i])
+        #             box_copy = copy.deepcopy(agent_copy.box) #get orientedbox of the agent copy
+        #             new_box = box_copy.from_new_pose(box=box_copy, pose=new_pose)
+        #             agent_copy.box = new_box
+
+        #             #add agent_copy to observation
+        #             observation.tracked_objects.tracked_objects.append(agent_copy)
+        #             observation.tracked_objects = TrackedObjects(observation.tracked_objects)
+        # #delete vehicle
+        # # observation_copy3 = copy.deepcopy(observation)
+        # try:
+        #     temp3 = [agent.track_token for agent in observation.tracked_objects.get_agents()].index('052b71597e1c588c')
+        # except:
+        #     temp3 = None
+        # if temp3 is not None:
+        #     del observation.tracked_objects.tracked_objects[temp3]  
+        #     observation.tracked_objects = TrackedObjects(observation.tracked_objects)
+
+        # #Color a specific vehicle as white (pseudo-ego)
+        # # observation_copy2 = copy.deepcopy(observation) 
+        # try:
+        #     temp1 = [agent.track_token for agent in observation.tracked_objects.get_agents()].index('d15595ec3faf5528')
+        # except:
+        #     temp1 = None
+        # if temp1 is not None:
+        #     test = copy.deepcopy(observation.tracked_objects.tracked_objects[temp1])
+        #     test.tracked_object_type = TrackedObjectType.PSEUDO_EGO
+        #     observation.tracked_objects.tracked_objects[temp1] = test
+        #     observation.tracked_objects = TrackedObjects(observation.tracked_objects)
+  
+        traffic_light_status = list(scenario.get_traffic_light_status_at_iteration(iteration.index))
         # Log play back trajectory
         current_state = scenario.get_ego_state_at_iteration(iteration.index)
         states = scenario.get_ego_future_trajectory(iteration.index, future_time_horizon, num_poses)
@@ -397,9 +471,21 @@ def visualize_nuplan_scenarios(
 
             logger.info("Randomly rendering a scenario...")
             scenario_type = str(change.new)
-            log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
-            scenario = get_default_scenario_from_token(data_root, log_db_file, token, map_root, map_version)
+            #interesting: 2021.06.23.17.31.36_veh-16_00016_00377
+            #Not bad similar: 2021.06.14.19.22.11_veh-38_01480_01860
+            # print(len(scenario_type_token_map[scenario_type]))
+            # while True:
+            #     log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
+            #     if '2021.06.09.12.39.51_veh-26_01943_02303' not in log_db_file and '2021.06.09.14.58.55_veh-35_01894_02311' not in log_db_file and '2021.08.09.17.55.59_veh-28_00021_00307' not in log_db_file and '2021.08.24.13.12.55_veh-45_00386_00472' not in log_db_file and '2021.06.14.16.48.02_veh-12_04978_05337' not in log_db_file and '2021.06.03.12.02.06_veh-35_00233_00609' not in log_db_file and '2021.06.28.15.02.02_veh-38_02398_02848' not in log_db_file and '2021.06.23.15.56.12_veh-16_00839_01285' not in log_db_file and '2021.07.24.20.37.45_veh-17_00015_00375' not in log_db_file and '2021.07.16.18.06.21_veh-38_04471_04922' not in log_db_file and '2021.07.16.20.45.29_veh-35_01095_01486' not in log_db_file and '2021.10.06.17.43.07_veh-28_00508_00877' not in log_db_file and '2021.05.12.23.36.44_veh-35_02035_02387' not in log_db_file and  '2021.06.09.14.58.55_veh-35_01095_01484' not in log_db_file and '2021.05.25.14.16.10_veh-35_01690_02183' not in log_db_file and '2021.06.08.14.35.24_veh-26_02555_03004' not in log_db_file and '2021.07.09.20.59.12_veh-38_01208_01692' not in log_db_file and '2021.06.09.12.39.51_veh-26_05620_06003' not in log_db_file and '2021.08.17.16.57.11_veh-08_01200_01636' not in log_db_file and '2021.05.12.22.28.35_veh-35_00620_01164' not in log_db_file and '2021.05.12.23.36.44_veh-35_01133_01535' not in log_db_file and '2021.07.24.23.50.16_veh-17_01696_02071' not in log_db_file and '2021.06.09.17.23.18_veh-38_00773_01140' not in log_db_file and '2021.10.11.02.57.41_veh-50_01522_02088' not in log_db_file and '2021.06.08.16.31.33_veh-38_01589_02072' not in log_db_file and '2021.06.23.16.54.19_veh-35_00808_01256' not in log_db_file and '2021.05.12.22.00.38_veh-35_01008_01518' not in log_db_file and '2021.05.12.23.36.44_veh-35_00152_00504' not in log_db_file and '2021.07.16.00.51.05_veh-17_01352_01901' not in log_db_file and '2021.06.14.18.42.45_veh-12_03445_03902' not in log_db_file and '2021.06.07.12.54.00_veh-35_01843_02314' not in log_db_file and '2021.06.28.16.29.11_veh-38_01415_01821' not in log_db_file and '2021.06.07.18.53.26_veh-26_00005_00427' not in log_db_file and '2021.07.09.17.06.37_veh-35_00258_00748' not in log_db_file and '2021.06.09.11.54.15_veh-12_04366_04810' not in log_db_file and '2021.06.08.12.54.54_veh-26_04262_04732' not in log_db_file and '2021.06.14.16.32.09_veh-35_05038_05402' not in log_db_file and '2021.06.14.19.22.11_veh-38_01480_01860' not in log_db_file and '2021.10.01.19.16.42_veh-28_03307_03808' not in log_db_file and '2021.06.28.16.29.11_veh-38_03263_03766' not in log_db_file and '2021.06.14.17.26.26_veh-38_04544_04920' not in log_db_file and '2021.06.14.18.33.41_veh-35_03901_04264' not in log_db_file and '2021.06.23.17.31.36_veh-16_00016_00377' not in log_db_file and '2021.10.11.08.31.07_veh-50_01750_01948' not in log_db_file and '2021.10.01.19.16.42_veh-28_02011_02410' not in log_db_file and '2021.07.16.18.06.21_veh-38_03231_03712' not in log_db_file and '2021.06.14.16.48.02_veh-12_04057_04438' not in log_db_file and '2021.08.17.17.17.01_veh-45_02314_02798' not in log_db_file and '2021.07.16.18.19.22_veh-35_00440_00858' not in log_db_file and '2021.06.09.14.03.17_veh-12_02584_02970' not in log_db_file and '2021.06.03.13.55.17_veh-35_00073_00426' not in log_db_file and '2021.06.09.17.37.09_veh-12_00404_00864' not in log_db_file and '2021.07.16.20.45.29_veh-35_00600_01084' not in log_db_file and '2021.06.09.17.23.18_veh-38_02526_03027' not in log_db_file and '2021.07.16.18.06.21_veh-38_04933_05307' not in log_db_file:
+            #         break            
+            # log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
+            log_db_file = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/2021.06.09.14.58.55_veh-35_01095_01484.db'
+            log_db_files = [x[0] for x in scenario_type_token_map[scenario_type]]
+            ind = log_db_files.index(log_db_file)
+            token = scenario_type_token_map[scenario_type][ind][1]
 
+            scenario = get_default_scenario_from_token(data_root, log_db_file, token, map_root, map_version)
+            print(f'Log DB FILE NAME: {log_db_file}')
             visualize_scenario(scenario, bokeh_port=bokeh_port)
 
     display(drop_down)
