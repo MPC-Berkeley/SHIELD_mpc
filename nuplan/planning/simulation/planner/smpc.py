@@ -52,8 +52,9 @@ class SMPC():
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
 
         self.tight=TIGHTENING
-        self.ev_n_std=EV_NOISE_STD
-        self.tv_n_std=TV_NOISE_STD
+        self.ev_n_std = EV_NOISE_STD
+
+        self.tv_n_std = [TV_NOISE_STD for _ in range(self.N_TV)]
 
         self.Q = ca.diag(Q)
         self.R = ca.diag(R)
@@ -440,8 +441,25 @@ class SMPC():
 
         return sol_dict
 
-    def update(self, update_dict):
+    def check_update_dict(self,update_dict):
         assert 'preds' in update_dict.keys(), 'Missing Predictions'
+        assert 'x0' in update_dict.keys(), 'Missing EV Initial Condition'
+        assert 'u_prev' in update_dict.keys(), 'Missing EV Previous Control'
+        assert 'z_lin' in update_dict.keys(), 'Missing EV Linearised Predictions'
+        assert 'x_pos' in update_dict.keys(), 'Missing EV Position Predictions'
+        assert 'dpos' in update_dict.keys(), 'Missing EV Process Noise Predictions'
+        assert 'u_tvs' in update_dict.keys(), 'Missing TV Controls'
+        assert 'o_glob' in update_dict.keys(), 'Missing TV Global Position Predictions'
+        assert 'droutes' in update_dict.keys(), 'Missing TV Process Noise Predictions'
+        assert 'Qs' in update_dict.keys(), 'Missing TV Process Noise Covariances'
+
+        if not self.offline:
+            assert 'l1_duals' in update_dict.keys(), 'Missing L1 Duals'
+            assert 'canon_prob' in update_dict.keys(), 'Missing Canonical Problem'
+
+    def update(self, update_dict):
+        self.check_update_dict(update_dict)
+        
         self.preds = update_dict['preds']
         self.N_TV=len(self.preds)
 

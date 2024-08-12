@@ -6,7 +6,7 @@ Functions to edit:
 """
 import numpy as np
 import time
-
+from typing import List
 from torch.autograd import Variable
 from collections.abc import Iterable
 import numpy as np
@@ -15,6 +15,44 @@ import pdb
 import time
 import os
 import copy
+
+def get_preds(preds_list: List):
+    N = 10
+
+    #IDM predictions
+    o_glob = []
+    for pred in preds_list:
+        temp = np.zeros((2,len(pred.waypoints)))
+        for i, wp in enumerate(pred.waypoints):
+            temp[0,i] = wp.x
+            temp[1,i] = wp.y
+        o_glob.append(temp)
+    dpos = 0
+
+    #TODO: update vehicle dimensions to match the ego vehicle (Ioniq5) 
+    veh_dims = np.array([2.9, 1.7]) 
+    S = np.diag(veh_dims**(-1.0))
+    iSev=np.linalg.inv(S)
+    # iSev[-1,-1]+=0.3
+    Sev=np.linalg.inv(iSev)
+
+    Qs = [[np.identity(2) for _ in range(N)] for _ in range(len(preds_list))]
+    u_tvs=[np.zeros((1,N)) for _ in range(len(preds_list))]
+    
+    dx_glob=[ca.DM(2,1) for _ in range(N)]
+    o=[v.traj[:,v.t].reshape((-1,1))+np.zeros((2,self.N+1)) for v in self.vehicles if v!=self.ev]
+    u_tvs=[np.zeros((1,len(pred.waypoints))) for v in self.vehicles if v!=self.ev]
+
+    tv_list=self.tv_idxs
+
+    do_glob = [[ca.DM(2,1) for _ in range(N)] for v in self.vehicles if v!=self.ev]
+    Qs = [[np.identity(2) for _ in range(N)] for v in self.vehicles if v!=self.ev]
+    iSev=np.linalg.inv(ev.S)
+    iSev[-1,-1]+=0.3
+    Sev=np.linalg.inv(iSev)
+
+    
+    return o_glob, dpos
 
 def convert_listofrollouts(paths, concat_rew=True):
     """

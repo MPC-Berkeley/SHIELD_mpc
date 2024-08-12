@@ -13,7 +13,7 @@ from typing import Optional
 import yaml
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.planner.smpc import SMPC
-from nuplan.planning.simulation.planner.smpc_utils import flatten
+from nuplan.planning.simulation.planner.utils.smpc_utils import flatten, get_preds
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +60,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.ev_noise_std = ev_noise_std
         self.tv_noise_std = tv_noise_std
 
+        self.u_prev = 0.0 #initialze previous control input(acceleration) to 0 
 
         self._initialized = False
 
@@ -68,6 +69,30 @@ class SMPCPlanner(AbstractIDMPlanner):
         self._map_api = initialization.map_api
         self._initialize_route_plan(initialization.route_roadblock_ids)
         self._initialized = False
+
+    def get_update_dict(self,current_input: PlannerInput, preds: List) -> dict:
+        import pdb
+        pdb.set_trace()
+
+        ego_state, observations = current_input.history.current_state
+        o_globs, d_pos = get_preds(preds)
+        u_prev = self.u_prev
+
+        z_lin = None
+        s, v = 0. , ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()
+
+        update_dict =   {'preds': preds,
+                        'x0': np.array([s,v]),
+                        'u_prev': u_prev,
+                        'z_lin': z_lin,
+                        'x_pos': np.array([ego_state.center.x, ego_state.center.y]),
+                        'd_pos': d_pos,
+                        'u_tvs': np.array([0.0]),
+                        'o_globs': o_globs,
+                        'droutes': np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                        'Qs': 1.,
+                }
+        return update_dict
 
     def compute_planner_trajectory(self, current_input: PlannerInput, preds: Optional[List]) -> AbstractTrajectory:
         """Inherited, see superclass."""
@@ -106,6 +131,8 @@ class SMPCPlanner(AbstractIDMPlanner):
             self._initialized = True
 
         # Update the SMPC parameters
+        print('GETTING UPDATE DICT...')
+        update_dict = self.get_update_dict(current_input, preds)
         self.smpc.update(update_dict)
         
         # Solve the SMPC
@@ -134,6 +161,9 @@ class SMPCPlanner(AbstractIDMPlanner):
             #TODO: Convert SMPC solution to EgoState
             ego_state = EgoState()
             planned_trajectory.append(ego_state)
+
+        #Update u_prev
+        self.u_prev = sol['u'][0]
         return InterpolatedTrajectory(planned_trajectory)
 
     def _initialize_ego_path(self, ego_state: EgoState) -> None:
