@@ -111,7 +111,7 @@ class SMPCPlanner(IDMPlanner):
         params = {'dt': self.config['dt'], 'N': self.config['N']}
         ego_progress = self._ego_path_linestring.project(Point(*ego_state.center.point.array))
         x0 = np.array([[ego_progress],[ego_state.dynamic_car_state.center_velocity_2d.x]])
-        z_lin, x_glob, dpos, o_glob, u_tvs, routes, droutes, Qs = get_preds(current_input,preds,x0, params,routes,droutes,u_opt=self.u_opt if hasattr(self, 'u_opt') else None)
+        z_lin, x_glob, dpos, o_glob, u_tvs, routes, droutes, Qs = get_preds(current_input,preds,x0, params,routes,droutes,u_opt=self.u_opt if hasattr(self, 'u_opt') else None, ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None)
 
         update_dict =   {'x0': x0,
                         'u_prev': self.u_prev,

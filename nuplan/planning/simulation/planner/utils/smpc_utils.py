@@ -112,7 +112,8 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
         x[:,t+1] = A @ x[:,t] + B @ a
         x_glob[:,[t+1]] = routes[0](x[0,t+1])[:2]
         dx_glob[t] = droutes[0](x[0,t+1])[:2]
-        # psi = ego_traj[t].rear_axle.heading #from prev MPC solution
+        # if ego_traj:
+            # psi = ego_traj[t].rear_axle.heading #from prev MPC solution
         psi = routes[0](x[0,t+1])[2] #from the route function
         # Rev = np.array([[np.cos(ego_psi[t+1]), np.sin(ego_psi[t+1])],[-np.sin(ego_psi[t+1]), np.cos(ego_psi[t+1])]]).squeeze().T
         Rev = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
