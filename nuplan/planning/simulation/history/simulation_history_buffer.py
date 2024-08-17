@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from typing import Deque, List, Optional, Tuple, Type
-
+from nuplan.planning.simulation.observation.idm.idm_agent import IDMAgent
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
 from nuplan.planning.simulation.observation.observation_type import DetectionsTracks, Observation, Sensors
@@ -142,6 +142,7 @@ class SimulationHistoryBuffer:
         ego_states: List[EgoState],
         observations: List[Observation],
         sample_interval: Optional[float] = None,
+        agents: Optional[List[IDMAgent]]=[],
     ) -> SimulationHistoryBuffer:
         """
         Create history buffer from lists

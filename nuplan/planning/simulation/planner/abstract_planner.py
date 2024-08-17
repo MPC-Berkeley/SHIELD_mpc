@@ -14,7 +14,7 @@ from nuplan.planning.simulation.observation.observation_type import Observation
 from nuplan.planning.simulation.planner.planner_report import PlannerReport
 from nuplan.planning.simulation.simulation_time_controller.simulation_iteration import SimulationIteration
 from nuplan.planning.simulation.trajectory.abstract_trajectory import AbstractTrajectory
-
+from nuplan.planning.simulation.observation.idm.idm_agent import IDMAgent
 
 @dataclass(frozen=True)
 class PlannerInitialization:
@@ -36,6 +36,7 @@ class PlannerInput:
     iteration: SimulationIteration  # Iteration and time in a simulation progress
     history: SimulationHistoryBuffer  # Rolling buffer containing past observations and states.
     traffic_light_data: Optional[List[TrafficLightStatusData]] = None  # The traffic light status data
+    agents: Optional[List[IDMAgent]] = None  # The list of IDMagents in the scene (hansung@berkeley.edu)
 
 
 class AbstractPlanner(abc.ABC):
@@ -101,10 +102,10 @@ class AbstractPlanner(abc.ABC):
         """
         start_time = time.perf_counter()
         # If it raises an exception, catch to record the time then re-raise it.
-        obstacles_preds = [agent.predictions[0] for agent in preds.tracked_objects.tracked_objects if agent.predictions]
+        # obstacles_preds = [agent.predictions[0] for agent in preds.tracked_objects.tracked_objects if agent.predictions]
         # print(obstacles_preds[0].trajectory.get_sampled_trajectory())
         try:
-            trajectory = self.compute_planner_trajectory(current_input, obstacles_preds)
+            trajectory = self.compute_planner_trajectory(current_input, preds)
         except Exception as e:
             self._compute_trajectory_runtimes.append(time.perf_counter() - start_time)
             raise e

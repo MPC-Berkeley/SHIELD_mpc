@@ -25,6 +25,7 @@ class Agent(AgentTemporalState, AgentState):
         angular_velocity: Optional[float] = None,
         predictions: Optional[List[PredictedTrajectory]] = None,
         past_trajectory: Optional[PredictedTrajectory] = None,
+        u_tv_L4SMPC: Optional[float] = None,
     ):
         """
         Representation of an Agent in the scene (Vehicles, Pedestrians, Bicyclists and GenericObjects).
@@ -50,6 +51,7 @@ class Agent(AgentTemporalState, AgentState):
             velocity=velocity,
             angular_velocity=angular_velocity,
         )
+        self.u_tv_L4SMPC = u_tv_L4SMPC
 
     @classmethod
     def from_agent_state(cls, agent: AgentState) -> Agent:

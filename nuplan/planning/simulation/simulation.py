@@ -4,7 +4,7 @@ import logging
 from typing import Any, Optional, Tuple, Type, List
 import copy
 import time
-from nuplan.planning.simulation.planner.idm_planner import IDMPlanner
+# from nuplan.planning.simulation.planner.idm_planner import IDMPlanner
 from nuplan.common.actor_state.agent import Agent, PredictedTrajectory
 from nuplan.planning.simulation.observation.observation_type import Observation
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
@@ -69,17 +69,17 @@ class Simulation:
         # Flag that keeps track whether simulation is still running
         self._is_simulation_running = True
 
-        #IDM Planner for predictions
-        self.idm_planner = IDMPlanner(
-            target_velocity=10,
-            min_gap_to_lead_agent=0.5,
-            headway_time=1.5,
-            accel_max=1.0,
-            decel_max=2.0,
-            planned_trajectory_samples=OCP_N,
-            planned_trajectory_sample_interval=0.2,
-            occupancy_map_radius=20,
-        )
+        # #IDM Planner for predictions
+        # self.idm_planner = IDMPlanner(
+        #     target_velocity=10,
+        #     min_gap_to_lead_agent=0.5,
+        #     headway_time=1.5,
+        #     accel_max=1.0,
+        #     decel_max=2.0,
+        #     planned_trajectory_samples=OCP_N,
+        #     planned_trajectory_sample_interval=0.2,
+        #     occupancy_map_radius=20,
+        # )
 
     def __reduce__(self) -> Tuple[Type[Simulation], Tuple[Any, ...]]:
         """
@@ -128,7 +128,7 @@ class Simulation:
         self._observations.initialize()
 
         # Add the current state into the history buffer
-        self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation())
+        self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation()[0])
 
         # Return the planner initialization structure for this simulation
         return PlannerInitialization(
@@ -147,14 +147,14 @@ class Simulation:
 
         if not self.is_simulation_running():
             raise RuntimeError("Simulation is not running, stepping can not be performed!")
-
+ 
         # Extract current state
         iteration = self._time_controller.get_iteration()
 
         # Extract traffic light status data
         traffic_light_data = list(self._scenario.get_traffic_light_status_at_iteration(iteration.index))
         logger.debug(f"Executing {iteration.index}!")
-        return PlannerInput(iteration=iteration, history=self._history_buffer, traffic_light_data=traffic_light_data)
+        return PlannerInput(iteration=iteration, history=self._history_buffer, traffic_light_data=traffic_light_data,agents=self._observations.get_observation()[1])
 
     def propagate(self, trajectory: AbstractTrajectory) -> None:
         """
@@ -191,82 +191,7 @@ class Simulation:
             self._is_simulation_running = False
 
         # Append new state into history buffer
-        self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation())
-
-    def get_idm_predictions(self, num_samples: int) -> List[Observation]:
-        """
-        2024 hansung@berkeley.edu
-        Method for obtaining open-loop predictions of the surrounding agents based on the IDM and traffic lights data. 
-        The ego vehicle is simulated using the IDM planner (i.e. the surrounding vehicles assume the ego vehicle follows an IDM)
-        """
-        st = time.time()
-        #Initialize output
-        obs_arr = []
-
-        if self._history_buffer is None:
-            raise RuntimeError("Simulation was not initialized!")
-
-        if not self.is_simulation_running():
-            raise RuntimeError("Simulation is not running, idm predictions can not be obtained!")
-
-        #Make copies of the class objects needed for predictions/iterated propogation
-        self._time_controller_copy = copy.deepcopy(self._time_controller)
-        self._history_buffer_copy = copy.deepcopy(self._history_buffer)
-        self._history_copy = copy.deepcopy(self._history)
-        self._ego_controller_copy = copy.deepcopy(self._ego_controller)
-        self._observations_copy = copy.deepcopy(self._observations)
-        self._scenario_copy = copy.deepcopy(self._scenario)
-
-        #IDM Planner initialization
-        self.idm_planner.initialize(
-            PlannerInitialization(
-                self._scenario_copy.get_route_roadblock_ids(),
-                self._scenario_copy.get_mission_goal(),
-                self._scenario_copy.map_api,
-            )
-        )
-        
-        for n in range(num_samples):
-            # Measurements
-            iteration = self._time_controller_copy.get_iteration()
-            ego_state, observation = self._history_buffer_copy.current_state
-            traffic_light_status = list(self._scenario_copy.get_traffic_light_status_at_iteration(iteration.index))
-
-            planner_input = PlannerInput(iteration=iteration, history=self._history_buffer, traffic_light_data=traffic_light_status)
-            trajectory = self.idm_planner.compute_trajectory(planner_input)
-
-            self._history_copy.add_sample(
-                SimulationHistorySample(iteration, ego_state, trajectory, observation, traffic_light_status)
-            )
-
-            # Propagate state to next iteration
-            next_iteration = self._time_controller_copy.next_iteration()
-
-            # Propagate state
-            if next_iteration:
-                self._ego_controller_copy.update_state(iteration, next_iteration, ego_state, trajectory) #Use perfect tracking controller
-                self._observations_copy.update_observation(iteration, next_iteration, self._history_buffer_copy)
-            else:
-                self._is_simulation_running_copy = False
-
-            # Append new state into history buffer
-            self._history_buffer_copy.append(self._ego_controller_copy.get_state(), self._observations_copy.get_observation())
-
-            #Append to Predicted_Trajectory:
-            obs_arr.append(self._observations_copy.get_observation())
-            # for agent in obs.tracked_objects.get_agents():
-            #     if agent.predictions:
-            #         agent.predictions.append(PredictedTrajectory())
-            #     else:
-            #         agent.predictions = PredictedTrajectory()
-
-            # if n == 0:
-            #     pred_traj = List[PredictedTrajectory]
-            # else:
-            #     pred_traj.append(List[PredictedTrajectory])
-        t = time.time() - st
-        print(f'Pred IDM query took {t} seconds')
-        return obs_arr
+        self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation()[0])
     
     @property
     def scenario(self) -> AbstractScenario:

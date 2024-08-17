@@ -142,10 +142,12 @@ class IDMPolicy:
 
         x_dot, v_agent_dot = self.idm_model([], agent.to_array(), lead_agent.to_array(), params)
 
+        u_tv = min(max(-self._decel_max, v_agent_dot), self._accel_max)
+
         return IDMAgentState(
             agent.progress + sampling_time * x_dot,
             agent.velocity + sampling_time * min(max(-self._decel_max, v_agent_dot), self._accel_max),
-        )
+        ), u_tv
 
     def solve_odeint_idm_policy(
         self, agent: IDMAgentState, lead_agent: IDMLeadAgentState, sampling_time: float, solve_points: int = 10

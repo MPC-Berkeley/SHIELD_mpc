@@ -237,7 +237,7 @@ class AbstractIDMPlanner(AbstractPlanner, ABC):
         :param tspan: [s] The interval of time to propagate for.
         """
         # TODO: Set target velocity to speed limit
-        solution = self._policy.solve_forward_euler_idm_policy(IDMAgentState(0, ego.velocity), lead_agent, tspan)
+        solution, u_tv = self._policy.solve_forward_euler_idm_policy(IDMAgentState(0, ego.velocity), lead_agent, tspan)
         ego.progress += solution.progress
         ego.velocity = max(solution.velocity, 0)
 

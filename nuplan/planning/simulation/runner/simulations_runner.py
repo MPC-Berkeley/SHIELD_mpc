@@ -110,7 +110,10 @@ class SimulationRunner(AbstractRunner):
             self._simulation.callback.on_planner_start(self.simulation.setup, self.planner)
 
             #Get IDM predictions for planner
-            preds = self.simulation._observations.get_observation()
+            time_controller_copy = copy.deepcopy(self.simulation._time_controller)
+            preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
+
+            # preds = self.simulation._observations.get_observation()[0]
 
             # Plan path based on all planner's inputs
             trajectory = self.planner.compute_trajectory(planner_input,preds)

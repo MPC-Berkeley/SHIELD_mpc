@@ -1,7 +1,8 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Type
 import copy
-
+from nuplan.common.actor_state.ego_state import EgoState
+from nuplan.planning.simulation.observation.idm.idm_agent import IDMAgent
 from nuplan.common.actor_state.tracked_objects import TrackedObject
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 from nuplan.common.maps.maps_datatypes import TrafficLightStatusType
@@ -118,7 +119,7 @@ class IDMAgents(AbstractObservation):
         if self._open_loop_detections_types:
             open_loop_detections = self._get_open_loop_track_objects(self.current_iteration)
             detections.tracked_objects.tracked_objects.extend(open_loop_detections)
-        return detections
+        return detections, self._get_idm_agent_manager().agents
 
     def update_observation(
         self, iteration: SimulationIteration, next_iteration: SimulationIteration, history: SimulationHistoryBuffer
@@ -152,3 +153,42 @@ class IDMAgents(AbstractObservation):
         """
         detections = self._scenario.get_tracked_objects_at_iteration(iteration)
         return detections.tracked_objects.get_tracked_objects_of_types(self._open_loop_detections_types)  # type: ignore   
+
+    def get_idm_predictions(self, iteration: SimulationIteration, next_iteration: SimulationIteration, x_ego: List[EgoState], history: SimulationHistoryBuffer, num_samples: int) -> List[IDMAgent]:
+        """
+        2024 hansung@berkeley.edu
+        Method for obtaining open-loop predictions of the surrounding agents based on the IDM and traffic lights data. 
+        The ego vehicle is simulated using the IDM planner (i.e. the surrounding vehicles assume the ego vehicle follows an IDM)
+        """
+        import time
+        st = time.time()
+        idm_agent_manager_copy = copy.deepcopy(self._get_idm_agent_manager())
+
+        self.current_iteration = next_iteration.index
+        tspan = next_iteration.time_s - iteration.time_s
+        traffic_light_data = self._scenario.get_traffic_light_status_at_iteration(self.current_iteration)
+
+        # Extract traffic light data into Dict[traffic_light_status, lane_connector_ids]
+        traffic_light_status: Dict[TrafficLightStatusType, List[str]] = defaultdict(list)
+
+        for data in traffic_light_data:
+            traffic_light_status[data.status].append(str(data.lane_connector_id))
+
+        # ego_state, _ = history.current_state
+        
+        preds = [idm_agent_manager_copy.get_active_agents(self.current_iteration,pred_mode=True)] #initial_state
+        for t in range(num_samples):
+            idm_agent_manager_copy.propagate_agents(
+                x_ego[t],
+                tspan,
+                self.current_iteration,
+                traffic_light_status,
+                self._get_open_loop_track_objects(self.current_iteration),
+                self._radius,
+            )
+        
+            #Get the agents at the current time
+            preds.append(idm_agent_manager_copy.get_active_agents(self.current_iteration,pred_mode=True))
+            #Assumes the traffic light status is fixed within the prediction horizon
+        assert len(preds) == num_samples+1
+        return preds

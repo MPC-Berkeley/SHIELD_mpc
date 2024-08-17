@@ -68,6 +68,7 @@ class IDMAgent:
         self._requires_state_update: bool = True
         self._full_agent_state: Optional[Agent] = None
         self._prediction_computation: bool = False
+        self._u_prev = 0.
 
     def propagate(self, lead_agent: IDMLeadAgentState, tspan: float) -> None:
         """
@@ -80,7 +81,7 @@ class IDMAgent:
         if speed_limit is not None and speed_limit > 0.0:
             self._policy.target_velocity = speed_limit
 
-        solution = self._policy.solve_forward_euler_idm_policy(
+        solution, u_tv = self._policy.solve_forward_euler_idm_policy(
             IDMAgentState(0, self._state.velocity), lead_agent, tspan
         )
         self._state.progress += solution.progress
@@ -88,6 +89,7 @@ class IDMAgent:
 
         # A caching flag to trigger re-computation of self.agent
         self._requires_state_update = True
+        self._u_prev = u_tv
 
     @property
     def agent(self) -> Agent:
@@ -273,6 +275,7 @@ class IDMAgent:
                 velocity=self._velocity_to_global_frame(init_pose.heading),
                 tracked_object_type=self._initial_state.tracked_object_type,
                 predictions=[future_trajectory] if future_trajectory is not None else [],
+                u_tv_L4SMPC=None
             )
 
         else:
