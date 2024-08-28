@@ -99,6 +99,7 @@ class SMPCPlanner(IDMPlanner):
     def get_update_dict(self,current_input: PlannerInput, preds: List) -> dict:
         ego_state, observations = current_input.history.current_state
 
+        # Ego route and droute
         s_arr = [point.progress for point in self._ego_path._path]
         x_arr = [point.x for point in self._ego_path._path]
         y_arr = [point.y for point in self._ego_path._path]

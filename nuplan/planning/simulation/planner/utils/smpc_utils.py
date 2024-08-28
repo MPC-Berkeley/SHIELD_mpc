@@ -60,6 +60,7 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
                 agent_paths.append(agent._path)
                 tv_lengths.append(agent.length)
                 tv_widths.append(agent.width)
+                assert agent.length > 0 and agent.width > 0, 'TV length and width must be greater than 0'
 
     #Convert InterpolatedPath to casadi functions (routes and droutes)
     #TODO: Q for Sid: casadi function v needed? 
@@ -70,6 +71,10 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
         psi_arr = [point.heading for point in path._path]
         # v_arr = [point.v for point in agent._path]
         v_arr = [0 for _ in path._path]
+        test_s = np.array(s_arr)
+        if not np.all((test_s[1:] - test_s[:-1]) > 0):
+            print('s_arr not increasing')
+            pdb.set_trace()
         routes.append(make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr))
         droutes.append(make_jac_fun(routes[-1]))
 
@@ -89,6 +94,7 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     do_glob = [[ca.DM(2,1) for _ in range(params['N'])] for _ in range(len(preds_list[0]))]
     x_glob = routes[0](x[0,0])[:2].reshape((-1,1))+np.zeros((2, params['N']+1))
     dx_glob=[ca.DM(2,1) for _ in range(params['N'])]
+
     #Ego vehicle, TV linearized dynamics
     A = np.array([[1., params['dt']],[0. , 1.]])
     B = np.array([[0.5*params['dt']**2],[params['dt']]])
@@ -112,12 +118,13 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
         x[:,t+1] = A @ x[:,t] + B @ a
         x_glob[:,[t+1]] = routes[0](x[0,t+1])[:2]
         dx_glob[t] = droutes[0](x[0,t+1])[:2]
+        # pdb.set_trace()
         # if ego_traj:
             # psi = ego_traj[t].rear_axle.heading #from prev MPC solution
         psi = routes[0](x[0,t+1])[2] #from the route function
         # Rev = np.array([[np.cos(ego_psi[t+1]), np.sin(ego_psi[t+1])],[-np.sin(ego_psi[t+1]), np.cos(ego_psi[t+1])]]).squeeze().T
         Rev = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
-   
+
         for i in range(len(preds_list[0])): #iterate through all surrounding vehicles
             for t in range(params['N']):
                 o[i][:,t+1] = A @ o[i][:,t] + B @ u_tvs[i][:,t]
@@ -127,7 +134,8 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
                 Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
                 # Rtv = np.array([[np.cos(tv_psi[i][:,t+1]), np.sin(tv_psi[i][:,t+1])],[-np.sin(tv_psi[i][:,t+1]), np.cos(tv_psi[i][:,t+1])]]).squeeze().T
                 
-                Stv = np.diag([tv_lengths[i], tv_widths[i]])**(-1.0) 
+                Stv_ = np.diag([tv_lengths[i], tv_widths[i]])
+                Stv = np.linalg.inv(Stv_)
                 mat=Rev@iSev@Rtv.T@Stv@Stv@Rtv@iSev@Rev.T 
                 E, V =np.linalg.eigh(mat)
                 S=np.diag((E**(-0.5)+1.0)**(-2))
