@@ -86,10 +86,13 @@ class SMPCPlanner(IDMPlanner):
             ego_traj = []
             ego_progress = self._ego_path_linestring.project(Point(*ego_state0.center.point.array))
             s, v = ego_progress, ego_state0.dynamic_car_state.center_velocity_2d.magnitude()    
-            for t in range(self.config['N']):     
-                if t > 0:
+            for t in range(self.config['N']+1):     
+                if self.config['N']> t > 0:
                     s += self.config['dt']*v + 0.5*self.config['dt']**2*a_arr[t]
                     v += self.config['dt']*a_arr[t]
+                elif t == self.config['N']:
+                    s += self.config['dt']*v + 0.5*self.config['dt']**2*a_arr[-1]
+                    v += self.config['dt']*a_arr[-1]
                 ego_idm_state = IDMAgentState(progress=s, velocity=v)
                 ego_state = self._idm_state_to_ego_state(ego_idm_state, ego_state0.time_point, ego_state0.car_footprint.vehicle_parameters)
                 ego_traj.append(ego_state)
@@ -113,16 +116,18 @@ class SMPCPlanner(IDMPlanner):
         ego_progress = self._ego_path_linestring.project(Point(*ego_state.center.point.array))
         x0 = np.array([[ego_progress],[ego_state.dynamic_car_state.center_velocity_2d.x]])
         z_lin, x_glob, dpos, o_glob, u_tvs, routes, droutes, Qs = get_preds(current_input,preds,x0, params,routes,droutes,u_opt=self.u_opt if hasattr(self, 'u_opt') else None, ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None)
-
+        
         update_dict =   {'x0': x0,
+                         'o0': [np.array([agent.progress,agent.velocity]) for i,agent  in enumerate(preds[0])],
                         'u_prev': self.u_prev,
                         'z_lin': z_lin,
                         'x_pos': x_glob,
-                        'd_pos': dpos,
+                        'dpos': dpos,
                         'u_tvs': u_tvs,
-                        'o_globs': o_glob,
+                        'o_glob': o_glob,
                         'droutes': droutes,
                         'routes': routes,
+                        'preds': preds,
                         'Qs': Qs,
                 }
         return update_dict
@@ -165,8 +170,8 @@ class SMPCPlanner(IDMPlanner):
         # Update the SMPC parameters
         print('GETTING UPDATE DICT...')
         update_dict = self.get_update_dict(current_input, preds)
-        pdb.set_trace()
-        print(update_dict)
+        # pdb.set_trace()
+        print(update_dict['x0'])
         self.smpc.update(update_dict)
         
         # Solve the SMPC
@@ -191,16 +196,17 @@ class SMPCPlanner(IDMPlanner):
 
 
         #Update u_prev
-        self.u_prev = sol['u'][0]
-        self.u_opt = sol['u']
+        self.u_prev = sol['u_control'] #scalar
+        self.u_opt = sol['u_opt'] #size N-1
+
         #Convert smpc solution to NuPlan Trajectory
-        self._sol2ego_state(sol['x'],ego_state)
+        self._sol2ego_state(sol['nom_z'],ego_state)
 
         return InterpolatedTrajectory(self.ego_traj) #self.ego_traj is a list of EgoState
 
     def _sol2ego_state(self, sol,ego_state0):
         ego_traj = []
-        for t in range(self.config['N']):     
+        for t in range(self.config['N']+1):     
             ego_idm_state = IDMAgentState(progress=sol[0,t], velocity=sol[1,t])
             ego_state = self._idm_state_to_ego_state(ego_idm_state, ego_state0.time_point, ego_state0.car_footprint.vehicle_parameters)
             ego_traj.append(ego_state)

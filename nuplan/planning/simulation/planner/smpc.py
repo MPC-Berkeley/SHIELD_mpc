@@ -46,7 +46,7 @@ class SMPC():
 
         self.preds = preds
         self.N_TV=len(preds)
-        self.N_modes=[1 for _ in range(self.N_TV)] #Single mode per vehicles
+        self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles
 
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3)
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
@@ -281,6 +281,7 @@ class SMPC():
 
         
         nom_z=A@self.z_curr+B@h
+        self.nom_z = nom_z
         nom_s=ca.vec(nom_z.reshape((2,-1))[0,:])
         nom_z_diff=ca.vec(ca.diff(nom_z.reshape((2,-1)),1,1))
 
@@ -388,9 +389,11 @@ class SMPC():
             # Collect Optimal solution.
             u_control  = sol.value(self.policy[0][0])
             h_opt      = sol.value(self.policy[0]).squeeze()
+            u_opt      = sol.value(self.policy[0]).reshape((1,-1))
             M_opt      = sol.value(self.policy[1])
             K_opt      = [[sol.value(self.policy[2][k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
             nom_z_tv   = [[sol.value(self.nom_z_tv[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
+            nom_z      = sol.value(self.nom_z).reshape((2,-1))
 
             if self.offline and not first_solve:
                 self.vars_ws , self.vars_epi_ws = sol.value(self.vars_pol), sol.value(self.vars_epi)
@@ -407,10 +410,14 @@ class SMPC():
             infeas_status = ['Infeasible_Problem_Detected'] if self.solver=="ipopt" else ["INF_OR_UNBD"]
             if self.opti.stats()['return_status'] not in infeas_status:
               # Suboptimal solution (e.g. timed out)
-                u_control=self.opti.debug.value(self.policy[0][0])
+                u_control=self.opti.debug.value(self.policy[0][0])    
+                u_opt = self.opti.debug.value(self.policy[0]).reshape((1,-1))
+                nom_z = self.opti.debug.value(self.nom_z).reshape((2,-1))
             else:
                 u_control  = self.u_backup
-            
+                u_opt = np.array([self.u_backup]*(self.N-1)).reshape((1,-1))
+                nom_z = np.array([self.A**t @ self.x0 for t in range(self.N)]) # 0 acceleration and constant speed prediction.
+
             is_opt = False
 
         t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
@@ -419,7 +426,9 @@ class SMPC():
         solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum
         
         sol_dict = {}
+        sol_dict['nom_z']      = nom_z      # nominal state predictions
         sol_dict['u_control']  = u_control  # control input to apply based on solution
+        sol_dict['u_opt']      = u_opt      # optimal control sequence
         sol_dict['optimal']    = is_opt      # whether the solution is optimal or not
         if is_opt:
                 sol_dict['h_opt']=h_opt
@@ -442,8 +451,8 @@ class SMPC():
         return sol_dict
 
     def check_update_dict(self,update_dict):
-        assert 'preds' in update_dict.keys(), 'Missing Predictions'
         assert 'x0' in update_dict.keys(), 'Missing EV Initial Condition'
+        assert 'preds' in update_dict.keys(), 'Missing TV Predictions'
         assert 'u_prev' in update_dict.keys(), 'Missing EV Previous Control'
         assert 'z_lin' in update_dict.keys(), 'Missing EV Linearised Predictions'
         assert 'x_pos' in update_dict.keys(), 'Missing EV Position Predictions'
@@ -452,6 +461,7 @@ class SMPC():
         assert 'o_glob' in update_dict.keys(), 'Missing TV Global Position Predictions'
         assert 'droutes' in update_dict.keys(), 'Missing TV Process Noise Predictions'
         assert 'Qs' in update_dict.keys(), 'Missing TV Process Noise Covariances'
+        assert 'o0' in update_dict.keys(), 'Missing TV Initial Condition'
 
         if not self.offline:
             assert 'l1_duals' in update_dict.keys(), 'Missing L1 Duals'
@@ -485,6 +495,7 @@ class SMPC():
             self.opti.set_initial(self.vars_epi,self.vars_epi_ws)
 
     def _update_ev_initial_condition(self, x0, u_prev):
+        self.x0 = x0
         self.opti.set_value(self.z_curr, x0)
         self.opti.set_value(self.u_prev, u_prev)
 
@@ -504,12 +515,12 @@ class SMPC():
     def _update_tv_preds(self, u_tvs, pos_tvs, dpos_tvs, Qs):
 
         for k in range(self.N_TV):
-            for j in range(self.N_modes[k]):
-                self.opti.set_value(self.pos_tvs[k][j], pos_tvs[k][j])
-                self.opti.set_value(self.u_tvs[k][j], u_tvs[k][j].reshape((-1,1)))
+            for m in range(self.N_modes[k]):
+                self.opti.set_value(self.pos_tvs[k][m], pos_tvs[k][m])
+                self.opti.set_value(self.u_tvs[k][m], u_tvs[k][m].reshape((-1,1)))
                 for  t in range(self.N):
-                    self.opti.set_value(self.dpos_tvs[k][j][t],dpos_tvs[k][j][t])
-                    self.opti.set_value(self.Qs[k][j][t],Qs[k][j][t])
+                    self.opti.set_value(self.dpos_tvs[k][m][t],dpos_tvs[k][m][t])
+                    self.opti.set_value(self.Qs[k][m][t],Qs[k][m][t])
 
 
     def _set_canon_form_mats(self, canon_prob):
@@ -557,7 +568,6 @@ class SMPC():
             b = [-c - C x inv(Q) x (L'x lmbd*1  - p) 
                  -f + F x inv(Q) x (L'x lmbd*1  - p)
                  0  + L x inv(Q) X (L'x lmbd*1 -  p)]
-
 
             M x = r sets predicted dual values       
 

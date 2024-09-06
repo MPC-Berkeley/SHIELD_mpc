@@ -63,7 +63,6 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
                 assert agent.length > 0 and agent.width > 0, 'TV length and width must be greater than 0'
 
     #Convert InterpolatedPath to casadi functions (routes and droutes)
-    #TODO: Q for Sid: casadi function v needed? 
     for path in agent_paths:
         s_arr = [point.progress for point in path._path]
         x_arr = [point.x for point in path._path]
@@ -119,9 +118,10 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
         x_glob[:,[t+1]] = routes[0](x[0,t+1])[:2]
         dx_glob[t] = droutes[0](x[0,t+1])[:2]
         # pdb.set_trace()
-        # if ego_traj:
-            # psi = ego_traj[t].rear_axle.heading #from prev MPC solution
-        psi = routes[0](x[0,t+1])[2] #from the route function
+        if ego_traj:
+            psi = ego_traj[min(t+1,len(ego_traj)-1)].rear_axle.heading #from prev MPC solution
+        else:
+            psi = routes[0](x[0,t+1])[2] #from the route function
         # Rev = np.array([[np.cos(ego_psi[t+1]), np.sin(ego_psi[t+1])],[-np.sin(ego_psi[t+1]), np.cos(ego_psi[t+1])]]).squeeze().T
         Rev = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
 
@@ -131,9 +131,11 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
                 o_glob[i][:,[t+1]] = routes[i+1](o[i][0,t+1])[:2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
                 do_glob[i][t] = droutes[i+1](o[i][0,t+1])[:2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
                 psi = routes[i+1](o[i][0,t+1])[2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
-                Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
-                # Rtv = np.array([[np.cos(tv_psi[i][:,t+1]), np.sin(tv_psi[i][:,t+1])],[-np.sin(tv_psi[i][:,t+1]), np.cos(tv_psi[i][:,t+1])]]).squeeze().T
                 
+                if tv_psi[i] is not None:
+                    Rtv = np.array([[np.cos(tv_psi[i][:,t+1]), np.sin(tv_psi[i][:,t+1])],[-np.sin(tv_psi[i][:,t+1]), np.cos(tv_psi[i][:,t+1])]]).squeeze().T
+                else:
+                    Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
                 Stv_ = np.diag([tv_lengths[i], tv_widths[i]])
                 Stv = np.linalg.inv(Stv_)
                 mat=Rev@iSev@Rtv.T@Stv@Stv@Rtv@iSev@Rev.T 
@@ -141,7 +143,14 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
                 S=np.diag((E**(-0.5)+1.0)**(-2))
                 Qs[i][t]=Sev@Rev.T@V@S@V.T@Rev@Sev if t <=4 else (1/5**2)*np.eye(2) 
 
-    return x, x_glob, dx_glob, o_glob, u_tvs, routes, do_glob, Qs 
+    #For extension to multi-modal prediction. Here we assume only one mode per TV
+    mm_o_glob = [[o_glob[i]] for i in range(len(preds_list[0]))]
+    mm_u_tvs = [[u_tvs[i]] for i in range(len(preds_list[0]))]
+    mm_routes = [[routes[i+1]] for i in range(len(preds_list[0]))]
+    mm_do_glob = [[do_glob[i]] for i in range(len(preds_list[0]))]
+    mm_Qs = [[Qs[i]] for i in range(len(preds_list[0]))]
+
+    return x, x_glob, dx_glob, mm_o_glob, mm_u_tvs, mm_routes, mm_do_glob, mm_Qs 
 
 def convert_listofrollouts(paths, concat_rew=True):
     """
