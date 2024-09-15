@@ -31,8 +31,7 @@ def make_ca_fun(s, x, y, psi, v):
 def make_jac_fun(pos_fun):
     s_sym=ca.MX.sym("s",1)
     pos_jac=ca.jacobian(pos_fun(s_sym), s_sym)
-    return ca.Function("pos_jac",[s_sym], [pos_jac])
-            
+    return ca.Function("pos_jac",[s_sym], [pos_jac])      
 
 def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, droutes, u_opt = None, ego_traj = None):
     '''
@@ -42,10 +41,10 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     ego_state, observations = current_input.history.current_state
     
     #Convert IDM predictions to global coordinates
-    o_glob = [np.zeros((2,params['N']+1)) for _ in range(len(preds_list[0]))]
-    o = [np.zeros((2,params['N']+1)) for _ in range(len(preds_list[0]))]
-    tv_psi = [np.zeros((1,params['N']+1)) for _ in range(len(preds_list[0]))]
-    u_tvs=[np.zeros((1,params['N'])) for _ in range(len(preds_list[0]))]
+    o_glob = [np.zeros((2,params['N']+1)) for _ in range(params['N_TV'])]
+    o = [np.zeros((2,params['N']+1)) for _ in range(params['N_TV'])]
+    tv_psi = [np.zeros((1,params['N']+1)) for _ in range(params['N_TV'])]
+    u_tvs=[np.zeros((1,params['N'])) for _ in range(params['N_TV'])]
     tv_lengths = []
     tv_widths = []
     agent_paths = []
@@ -55,7 +54,7 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
             o[j][:,t] = np.array([agent.progress,agent.velocity]) #s,v
             tv_psi[j][:,t] = agent.to_se2().heading
             if t < params['N']:
-                u_tvs[j][:,t] = agent._u_prev
+                u_tvs[j][:,t] = preds_list[t+1][j]._u_prev
             if t == 0:
                 agent_paths.append(agent._path)
                 tv_lengths.append(agent.length)
@@ -64,12 +63,11 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
 
     #Convert InterpolatedPath to casadi functions (routes and droutes)
     for path in agent_paths:
-        s_arr = [point.progress for point in path._path]
-        x_arr = [point.x for point in path._path]
-        y_arr = [point.y for point in path._path]
-        psi_arr = [point.heading for point in path._path]
-        # v_arr = [point.v for point in agent._path]
-        v_arr = [0 for _ in path._path]
+        s_arr = [point.progress for point in path.get_sampled_path()]
+        x_arr = [point.x for point in path.get_sampled_path()]
+        y_arr = [point.y for point in path.get_sampled_path()]
+        psi_arr = [point.heading for point in path.get_sampled_path()]
+        v_arr = [0 for _ in path.get_sampled_path()]
         test_s = np.array(s_arr)
         if not np.all((test_s[1:] - test_s[:-1]) > 0):
             print('s_arr not increasing')
@@ -79,18 +77,20 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
 
     #Alternatively, we can acquire linearized prediction of the agents using u_tvs and routes
     o0 = []
-    for agent in current_input.agents.values():
+    for agent in preds_list[0]:
+    # for agent in current_input.agents.values():
         o0.append(np.array([[agent.progress],[agent.velocity]]))
 
     #Ego trajectory
     x = x0 + np.zeros((2,params['N']+1))
 
     #TV trajectory
-    o=[o0[i] + np.zeros((2,params['N']+1)) for i in range(len(preds_list[0]))]
+    o=[o0[i] + np.zeros((2,params['N']+1)) for i in range(params['N_TV'])]
+    o_glob = [routes[i+1](o0[i][0,:])[:2].reshape((-1,1)) + np.zeros((2,params['N']+1)) for i in range(params['N_TV'])]
 
     #Initialize parametsr
-    Qs = [[np.identity(2) for _ in range(params['N'])] for _ in range(len(preds_list[0]))]
-    do_glob = [[ca.DM(2,1) for _ in range(params['N'])] for _ in range(len(preds_list[0]))]
+    Qs = [[np.identity(2) for _ in range(params['N'])] for _ in range(params['N_TV'])]
+    do_glob = [[ca.DM(2,1) for _ in range(params['N'])] for _ in range(params['N_TV'])]
     x_glob = routes[0](x[0,0])[:2].reshape((-1,1))+np.zeros((2, params['N']+1))
     dx_glob=[ca.DM(2,1) for _ in range(params['N'])]
 
@@ -104,38 +104,39 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     iSev  = np.linalg.inv(Sev)
     iSev[-1,-1]+=0.3
     Sev=np.linalg.inv(iSev)
-
+    
     for t in range(params['N']):
         if u_opt is None:
-            #TODO: Implement IDM control or other heuristics rule when u_opt is None
-            # if x0[1] > 0:
-            #     u_opt = np.zeros((1,params['N']))
-            # else:
+            print('USING ZERO CONTROL')
             u_opt = np.zeros((1,params['N']))
 
         a = u_opt[:,t]
+        # if ego_traj:
+        #     x[:,t+1] = A @ x[:,t] + B @ a
+        #     x_glob[:,t+1] = np.array([ego_traj[min(t+1,len(ego_traj)-1)].center.x, ego_traj[min(t+1,len(ego_traj)-1)].center.y])
+        #     dx_glob[t] = droutes[0](x[0,t+1])[:2]
+        # else:
         x[:,t+1] = A @ x[:,t] + B @ a
-        x_glob[:,[t+1]] = routes[0](x[0,t+1])[:2]
+        x_glob[:,t+1] = routes[0](x[0,t+1])[:2]
         dx_glob[t] = droutes[0](x[0,t+1])[:2]
-        # pdb.set_trace()
-        if ego_traj:
-            psi = ego_traj[min(t+1,len(ego_traj)-1)].rear_axle.heading #from prev MPC solution
-        else:
-            psi = routes[0](x[0,t+1])[2] #from the route function
-        # Rev = np.array([[np.cos(ego_psi[t+1]), np.sin(ego_psi[t+1])],[-np.sin(ego_psi[t+1]), np.cos(ego_psi[t+1])]]).squeeze().T
+
+        # if ego_traj:
+        #     psi = ego_traj[min(t+1,len(ego_traj)-1)].rear_axle.heading #from prev MPC solution
+        # else:
+        psi = routes[0](x[0,t+1])[2] #from the route function
         Rev = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
 
-        for i in range(len(preds_list[0])): #iterate through all surrounding vehicles
+        for i in range(params['N_TV']): #iterate through all surrounding vehicles
             for t in range(params['N']):
                 o[i][:,t+1] = A @ o[i][:,t] + B @ u_tvs[i][:,t]
-                o_glob[i][:,[t+1]] = routes[i+1](o[i][0,t+1])[:2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
+                o_glob[i][:,t+1] = routes[i+1](o[i][0,t+1])[:2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
                 do_glob[i][t] = droutes[i+1](o[i][0,t+1])[:2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
                 psi = routes[i+1](o[i][0,t+1])[2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
                 
-                if tv_psi[i] is not None:
-                    Rtv = np.array([[np.cos(tv_psi[i][:,t+1]), np.sin(tv_psi[i][:,t+1])],[-np.sin(tv_psi[i][:,t+1]), np.cos(tv_psi[i][:,t+1])]]).squeeze().T
-                else:
-                    Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
+                # if tv_psi[i] is not None:
+                # Rtv = np.array([[np.cos(tv_psi[i][:,t+1]), np.sin(tv_psi[i][:,t+1])],[-np.sin(tv_psi[i][:,t+1]), np.cos(tv_psi[i][:,t+1])]]).squeeze().T
+                # else:
+                Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
                 Stv_ = np.diag([tv_lengths[i], tv_widths[i]])
                 Stv = np.linalg.inv(Stv_)
                 mat=Rev@iSev@Rtv.T@Stv@Stv@Rtv@iSev@Rev.T 
@@ -144,13 +145,26 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
                 Qs[i][t]=Sev@Rev.T@V@S@V.T@Rev@Sev if t <=4 else (1/5**2)*np.eye(2) 
 
     #For extension to multi-modal prediction. Here we assume only one mode per TV
-    mm_o_glob = [[o_glob[i]] for i in range(len(preds_list[0]))]
-    mm_u_tvs = [[u_tvs[i]] for i in range(len(preds_list[0]))]
-    mm_routes = [[routes[i+1]] for i in range(len(preds_list[0]))]
-    mm_do_glob = [[do_glob[i]] for i in range(len(preds_list[0]))]
-    mm_Qs = [[Qs[i]] for i in range(len(preds_list[0]))]
+    mm_o_glob = [[o_glob[i]] for i in range(params['N_TV'])]
+    mm_u_tvs = [[u_tvs[i]] for i in range(params['N_TV'])]
+    mm_routes = [[routes[i+1]] for i in range(params['N_TV'])]
+    mm_do_glob = [[do_glob[i]] for i in range(params['N_TV'])]
+    mm_Qs = [[Qs[i]] for i in range(params['N_TV'])]
 
     return x, x_glob, dx_glob, mm_o_glob, mm_u_tvs, mm_routes, mm_do_glob, mm_Qs 
+
+def filter_preds(preds_list: List[IDMAgent], n: int, ego_state) -> List[IDMAgent]:
+    '''
+    Choose n agents from the list of predictions based on distance from ego_state
+    '''
+    x,y = ego_state.center.x, ego_state.center.y
+
+    #Sort agents based on distance from ego
+    dists = [np.sqrt((agent.to_se2().x-x)**2 + (agent.to_se2().y-y)**2) for agent in preds_list[0]] #distance from ego at current time
+    sorted_inds = np.argsort(dists)   
+    preds_list = [[*map(pred.__getitem__, sorted_inds[:n])] for pred in preds_list] #Choose n closest agents
+
+    return preds_list
 
 def convert_listofrollouts(paths, concat_rew=True):
     """

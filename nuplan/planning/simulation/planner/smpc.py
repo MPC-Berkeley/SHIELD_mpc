@@ -44,8 +44,8 @@ class SMPC():
         self.A_MAX=A_MAX
         self.A_MIN=A_MIN
 
-        self.preds = preds
-        self.N_TV=len(preds)
+        self.preds = preds #Predictions of the vehicles List[List[IDMAgent]]. Outer list is of length N+1 and inner list is of length N_TV
+        self.N_TV=len(preds[0])
         self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles
 
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3)
@@ -384,7 +384,7 @@ class SMPC():
             self.d         = self.f_cost(ca.DM(*self.vars_pol.shape),ca.DM(*self.vars_epi.shape),self.params)
 
     def solve(self,first_solve=False):
-        try:            
+        try:       
             sol = self.opti.solve()
             # Collect Optimal solution.
             u_control  = sol.value(self.policy[0][0])
@@ -393,7 +393,7 @@ class SMPC():
             M_opt      = sol.value(self.policy[1])
             K_opt      = [[sol.value(self.policy[2][k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
             nom_z_tv   = [[sol.value(self.nom_z_tv[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
-            nom_z      = sol.value(self.nom_z).reshape((2,-1))
+            nom_z      = sol.value(self.nom_z).reshape(-1,2).T
 
             if self.offline and not first_solve:
                 self.vars_ws , self.vars_epi_ws = sol.value(self.vars_pol), sol.value(self.vars_epi)
@@ -404,6 +404,7 @@ class SMPC():
         
             is_opt     = True
         except:
+            # self.opti.debug.show_infeasibilities()
             if self.offline:
                 self.vars_ws , self.vars_epi_ws = None, None  
 
@@ -412,11 +413,11 @@ class SMPC():
               # Suboptimal solution (e.g. timed out)
                 u_control=self.opti.debug.value(self.policy[0][0])    
                 u_opt = self.opti.debug.value(self.policy[0]).reshape((1,-1))
-                nom_z = self.opti.debug.value(self.nom_z).reshape((2,-1))
+                nom_z = self.opti.debug.value(self.nom_z).reshape((-1,2)).T
             else:
                 u_control  = self.u_backup
                 u_opt = np.array([self.u_backup]*(self.N-1)).reshape((1,-1))
-                nom_z = np.array([self.A**t @ self.x0 for t in range(self.N)]) # 0 acceleration and constant speed prediction.
+                nom_z = np.hstack([self.A**t @ self.x0 if t>0 else self.x0 for t in range(self.N+1)]) # 0 acceleration and constant speed prediction.
 
             is_opt = False
 
@@ -469,9 +470,6 @@ class SMPC():
 
     def update(self, update_dict):
         self.check_update_dict(update_dict)
-        
-        self.preds = update_dict['preds']
-        self.N_TV=len(self.preds)
 
         self._update_ev_initial_condition(*[update_dict[key] for key in ['x0', 'u_prev']] )
         self._update_tv_initial_condition(*[update_dict[key] for key in ['o0']] )
@@ -506,14 +504,12 @@ class SMPC():
             self.opti.set_value(self.z_tv_curr[k], x_tv0[k])
 
     def _update_ev_preds(self, z_lin, x_pos, dpos):
-        
         self.opti.set_value(self.z_lin, z_lin)
         self.opti.set_value(self.x_pos, x_pos)
         for  t in range(self.N):
             self.opti.set_value(self.dpos[t],dpos[t])
     
     def _update_tv_preds(self, u_tvs, pos_tvs, dpos_tvs, Qs):
-
         for k in range(self.N_TV):
             for m in range(self.N_modes[k]):
                 self.opti.set_value(self.pos_tvs[k][m], pos_tvs[k][m])

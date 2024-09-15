@@ -145,7 +145,7 @@ class IDMPolicy:
         u_tv = min(max(-self._decel_max, v_agent_dot), self._accel_max)
 
         return IDMAgentState(
-            agent.progress + sampling_time * x_dot,
+            agent.progress + sampling_time * x_dot + 0.5*min(max(-self._decel_max, v_agent_dot), self._accel_max) * sampling_time**2,
             agent.velocity + sampling_time * min(max(-self._decel_max, v_agent_dot), self._accel_max),
         ), u_tv
 

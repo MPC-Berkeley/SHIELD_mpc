@@ -6,6 +6,7 @@ from shapely.geometry import LineString, Point, Polygon
 import pdb 
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.maps.abstract_map_objects import LaneGraphEdgeMapObject
+from nuplan.common.actor_state.state_representation import StateSE2, StateVector2D, TimePoint
 from nuplan.planning.simulation.observation.idm.utils import create_path_from_se2, path_to_linestring
 from nuplan.planning.simulation.planner.abstract_idm_planner import AbstractIDMPlanner
 from nuplan.planning.simulation.planner.idm_planner import IDMPlanner
@@ -17,7 +18,7 @@ from typing import Optional
 import yaml
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.planner.smpc import SMPC
-from nuplan.planning.simulation.planner.utils.smpc_utils import flatten, get_preds, make_ca_fun, make_jac_fun
+from nuplan.planning.simulation.planner.utils.smpc_utils import flatten, get_preds, make_ca_fun, make_jac_fun, filter_preds
 logger = logging.getLogger(__name__)
 
 
@@ -77,12 +78,24 @@ class SMPCPlanner(IDMPlanner):
 
     def get_x_ego(self, history) ->  List[EgoState]:
         if hasattr(self, 'ego_traj'):
+            current_time_point = self.ego_traj[-1].time_point
+            ego_progress = self._ego_path_linestring.project(Point(*self.ego_traj[-1].center.point.array))
+            s, v = ego_progress, self.ego_traj[-1].dynamic_car_state.center_velocity_2d.magnitude()
+            s += self.config['dt']*v + 0.5*self.config['dt']**2*0
+            v += self.config['dt']*0
+            ego_idm_state = IDMAgentState(progress=s, velocity=v)
+            current_time_point += TimePoint(int(self._planned_trajectory_sample_interval * 1e6))
+            ego_state_tp1 = self._idm_state_to_ego_state(ego_idm_state, current_time_point, self.ego_traj[-1].car_footprint.vehicle_parameters)
+            self.ego_traj = self.ego_traj[1:] + [ego_state_tp1]
             return self.ego_traj
         else:
             #Heuristics for now to get the ego trajectory
             ego_state0, _ = history.current_state
-            self._initialize_ego_path(ego_state0)
-            a_arr = np.zeros(self.config['N'])
+            vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
+            current_time_point = ego_state0.time_point
+            if not self._initialized:
+                self._initialize_ego_path(ego_state0)
+            a_arr = np.zeros(self.config['N']) #0 acceleration
             ego_traj = []
             ego_progress = self._ego_path_linestring.project(Point(*ego_state0.center.point.array))
             s, v = ego_progress, ego_state0.dynamic_car_state.center_velocity_2d.magnitude()    
@@ -94,7 +107,8 @@ class SMPCPlanner(IDMPlanner):
                     s += self.config['dt']*v + 0.5*self.config['dt']**2*a_arr[-1]
                     v += self.config['dt']*a_arr[-1]
                 ego_idm_state = IDMAgentState(progress=s, velocity=v)
-                ego_state = self._idm_state_to_ego_state(ego_idm_state, ego_state0.time_point, ego_state0.car_footprint.vehicle_parameters)
+                ego_state = self._idm_state_to_ego_state(ego_idm_state, current_time_point, vehicle_parameters)
+                current_time_point += TimePoint(int(self._planned_trajectory_sample_interval * 1e6))
                 ego_traj.append(ego_state)
             self.ego_traj = ego_traj
             return self.ego_traj
@@ -103,22 +117,21 @@ class SMPCPlanner(IDMPlanner):
         ego_state, observations = current_input.history.current_state
 
         # Ego route and droute
-        s_arr = [point.progress for point in self._ego_path._path]
-        x_arr = [point.x for point in self._ego_path._path]
-        y_arr = [point.y for point in self._ego_path._path]
-        psi_arr = [point.heading for point in self._ego_path._path]
-        # v_arr = [point.v for point in agent._path]
-        v_arr = [0 for _ in self._ego_path._path]
+        s_arr = [point.progress for point in self._ego_path.get_sampled_path()]
+        x_arr = [point.x for point in self._ego_path.get_sampled_path()]
+        y_arr = [point.y for point in self._ego_path.get_sampled_path()]
+        psi_arr = [point.heading for point in self._ego_path.get_sampled_path()]
+        v_arr = [0 for _ in self._ego_path.get_sampled_path()]
 
         routes = [make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)]
         droutes = [make_jac_fun(routes[-1])]
-        params = {'dt': self.config['dt'], 'N': self.config['N']}
+        params = {'dt': self.config['dt'], 'N': self.config['N'],'N_TV': self.config['num_tvs']}
         ego_progress = self._ego_path_linestring.project(Point(*ego_state.center.point.array))
         x0 = np.array([[ego_progress],[ego_state.dynamic_car_state.center_velocity_2d.x]])
-        z_lin, x_glob, dpos, o_glob, u_tvs, routes, droutes, Qs = get_preds(current_input,preds,x0, params,routes,droutes,u_opt=self.u_opt if hasattr(self, 'u_opt') else None, ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None)
+        z_lin, x_glob, dpos, o_glob, u_tvs, routes, droutes, Qs = get_preds(current_input,preds,x0, params,routes,droutes,u_opt=self.u_opt if hasattr(self, 'u_opt') and self.optimal else None, ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None)
         
         update_dict =   {'x0': x0,
-                         'o0': [np.array([agent.progress,agent.velocity]) for i,agent  in enumerate(preds[0])],
+                         'o0': [np.array([[agent.progress],[agent.velocity]]) for agent in preds[0]],
                         'u_prev': self.u_prev,
                         'z_lin': z_lin,
                         'x_pos': x_glob,
@@ -136,7 +149,6 @@ class SMPCPlanner(IDMPlanner):
         """Inherited, see superclass."""
         # Ego current state
         ego_state, observations = current_input.history.current_state
-
         if not self._initialized:
             self._initialize_ego_path(ego_state)
             
@@ -163,21 +175,39 @@ class SMPCPlanner(IDMPlanner):
                     solver="ipopt",
                     open_loop = False,
                     eval_mode = False,
-                    preds=preds)
+                    preds=filter_preds(preds,self.config['num_tvs'],ego_state))
         
             self._initialized = True
 
         # Update the SMPC parameters
         print('GETTING UPDATE DICT...')
-        update_dict = self.get_update_dict(current_input, preds)
-        # pdb.set_trace()
-        print(update_dict['x0'])
-        self.smpc.update(update_dict)
-        
+        test = filter_preds(preds,self.config['num_tvs'],ego_state)
+        update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state))
+        print(update_dict)
+        self.prev_update_dict = update_dict
+        ####
+        # import matplotlib.pyplot as plt
+        # i = 0
+        # plt.figure()
+        # x_arr, y_arr = [], []
+        # for t in range(len(update_dict['preds'])):
+        #     x = update_dict['preds'][t][i].progress
+        #     y = update_dict['preds'][t][i].velocity
+        #     x_arr.append(x)
+        #     y_arr.append(y)
+        # plt.plot(x_arr,y_arr)
+        # plt.xlabel('s [m]')
+        # plt.ylabel('v [m/s]')
+        # plt.show()
+        ####
+        self.smpc.update(update_dict) 
         # Solve the SMPC
+        pdb.set_trace()
         sol = self.smpc.solve()
+        self.optimal = sol['optimal']
         info = {}
-        if sol['optimal']:
+        if self.optimal:
+            print('Getting the optimal duals...')
             # Get the optimal DUALS
             info.update({"l1_duals":sol["l1_duals"], "ca_duals":sol["ca_duals"]})
             dual_class = 0
@@ -196,19 +226,28 @@ class SMPCPlanner(IDMPlanner):
 
 
         #Update u_prev
-        self.u_prev = sol['u_control'] #scalar
+        self.u_prev = sol['u_control'] if self.optimal else 0 #scalar
         self.u_opt = sol['u_opt'] #size N-1
 
         #Convert smpc solution to NuPlan Trajectory
+        # print(sol['nom_z'])
         self._sol2ego_state(sol['nom_z'],ego_state)
 
         return InterpolatedTrajectory(self.ego_traj) #self.ego_traj is a list of EgoState
 
     def _sol2ego_state(self, sol,ego_state0):
-        ego_traj = []
-        for t in range(self.config['N']+1):     
+        ego_idm_state = IDMAgentState(progress=sol[0,0], velocity=sol[1,0])
+        vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
+        
+        # Initialize planned trajectory with current state
+        current_time_point = ego_state0.time_point
+        projected_ego_state = self._idm_state_to_ego_state(ego_idm_state, current_time_point, vehicle_parameters)
+        ego_traj: List[EgoState] = [projected_ego_state]
+        for t in range(1,self.config['N']+1):     
             ego_idm_state = IDMAgentState(progress=sol[0,t], velocity=sol[1,t])
-            ego_state = self._idm_state_to_ego_state(ego_idm_state, ego_state0.time_point, ego_state0.car_footprint.vehicle_parameters)
+            # Convert IDM state back to EgoState
+            current_time_point += TimePoint(int(self._planned_trajectory_sample_interval * 1e6))
+            ego_state = self._idm_state_to_ego_state(ego_idm_state, current_time_point, vehicle_parameters)
             ego_traj.append(ego_state)
         self.ego_traj = ego_traj
     

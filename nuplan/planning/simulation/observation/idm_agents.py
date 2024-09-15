@@ -160,13 +160,14 @@ class IDMAgents(AbstractObservation):
         Method for obtaining open-loop predictions of the surrounding agents based on the IDM and traffic lights data. 
         The ego vehicle is simulated using the IDM planner (i.e. the surrounding vehicles assume the ego vehicle follows an IDM)
         """
-        import time
-        st = time.time()
+        import pdb
         idm_agent_manager_copy = copy.deepcopy(self._get_idm_agent_manager())
 
-        self.current_iteration = next_iteration.index
+        current_iteration = next_iteration.index
         tspan = next_iteration.time_s - iteration.time_s
-        traffic_light_data = self._scenario.get_traffic_light_status_at_iteration(self.current_iteration)
+        tspan = 0.1
+        # print(f'Tspan: {tspan}')
+        traffic_light_data = self._scenario.get_traffic_light_status_at_iteration(current_iteration)
 
         # Extract traffic light data into Dict[traffic_light_status, lane_connector_ids]
         traffic_light_status: Dict[TrafficLightStatusType, List[str]] = defaultdict(list)
@@ -175,20 +176,19 @@ class IDMAgents(AbstractObservation):
             traffic_light_status[data.status].append(str(data.lane_connector_id))
 
         # ego_state, _ = history.current_state
-        
-        preds = [idm_agent_manager_copy.get_active_agents(self.current_iteration,pred_mode=True)] #initial_state
+        preds = [idm_agent_manager_copy.get_active_agents(current_iteration,pred_mode=True,traffic_light_status=traffic_light_status)] #initial_state
         for t in range(num_samples):
             idm_agent_manager_copy.propagate_agents(
                 x_ego[t],
                 tspan,
-                self.current_iteration,
+                current_iteration,
                 traffic_light_status,
-                self._get_open_loop_track_objects(self.current_iteration),
+                self._get_open_loop_track_objects(current_iteration),
                 self._radius,
             )
-        
             #Get the agents at the current time
-            preds.append(idm_agent_manager_copy.get_active_agents(self.current_iteration,pred_mode=True))
+            preds.append(idm_agent_manager_copy.get_active_agents(current_iteration,pred_mode=True))
+            current_iteration += 1
             #Assumes the traffic light status is fixed within the prediction horizon
         assert len(preds) == num_samples+1
         return preds
