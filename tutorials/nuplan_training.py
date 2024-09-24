@@ -1,12 +1,8 @@
-from tutorials.utils.tutorial_utils import setup_notebook
+# from tutorials.utils.tutorial_utils import setup_notebook
 
-setup_notebook()
+# setup_notebook()
 
 # (Optional) Increase notebook width for all embedded cells to display properly
-from IPython.core.display import display, HTML
-
-display(HTML("<style>.output_result { max-width:100% !important; }</style>"))
-display(HTML("<style>.container { width:100% !important; }</style>"))
 # Useful imports
 import os
 from pathlib import Path
@@ -82,28 +78,28 @@ planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std)
 main_simulation(cfg, planner)
 
 
-#Nuboard
-# Get nuBoard simulation file for visualization later on
-simulation_file = [str(file) for file in Path(cfg.output_dir).iterdir() if file.is_file() and file.suffix == '.nuboard']
+# #Nuboard
+# # Get nuBoard simulation file for visualization later on
+# simulation_file = [str(file) for file in Path(cfg.output_dir).iterdir() if file.is_file() and file.suffix == '.nuboard']
 
-# Launch Nuboard
-from tutorials.utils.tutorial_utils import construct_nuboard_hydra_paths
+# # Launch Nuboard
+# from tutorials.utils.tutorial_utils import construct_nuboard_hydra_paths
 
-# Location of paths with all nuBoard configs
-nuboard_hydra_paths = construct_nuboard_hydra_paths(BASE_CONFIG_PATH)
+# # Location of paths with all nuBoard configs
+# nuboard_hydra_paths = construct_nuboard_hydra_paths(BASE_CONFIG_PATH)
 
-# Initialize configuration management system
-hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
-hydra.initialize(config_path=nuboard_hydra_paths.config_path)
+# # Initialize configuration management system
+# hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
+# hydra.initialize(config_path=nuboard_hydra_paths.config_path)
 
-# Compose the configuration
-cfg = hydra.compose(config_name=nuboard_hydra_paths.config_name, overrides=[
-    'scenario_builder=nuplan_mini',  # set the database (same as simulation) used to fetch data for visualization
-    f'simulation_path={simulation_file}',  # nuboard file path, if left empty the user can open the file inside nuBoard
-    f'hydra.searchpath=[{nuboard_hydra_paths.common_dir}, {nuboard_hydra_paths.experiment_dir}]',
-])
+# # Compose the configuration
+# cfg = hydra.compose(config_name=nuboard_hydra_paths.config_name, overrides=[
+#     'scenario_builder=nuplan_mini',  # set the database (same as simulation) used to fetch data for visualization
+#     f'simulation_path={simulation_file}',  # nuboard file path, if left empty the user can open the file inside nuBoard
+#     f'hydra.searchpath=[{nuboard_hydra_paths.common_dir}, {nuboard_hydra_paths.experiment_dir}]',
+# ])
 
-from nuplan.planning.script.run_nuboard import main as main_nuboard
+# from nuplan.planning.script.run_nuboard import main as main_nuboard
 
-# Run nuBoard
-main_nuboard(cfg)
+# # Run nuBoard
+# main_nuboard(cfg)

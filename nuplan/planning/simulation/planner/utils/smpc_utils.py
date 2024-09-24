@@ -104,7 +104,6 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     iSev  = np.linalg.inv(Sev)
     iSev[-1,-1]+=0.3
     Sev=np.linalg.inv(iSev)
-    
     for t in range(params['N']):
         if u_opt is None:
             print('USING ZERO CONTROL')
@@ -136,7 +135,7 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
                 # if tv_psi[i] is not None:
                 # Rtv = np.array([[np.cos(tv_psi[i][:,t+1]), np.sin(tv_psi[i][:,t+1])],[-np.sin(tv_psi[i][:,t+1]), np.cos(tv_psi[i][:,t+1])]]).squeeze().T
                 # else:
-                Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
+                Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze()#.T
                 Stv_ = np.diag([tv_lengths[i], tv_widths[i]])
                 Stv = np.linalg.inv(Stv_)
                 mat=Rev@iSev@Rtv.T@Stv@Stv@Rtv@iSev@Rev.T 
@@ -151,7 +150,10 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     mm_do_glob = [[do_glob[i]] for i in range(params['N_TV'])]
     mm_Qs = [[Qs[i]] for i in range(params['N_TV'])]
 
-    return x, x_glob, dx_glob, mm_o_glob, mm_u_tvs, mm_routes, mm_do_glob, mm_Qs 
+    #tv length and width
+    tv_params = [[tv_lengths[k], tv_widths[k]] for k in range(params['N_TV'])]
+
+    return x, x_glob, dx_glob, mm_o_glob, mm_u_tvs, mm_routes, mm_do_glob, mm_Qs, tv_psi, tv_params
 
 def filter_preds(preds_list: List[IDMAgent], n: int, ego_state) -> List[IDMAgent]:
     '''

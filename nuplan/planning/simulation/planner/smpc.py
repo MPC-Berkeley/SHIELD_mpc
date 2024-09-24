@@ -34,6 +34,7 @@ class SMPC():
                 solver="ipopt",
                 open_loop = False,
                 eval_mode = False,
+                route = None,
                 preds = List
                 ):
         # self.routes=routes
@@ -69,10 +70,10 @@ class SMPC():
         self.constr_kept = None
         self.offline=offline_mode
         self.open_loop = open_loop
-   
+        self.route = route
         
         p_opts = {'expand': False, 'print_time':0, 'verbose' :False, 'error_on_fail':0}
-        s_opts = {'print_level': 1,'tol':1e-4,'max_wall_time': 60.}
+        s_opts = {'print_level': 5,'tol':1e-4,'max_wall_time': 60.,'constr_viol_tol':1e-2} 
         if eval_mode:
             s_opts.update({'max_wall_time': 10.,'constr_viol_tol':1e-2})
 
@@ -109,21 +110,22 @@ class SMPC():
         
         self.params+=[self.z_curr, self.u_prev]
         
-        self.z_lin=self.opti.parameter(2,self.N+1)
-        self.x_pos=self.opti.parameter(2,self.N+1)    
+        self.z_lin=self.opti.parameter(2,self.N+1) #[s,v] of ego
+        self.x_pos=self.opti.parameter(2,self.N+1) #[x,y] of ego    
         self.dpos =[self.opti.parameter(2,1) for _ in range(self.N)]
 
         self.params+=[ca.vec(self.z_lin), ca.vec(self.x_pos), ca.vec(ca.horzcat(*self.dpos))]
 
         self.l1_lmbd=1000*0.01
 
-        self.z_tv_curr=[self.opti.parameter(2) for _ in range(self.N_TV)]
+        self.z_tv_curr=[self.opti.parameter(2) for _ in range(self.N_TV)] #[s,v] of TV
         self.u_tvs=[[self.opti.parameter(self.N,1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
-        self.pos_tvs=[[self.opti.parameter(2,self.N+1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
+        self.pos_tvs=[[self.opti.parameter(2,self.N+1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)] # [x,y] of TV
         self.dpos_tvs=[[[self.opti.parameter(2,1) for _ in range(self.N)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
         self.Qs=[[[self.opti.parameter(2,2) for _ in range(self.N)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
-
-        self.params+=[self.z_tv_curr, self.u_tvs, self.pos_tvs, self.dpos_tvs, self.Qs]
+        self.psi_tvs = [self.opti.parameter(1,self.N+1) for _ in range(self.N_TV)] # TV heading
+        self.tv_params = [self.opti.parameter(2) for _ in range(self.N_TV)] # TV length and width
+        self.params+=[self.z_tv_curr, self.u_tvs, self.pos_tvs, self.dpos_tvs, self.Qs, self.psi_tvs, self.tv_params]
 
         
         if not self.offline:
@@ -144,7 +146,9 @@ class SMPC():
         self._update_tv_initial_condition([np.array([0., 0.])]*self.N_TV)
         self._update_tv_preds([[np.zeros((self.N,1))]*self.N_modes[k] for k in range(self.N_TV)], [[np.zeros((2,self.N+1))]*self.N_modes[k] for k in range(self.N_TV)], 
                               [[[np.ones((2,1))]*self.N]*self.N_modes[k] for k in range(self.N_TV)], [[[np.eye(2)]*self.N]*self.N_modes[k] for k in range(self.N_TV)])
-        
+        self._update_tv_psi([np.zeros((1,self.N+1))]*self.N_TV)
+        self._update_tv_params([[4.47, 2]]*self.N_TV)
+
         if not self.offline: 
             self._update_gain_and_constr_keeps()            
         self.solve(first_solve=True)
@@ -156,7 +160,7 @@ class SMPC():
         """ 
     
         h0=self.opti.variable(1)
-    
+        self.obca_lmbd = [self.opti.variable(4, self.N-1) for _ in range(self.N_TV)] #Assuming rectangular obstacles
         # Uncomment next line for disturbance feedback when using Gurobi. 
         # Runs slow with Ipopt (default)
         # M=[[[self.opti.variable(1, 2) for n in range(t)] for t in range(self.N)] for j in range(self.N_modes)]
@@ -187,7 +191,7 @@ class SMPC():
         M_stack=ca.vertcat(*[ca.horzcat(*[M[t][n] for n in range(t)], ca.DM(1,2*(self.N-t))) for t in range(self.N)])
         K_stack=[[ca.diagcat(ca.DM(1,2),*[K[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
         
-        self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
+        self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
         if self.offline:
             self.vars_epi = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(self.gain_l1[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
         self.vars_ws, self.vars_epi_ws  = None, None 
@@ -296,16 +300,51 @@ class SMPC():
             self.l1_constr=[[[ [] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
             self.ca_constr=[[[ [] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
 
+        obca_lmbd = self.obca_lmbd
+        d_min = 0
+
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
                 cost+=0.1*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
 
+                '''
+                OBCA constraints
+                '''
                 for t in range(1, self.N):  # position at time-step 1 not a function of decision variables 
-                    # Linearised obstacle avoidance constraints
+                    # Optimization-based collision avoidance constraints. Ego: Point-mass, Obstacle: Polytope
 
-                    # EV position projection onto obstacle ellipse
+                    #Rotation matrix
+                    R_mk = ca.vertcat(
+                        ca.horzcat(ca.cos(self.psi_tvs[k][:,t]), -ca.sin(self.psi_tvs[k][:,t])),
+                        ca.horzcat(ca.sin(self.psi_tvs[k][:,t]), ca.cos(self.psi_tvs[k][:,t]))
+                    )
+                    A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T
+                    tv_nom = self.pos_tvs[k][m][:,t]
+                    tv_w = self.dpos_tvs[k][m][t-1]@E_tv[k][m][2*t,:]
+                    b_m = ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2)- A_m @ tv_nom
+
+                    pt = self.route(nom_s[t])[:2] # [x,y] coordinate of the ego vehicle at timestep t(2,1) #TODO: get all the routes to get ego vehicle's position
+                    # pt = self.x_pos[:,t] + self.dpos[t-1]@(A[2*t,:]@self.z_curr+B[2*t,:]@h - self.z_lin[0,t])
+                    pt_w = ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:] for l in range(self.N_TV)])
                     
+                    # Tightening
+                    # -self.tight*||Am@(ptw)||_2 >= d_min-[Am@pt-bm.T @ obca_lmbd[k][:,t-1]]
+                    z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][:,t-1] #(144x1)
+                    y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][:,t-1] + 1e-12*pt.T@pt + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1)
+                    self.ca_constr[k][j][t-1]+=[z.T@z<=y**2, 0<=y]
+                    self.ca_ineq.append(ca.vertcat(z,y))
+                    self.opti.subject_to(self.ca_constr[k][j][t-1][0])
+                    self.opti.subject_to(self.ca_constr[k][j][t-1][1])
+        
+                    self.opti.subject_to((A_m.T @ obca_lmbd[k][:,t-1]).T @(A_m.T @ obca_lmbd[k][:,t-1]) <= 1)
+                    self.opti.subject_to(obca_lmbd[k][:,t-1] >= 0)
+
+                    
+                    #
+
+                    # Linearised obstacle avoidance constraints
+                    # EV position projection onto obstacle ellipse
                     oa_ref=self.pos_tvs[k][m][:,t]
                     # oa_ref+=(self.x_pos[:,t]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,t]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-self.pos_tvs[k][m][:,t]))**(0.5)
                     oa_ref+=(self.x_pos[:,0]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,0]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,0]-self.pos_tvs[k][m][:,t]))**(0.5)
@@ -319,12 +358,12 @@ class SMPC():
                     
                     if self.solver=="ipopt":
                         # norm_2(z)<=y
-                        if self.offline:
-                            self.ca_constr[k][j][t-1]+=[z@z.T<=y**2, 0<=y]
-                            self.opti.subject_to(self.ca_constr[k][j][t-1][0])
-                            self.opti.subject_to(self.ca_constr[k][j][t-1][1])
+                        # if self.offline:
+                        #     self.ca_constr[k][j][t-1]+=[z@z.T<=y**2, 0<=y ]
+                        #     self.opti.subject_to(self.ca_constr[k][j][t-1][0])
+                        #     self.opti.subject_to(self.ca_constr[k][j][t-1][1])
 
-                            self.ca_ineq.append(ca.horzcat(z,y))
+                        #     self.ca_ineq.append(ca.horzcat(z,y))
                               
                             if len(self.l1_constr[k][m][t-1])==0:
                                 self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]]
@@ -333,10 +372,10 @@ class SMPC():
 
                                 self.lin_ineq_l1+=[self.l1_constr[k][m][t-1][0]]
                                 cost+=self.l1_lmbd*ca.sum1(ca.vec(self.gain_l1[k][m][t-1]))
-                        else:
-                            soc_constr=ca.vertcat(y,y**2-z@z.T)
-                            soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM(*soc_constr.shape), True)
-                            self.opti.subject_to(soc_switch>=0)
+                        # else:
+                        #     soc_constr=ca.vertcat(y,y**2-z@z.T)
+                        #     soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM(*soc_constr.shape), True)
+                        #     self.opti.subject_to(soc_switch>=0)
 
                     else:
                         # Use for SOCP solvers: SCS and Gurobi
@@ -401,7 +440,6 @@ class SMPC():
             if self.offline and self.solver=='ipopt':
                 l1_duals=[[[[sol.value(self.opti.dual(self.l1_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
                 ca_duals=[[[[sol.value(self.opti.dual(self.ca_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
-        
             is_opt     = True
         except:
             # self.opti.debug.show_infeasibilities()
@@ -463,6 +501,8 @@ class SMPC():
         assert 'droutes' in update_dict.keys(), 'Missing TV Process Noise Predictions'
         assert 'Qs' in update_dict.keys(), 'Missing TV Process Noise Covariances'
         assert 'o0' in update_dict.keys(), 'Missing TV Initial Condition'
+        assert 'tv_psi' in update_dict.keys(), 'Missing TV Heading Predictions'
+        assert 'tv_params' in update_dict.keys(), 'Missing TV Parameters'
 
         if not self.offline:
             assert 'l1_duals' in update_dict.keys(), 'Missing L1 Duals'
@@ -476,6 +516,8 @@ class SMPC():
         self._update_ev_preds(update_dict['z_lin'], update_dict['x_pos'], update_dict['dpos'])
         self._update_tv_preds(update_dict['u_tvs'], update_dict['o_glob'],
                                 update_dict['droutes'], update_dict['Qs'])
+        self._update_tv_psi(update_dict['tv_psi'])
+        self._update_tv_params(update_dict['tv_params'])
         
         if not self.offline:
             if 'l1_duals' in update_dict.keys():
@@ -487,10 +529,10 @@ class SMPC():
                 # print('smpcfr.py: Finished update_gain_and_constr_keeps,,,')
             else:
                 self._update_gain_and_constr_keeps()
-        elif self.offline and (self.vars_ws is not None) and (self.vars_epi_ws is not None):
-            # print('warm starting'.center(80,'#'))
-            self.opti.set_initial(self.vars_pol,self.vars_ws)
-            self.opti.set_initial(self.vars_epi,self.vars_epi_ws)
+        # elif self.offline and (self.vars_ws is not None) and (self.vars_epi_ws is not None):
+        #     # print('warm starting'.center(80,'#'))
+        #     self.opti.set_initial(self.vars_pol,self.vars_ws)
+        #     self.opti.set_initial(self.vars_epi,self.vars_epi_ws)
 
     def _update_ev_initial_condition(self, x0, u_prev):
         self.x0 = x0
@@ -518,6 +560,13 @@ class SMPC():
                     self.opti.set_value(self.dpos_tvs[k][m][t],dpos_tvs[k][m][t])
                     self.opti.set_value(self.Qs[k][m][t],Qs[k][m][t])
 
+    def _update_tv_psi(self, psi_tvs):
+        for k in range(self.N_TV):
+            self.opti.set_value(self.psi_tvs[k], psi_tvs[k])
+
+    def _update_tv_params(self, tv_params):
+        for k in range(self.N_TV):
+            self.opti.set_value(self.tv_params[k], tv_params[k])
 
     def _set_canon_form_mats(self, canon_prob):
         self.Q, self.p, self.d = canon_prob["Q"],canon_prob["p"], canon_prob["d"]

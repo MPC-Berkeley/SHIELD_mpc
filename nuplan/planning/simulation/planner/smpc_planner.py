@@ -116,20 +116,29 @@ class SMPCPlanner(IDMPlanner):
     def get_update_dict(self,current_input: PlannerInput, preds: List) -> dict:
         ego_state, observations = current_input.history.current_state
 
-        # Ego route and droute
-        s_arr = [point.progress for point in self._ego_path.get_sampled_path()]
-        x_arr = [point.x for point in self._ego_path.get_sampled_path()]
-        y_arr = [point.y for point in self._ego_path.get_sampled_path()]
-        psi_arr = [point.heading for point in self._ego_path.get_sampled_path()]
-        v_arr = [0 for _ in self._ego_path.get_sampled_path()]
+        # # Ego route and droute
+        # s_arr = [point.progress for point in self._ego_path.get_sampled_path()]
+        # x_arr = [point.x for point in self._ego_path.get_sampled_path()]
+        # y_arr = [point.y for point in self._ego_path.get_sampled_path()]
+        # psi_arr = [point.heading for point in self._ego_path.get_sampled_path()]
+        # v_arr = [0 for _ in self._ego_path.get_sampled_path()]
 
-        routes = [make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)]
-        droutes = [make_jac_fun(routes[-1])]
+        # routes = [make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)]
+        # droutes = [make_jac_fun(routes[-1])]
+        routes = [self.ego_route]
+        droutes = [self.ego_droute]
         params = {'dt': self.config['dt'], 'N': self.config['N'],'N_TV': self.config['num_tvs']}
         ego_progress = self._ego_path_linestring.project(Point(*ego_state.center.point.array))
         x0 = np.array([[ego_progress],[ego_state.dynamic_car_state.center_velocity_2d.x]])
-        z_lin, x_glob, dpos, o_glob, u_tvs, routes, droutes, Qs = get_preds(current_input,preds,x0, params,routes,droutes,u_opt=self.u_opt if hasattr(self, 'u_opt') and self.optimal else None, ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None)
-        
+        z_lin, x_glob, dpos, o_glob, u_tvs, routes, droutes, Qs, tv_psi, tv_params = get_preds(current_input,
+                                                                                                preds,
+                                                                                                x0, 
+                                                                                                params,
+                                                                                                routes,
+                                                                                                droutes,
+                                                                                                u_opt=self.u_opt if hasattr(self, 'u_opt') and self.optimal else None,
+                                                                                                ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None)
+       
         update_dict =   {'x0': x0,
                          'o0': [np.array([[agent.progress],[agent.velocity]]) for agent in preds[0]],
                         'u_prev': self.u_prev,
@@ -142,6 +151,8 @@ class SMPCPlanner(IDMPlanner):
                         'routes': routes,
                         'preds': preds,
                         'Qs': Qs,
+                        'tv_psi': tv_psi,
+                        'tv_params': tv_params,
                 }
         return update_dict
 
@@ -159,6 +170,16 @@ class SMPCPlanner(IDMPlanner):
             A = np.array([[1., dt], [0., 1.]])
             B = np.array([0.5*dt**2,dt])
 
+            # Ego route and droute
+            s_arr = [point.progress for point in self._ego_path.get_sampled_path()]
+            x_arr = [point.x for point in self._ego_path.get_sampled_path()]
+            y_arr = [point.y for point in self._ego_path.get_sampled_path()]
+            psi_arr = [point.heading for point in self._ego_path.get_sampled_path()]
+            v_arr = [0 for _ in self._ego_path.get_sampled_path()]
+
+            self.ego_route = make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)
+            self.ego_droute = make_jac_fun(self.ego_route)
+
             # Initialize the SMPC
             self.smpc = SMPC(ev=(A,B),
                     N            =  N,
@@ -166,7 +187,7 @@ class SMPCPlanner(IDMPlanner):
                     V_MAX        = self.config['v_max'], 
                     A_MIN        = self.config['a_min'],
                     A_MAX        =  self.config['a_max'],
-                    TIGHTENING   =  2.4, #2.6
+                    TIGHTENING   =  2.6, #2.4
                     EV_NOISE_STD    =  self.ev_noise_std,
                     TV_NOISE_STD    = self.tv_noise_std,
                     Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
@@ -175,6 +196,7 @@ class SMPCPlanner(IDMPlanner):
                     solver="ipopt",
                     open_loop = False,
                     eval_mode = False,
+                    route = self.ego_route,
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state))
         
             self._initialized = True
@@ -183,7 +205,13 @@ class SMPCPlanner(IDMPlanner):
         print('GETTING UPDATE DICT...')
         test = filter_preds(preds,self.config['num_tvs'],ego_state)
         update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state))
-        print(update_dict)
+        # print(update_dict)
+        # for k in range(len(update_dict['o_glob'])):
+        #     np.set_printoptions(precision=10, suppress=False)
+        #     print(np.array(update_dict['x_pos'][:,k]))
+        #     print(np.array(update_dict['o_glob'][0][0][:,k]))
+        for j in range(len(test[0])):
+            print(test[0][j].to_se2().x-ego_state.center.x, test[0][j].to_se2().y-ego_state.center.y)
         self.prev_update_dict = update_dict
         ####
         # import matplotlib.pyplot as plt
@@ -202,7 +230,7 @@ class SMPCPlanner(IDMPlanner):
         ####
         self.smpc.update(update_dict) 
         # Solve the SMPC
-        pdb.set_trace()
+        # pdb.set_trace()
         sol = self.smpc.solve()
         self.optimal = sol['optimal']
         info = {}

@@ -162,9 +162,11 @@ class IDMAgents(AbstractObservation):
         """
         import pdb
         idm_agent_manager_copy = copy.deepcopy(self._get_idm_agent_manager())
-
-        current_iteration = next_iteration.index
-        tspan = next_iteration.time_s - iteration.time_s
+        if next_iteration is None:
+            current_iteration = min(iteration.index,self._scenario.get_number_of_iterations()-1)
+        else:
+            current_iteration = min(next_iteration.index,self._scenario.get_number_of_iterations()-1)
+        # tspan = next_iteration.time_s - iteration.time_s
         tspan = 0.1
         # print(f'Tspan: {tspan}')
         traffic_light_data = self._scenario.get_traffic_light_status_at_iteration(current_iteration)
@@ -189,6 +191,7 @@ class IDMAgents(AbstractObservation):
             #Get the agents at the current time
             preds.append(idm_agent_manager_copy.get_active_agents(current_iteration,pred_mode=True))
             current_iteration += 1
+            current_iteration = min(current_iteration,self._scenario.get_number_of_iterations()-1)
             #Assumes the traffic light status is fixed within the prediction horizon
         assert len(preds) == num_samples+1
         return preds

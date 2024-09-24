@@ -111,7 +111,7 @@ class SimulationRunner(AbstractRunner):
 
             #Get IDM predictions for planner
             time_controller_copy = copy.deepcopy(self.simulation._time_controller)
-            preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
+            preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
             # preds = self.simulation._observations.get_observation()[0]
 
             # Plan path based on all planner's inputs
