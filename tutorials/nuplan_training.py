@@ -70,7 +70,7 @@ from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner
 
 # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
 ev_noise_std=[0.01,0.1]
-tv_noise_std=[0.1, 0.1]
+tv_noise_std=[0.5, 0.5]
 
 planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std)
 
