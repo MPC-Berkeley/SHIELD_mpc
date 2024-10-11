@@ -18,6 +18,7 @@ from typing import Optional
 import yaml
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.planner.smpc import SMPC
+# from nuplan.planning.simulation.planner.smpc_nlp import SMPC
 from nuplan.planning.simulation.planner.utils.smpc_utils import flatten, get_preds, make_ca_fun, make_jac_fun, filter_preds
 logger = logging.getLogger(__name__)
 
@@ -206,12 +207,7 @@ class SMPCPlanner(IDMPlanner):
         test = filter_preds(preds,self.config['num_tvs'],ego_state)
         update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state))
         # print(update_dict)
-        # for k in range(len(update_dict['o_glob'])):
-        #     np.set_printoptions(precision=10, suppress=False)
-        #     print(np.array(update_dict['x_pos'][:,k]))
-        #     print(np.array(update_dict['o_glob'][0][0][:,k]))
-        for j in range(len(test[0])):
-            print(test[0][j].to_se2().x-ego_state.center.x, test[0][j].to_se2().y-ego_state.center.y)
+        self.visualize_scene(current_input, preds)
         self.prev_update_dict = update_dict
         ####
         # import matplotlib.pyplot as plt
@@ -234,23 +230,23 @@ class SMPCPlanner(IDMPlanner):
         sol = self.smpc.solve()
         self.optimal = sol['optimal']
         info = {}
-        if self.optimal:
-            print('Getting the optimal duals...')
-            # Get the optimal DUALS
-            info.update({"l1_duals":sol["l1_duals"], "ca_duals":sol["ca_duals"]})
-            dual_class = 0
-            l1_duals_vec = np.fromiter(flatten(info["l1_duals"]),float)
-            ca_duals_vec = np.fromiter(flatten(info["ca_duals"]),float)
-            l1_dual_active = (1-int(np.all(l1_duals_vec<(self.smpc.l1_lmbd-1e-3)*np.ones(l1_duals_vec.shape[0])))) or (1-int(np.all(l1_duals_vec>1e-3*np.ones(l1_duals_vec.shape[0]))))
-            ca_duals_active = np.sum(ca_duals_vec>1e-3*np.ones(ca_duals_vec.shape[0]))/ca_duals_vec.shape[0]
+        # if self.optimal:
+        #     print('Getting the optimal duals...')
+        #     # Get the optimal DUALS
+        #     info.update({"l1_duals":sol["l1_duals"], "ca_duals":sol["ca_duals"]})
+        #     dual_class = 0
+        #     l1_duals_vec = np.fromiter(flatten(info["l1_duals"]),float)
+        #     ca_duals_vec = np.fromiter(flatten(info["ca_duals"]),float)
+        #     l1_dual_active = (1-int(np.all(l1_duals_vec<(self.smpc.l1_lmbd-1e-3)*np.ones(l1_duals_vec.shape[0])))) or (1-int(np.all(l1_duals_vec>1e-3*np.ones(l1_duals_vec.shape[0]))))
+        #     ca_duals_active = np.sum(ca_duals_vec>1e-3*np.ones(ca_duals_vec.shape[0]))/ca_duals_vec.shape[0]
 
-            if l1_dual_active == 1:
-                if ca_duals_active > 0.05 :
-                    dual_class = 3
-                else:
-                    dual_class = 1
-            elif ca_duals_active > 0.05 :
-                dual_class = 2
+        #     if l1_dual_active == 1:
+        #         if ca_duals_active > 0.05 :
+        #             dual_class = 3
+        #         else:
+        #             dual_class = 1
+        #     elif ca_duals_active > 0.05 :
+        #         dual_class = 2
 
 
         #Update u_prev
@@ -279,6 +275,33 @@ class SMPCPlanner(IDMPlanner):
             ego_traj.append(ego_state)
         self.ego_traj = ego_traj
     
+    def visualize_scene(self, current_input, preds) -> None:
+        ego_state, observations = current_input.history.current_state
+        ego_x, ego_y = ego_state.center.point.x,ego_state.center.point.y
+        ego_length, ego_width = ego_state.car_footprint.vehicle_parameters.length, ego_state.car_footprint.vehicle_parameters.width
+        ego_heading = ego_state.center.heading
+
+        import matplotlib.pyplot as plt
+        plt.figure()
+        #draw ego as a rectangle
+        ego_rect = plt.Rectangle((ego_x,ego_y),ego_length,ego_width,angle=ego_heading*180/np.pi,fill=True,color='green')
+        plt.gca().add_patch(ego_rect)
+        plt.xlim([ego_x-30,ego_x+30])
+        plt.ylim([ego_y-30,ego_y+30])
+
+        # draw target vehicles
+        for j, agent in enumerate(preds[0]):
+            x, y = agent.to_se2().x, agent.to_se2().y
+            length, width = agent.length, agent.width
+            heading = agent.to_se2().heading
+            rect = plt.Rectangle((x,y),length,width,angle=heading*180/np.pi,fill=True,color='red')
+            plt.gca().add_patch(rect)
+        plt.axis('equal')
+
+        plt.show()
+
+
+
     def _initialize_ego_path(self, ego_state: EgoState) -> None:
         """
         Initializes the ego path from the ground truth driven trajectory
