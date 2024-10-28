@@ -7,7 +7,7 @@ from tutorials.utils import observation_flatten, observation_unflatten
 
 class RAID_NET(nn.Module):
   '''
-    Recurrent Transformer arch
+    Recurrent Transformer architecture for predicting the dual variables of a Stochastic MPC problem
   '''
   def __init__(self,input_dim, embed_dim, output_dim, horizon, num_layers,hidden_size,lambda_dim = None, reduced_mode=True, eps = 0.8, lambda_ubd = 1000, pred_mode=["both duals",'tertiary','binary'],device='cuda:0'):
         super(RAID_NET ,self).__init__()
