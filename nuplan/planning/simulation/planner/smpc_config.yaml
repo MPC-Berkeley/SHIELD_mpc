@@ -5,3 +5,4 @@ a_max: 2.0
 a_min: -5.0
 v_max: 10.
 v_min: -1.
+save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N10.pkl

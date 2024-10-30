@@ -9,7 +9,7 @@ from nuplan.planning.simulation.planner.abstract_planner import AbstractPlanner
 from nuplan.planning.simulation.runner.abstract_runner import AbstractRunner
 from nuplan.planning.simulation.runner.runner_report import RunnerReport
 from nuplan.planning.simulation.simulation import Simulation
-
+from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner
 logger = logging.getLogger(__name__)
 
 
@@ -97,8 +97,9 @@ class SimulationRunner(AbstractRunner):
 
         # Initialize all simulations
         self._initialize()
-
+        counter = 0
         while self.simulation.is_simulation_running():
+            # print(f'Simulation t: {counter}:')
             # Execute specific callback
             self.simulation.callback.on_step_start(self.simulation.setup, self.planner)
 
@@ -109,13 +110,15 @@ class SimulationRunner(AbstractRunner):
             # Execute specific callback
             self._simulation.callback.on_planner_start(self.simulation.setup, self.planner)
 
-            #Get IDM predictions for planner
-            time_controller_copy = copy.deepcopy(self.simulation._time_controller)
-            preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
-            # preds = self.simulation._observations.get_observation()[0]
-
-            # Plan path based on all planner's inputs
-            trajectory = self.planner.compute_trajectory(planner_input,preds)
+            if isinstance(self.planner, SMPCPlanner): 
+                #Get IDM predictions for planner
+                time_controller_copy = copy.deepcopy(self.simulation._time_controller)
+                preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                # Plan path based on all planner's inputs
+                trajectory = self.planner.compute_trajectory(planner_input,preds)
+            else:
+                preds = []
+                trajectory = self.planner.compute_trajectory(planner_input,preds)
 
             # Propagate simulation based on planner trajectory
             self._simulation.callback.on_planner_end(self.simulation.setup, self.planner, trajectory)
@@ -128,8 +131,11 @@ class SimulationRunner(AbstractRunner):
             current_time = time.perf_counter()
             if not self.simulation.is_simulation_running():
                 report.end_time = current_time
+            counter += 1
 
         # Execute specific callback
+        if isinstance(self.planner, SMPCPlanner):
+            self.planner._callback_end_simulation()
         self.simulation.callback.on_simulation_end(self.simulation.setup, self.planner, self.simulation.history)
 
         planner_report = self.planner.generate_planner_report()

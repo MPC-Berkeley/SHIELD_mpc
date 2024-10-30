@@ -5,6 +5,7 @@ import numpy as np
 import casadi as ca
 import pdb
 from itertools import product
+import time
 import copy
 from typing import List
 from nuplan.planning.simulation.planner.utils.smpc_utils import flatten, unflatten_duals
@@ -73,9 +74,9 @@ class SMPC():
         self.route = route
         
         p_opts = {'expand': False, 'print_time':0, 'verbose' :False, 'error_on_fail':0}
-        s_opts = {'print_level': 5,'tol':1e-4,'max_wall_time': 60.,'constr_viol_tol':1e-2} 
+        s_opts = {'print_level': 0,'tol':1e-4,'max_wall_time': 30.,'constr_viol_tol':1e-2} 
         if eval_mode:
-            s_opts.update({'max_wall_time': 10.,'constr_viol_tol':1e-2})
+            s_opts.update({'max_wall_time': 15.,'constr_viol_tol':1e-2})
 
         s_opts_grb = {'OutputFlag': 0, 'PSDTol' : 1e-2,
                        'FeasibilityTol' : 1e-2, 
@@ -116,7 +117,7 @@ class SMPC():
 
         self.params+=[ca.vec(self.z_lin), ca.vec(self.x_pos), ca.vec(ca.horzcat(*self.dpos))]
 
-        self.l1_lmbd=1000*0.01
+        self.l1_lmbd=1000*0.1
 
         self.z_tv_curr=[self.opti.parameter(2) for _ in range(self.N_TV)] #[s,v] of TV
         self.u_tvs=[[self.opti.parameter(self.N,1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
@@ -180,6 +181,7 @@ class SMPC():
                 K=[[[ ca.DM(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
             else:
                 K=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
+                # K=[[[K[k][j][t] if t%2 == 0 else K[k][j][t-1] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
             # h=[[self.opti.variable(1) for t in range(self.N-1)] for j in range(m.prod(self.N_modes))]
             h=[self.opti.variable(1) for t in range(self.N-1)]
             
@@ -301,29 +303,34 @@ class SMPC():
             self.ca_constr=[[[ [] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
 
         obca_lmbd = self.obca_lmbd
-        d_min = 0
+        d_min = 2
 
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
-                cost+=0.1*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
+                cost+=100*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
 
                 '''
                 OBCA constraints
                 '''
                 for t in range(1, self.N):  # position at time-step 1 not a function of decision variables 
                     # Optimization-based collision avoidance constraints. Ego: Point-mass, Obstacle: Polytope
-
+                    ego_psi = self.route(nom_s[t])[2] #radians
+                    Rev = ca.vertcat(
+                        ca.horzcat(ca.cos(ego_psi), -ca.sin(ego_psi)),
+                        ca.horzcat(ca.sin(ego_psi), ca.cos(ego_psi))
+                    )
                     #Rotation matrix
                     R_mk = ca.vertcat(
                         ca.horzcat(ca.cos(self.psi_tvs[k][:,t]), -ca.sin(self.psi_tvs[k][:,t])),
                         ca.horzcat(ca.sin(self.psi_tvs[k][:,t]), ca.cos(self.psi_tvs[k][:,t]))
                     )
-                    # A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T
-                    A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk
+                    A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T
+                    # A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk
                     tv_nom = self.pos_tvs[k][m][:,t]
                     tv_w = self.dpos_tvs[k][m][t-1]@E_tv[k][m][2*t,:]
-                    b_m = ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2)+ A_m @ tv_nom
+                    b_m = ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2) + A_m @ tv_nom
+                    b_m_w = 0*ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2) + A_m @ tv_w
 
                     pt = self.route(nom_s[t])[:2] # [x,y] coordinate of the ego vehicle at timestep t(2,1) #TODO: get all the routes to get ego vehicle's position
                     # pt = self.x_pos[:,t] + self.dpos[t-1]@(A[2*t,:]@self.z_curr+B[2*t,:]@h - self.z_lin[0,t])
@@ -331,20 +338,19 @@ class SMPC():
                     
                     # Tightening
                     # -self.tight*||Am@(ptw)||_2 >= d_min-[Am@pt-bm.T @ obca_lmbd[k][:,t-1]]
-                    z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][:,t-1] #(144x1)
-                    y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][:,t-1] + 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal 
+                    # z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][:,t-1] #(144x1)
+                    z = self.tight**(0.5)*(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][:,t-1] #(144x1)
+                    y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][:,t-1] #+ 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal 
                     # y = -d_min + (A_m @ (pt - tv_nom)-ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2)).T @ obca_lmbd[k][:,t-1] + 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1)
-                    self.ca_constr[k][j][t-1]+=[z.T@z<=y**2, 0<=y]
+                    # self.ca_constr[k][j][t-1]+=[z.T@z<=y**2, 0<=y]
+                    self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
                     self.ca_ineq.append(ca.vertcat(z,y))
-                    # self.opti.subject_to(self.ca_constr[k][j][t-1][0])
-                    self.opti.subject_to(self.ca_constr[k][j][t-1][1])
+                    self.opti.subject_to(self.ca_constr[k][j][t-1][0])
+                    # self.opti.subject_to(self.ca_constr[k][j][t-1][1])
         
-                    self.opti.subject_to((A_m.T @ obca_lmbd[k][:,t-1]).T @(A_m.T @ obca_lmbd[k][:,t-1]) <= 1)
+                    self.opti.subject_to(((A_m @ Rev ).T @ obca_lmbd[k][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][:,t-1]) <= 1)
                     self.opti.subject_to(obca_lmbd[k][:,t-1] >= 0)
-
-                    
-                    #
-
+          
                     # Linearised obstacle avoidance constraints
                     # EV position projection onto obstacle ellipse
                     oa_ref=self.pos_tvs[k][m][:,t]
@@ -426,7 +432,10 @@ class SMPC():
 
     def solve(self,first_solve=False):
         try:       
+            st = time.time()
             sol = self.opti.solve()
+            solve_time = time.time() - st
+            # print(f'Solve Time: {solve_time}')
             # Collect Optimal solution.
             u_control  = sol.value(self.policy[0][0])
             h_opt      = sol.value(self.policy[0]).squeeze()
@@ -435,36 +444,35 @@ class SMPC():
             K_opt      = [[sol.value(self.policy[2][k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
             nom_z_tv   = [[sol.value(self.nom_z_tv[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
             nom_z      = sol.value(self.nom_z).reshape(-1,2).T
-            print(u_opt)
+            # print(u_opt)
             if self.offline and not first_solve:
                 self.vars_ws , self.vars_epi_ws = sol.value(self.vars_pol), sol.value(self.vars_epi)
 
             if self.offline and self.solver=='ipopt':
                 l1_duals=[[[[sol.value(self.opti.dual(self.l1_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
                 ca_duals=[[[[sol.value(self.opti.dual(self.ca_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
-                pdb.set_trace()
+                # pdb.set_trace()
             is_opt     = True
         except:
             # self.opti.debug.show_infeasibilities()
             if self.offline:
                 self.vars_ws , self.vars_epi_ws = None, None  
-
             infeas_status = ['Infeasible_Problem_Detected'] if self.solver=="ipopt" else ["INF_OR_UNBD"]
             if self.opti.stats()['return_status'] not in infeas_status:
               # Suboptimal solution (e.g. timed out)
-                u_control=self.opti.debug.value(self.policy[0][0])    
+                u_control=self.opti.debug.value(self.policy[0][0])   
                 u_opt = self.opti.debug.value(self.policy[0]).reshape((1,-1))
                 nom_z = self.opti.debug.value(self.nom_z).reshape((-1,2)).T
             else:
                 u_control  = self.u_backup
                 u_opt = np.array([self.u_backup]*(self.N-1)).reshape((1,-1))
                 nom_z = np.hstack([self.A**t @ self.x0 if t>0 else self.x0 for t in range(self.N+1)]) # 0 acceleration and constant speed prediction.
-
+            # print(u_opt)
             is_opt = False
+            pdb.set_trace()
 
         t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
         t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall'))
-
         solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum
         
         sol_dict = {}

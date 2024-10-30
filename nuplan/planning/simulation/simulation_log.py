@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any
 
 import msgpack
-
+import pdb
 from nuplan.common.utils.io_utils import save_buffer
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
 from nuplan.planning.simulation.history.simulation_history import SimulationHistory
 from nuplan.planning.simulation.planner.abstract_planner import AbstractPlanner
-
+from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner
 
 @dataclass
 class SimulationLog:
@@ -44,6 +44,8 @@ class SimulationLog:
         Dump simulation log into file.
         """
         serialization_type = self.simulation_log_type(self.file_path)
+        if isinstance(self.planner,SMPCPlanner):
+            self.planner = None
 
         if serialization_type == "pickle":
             self._dump_to_pickle()

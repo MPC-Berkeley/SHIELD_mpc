@@ -122,7 +122,7 @@ class IDMAgentManager:
                 self.agent_occupancy.remove(inactive_stop_line_tokens)
         self.agent_occupancy.remove(track_ids)
 
-    def get_active_agents(self, iteration: int, num_samples: int=10, sampling_time: float=0.1, pred_mode: bool= False, traffic_light_status: Dict[TrafficLightStatusType, List[str]]=None) -> DetectionsTracks:
+    def get_active_agents(self, iteration: int, num_samples: int, sampling_time: float, pred_mode: bool= False) -> DetectionsTracks:
         """
         Returns all agents as DetectionsTracks.
         :param iteration: the current simulation iteration.
@@ -141,11 +141,11 @@ class IDMAgentManager:
                 )
             )
         else:
-            import copy
-            agents_copy = copy.deepcopy(self.agents)
-            if traffic_light_status is not None:
-                [agent.plan_route(traffic_light_status) for agent in agents_copy.values() if agent.is_active(iteration)]
-            return [agent for agent in agents_copy.values() if agent.is_active(iteration)]
+            return [
+                agent.copy() 
+                for agent in self.agents.values() 
+                if agent.is_active(iteration)
+                ]
 
     def _filter_agents_out_of_range(self, ego_state: EgoState, radius: float = 100) -> None:
         """

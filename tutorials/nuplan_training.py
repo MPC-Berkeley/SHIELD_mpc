@@ -24,7 +24,8 @@ SAVE_DIR = tempfile.mkdtemp()
 directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/'
 #Data directory
 log_list = [f.split('.db')[0] for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
-nuboard = False
+nuboard = True
+log_list = ['2021.06.09.11.54.15_veh-12_04366_04810']
 for it, log in enumerate(log_list):
     try:
         print(f'Iter: {it}... Collecting data from log: ', log)

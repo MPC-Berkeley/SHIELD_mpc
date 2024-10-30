@@ -106,7 +106,7 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     Sev=np.linalg.inv(iSev)
     for t in range(params['N']):
         if u_opt is None:
-            print('USING ZERO CONTROL')
+            # print('USING ZERO CONTROL')
             u_opt = np.zeros((1,params['N']))
 
         a = u_opt[:,t]
@@ -155,6 +155,15 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
 
     return x, x_glob, dx_glob, mm_o_glob, mm_u_tvs, mm_routes, mm_do_glob, mm_Qs, tv_psi, tv_params
 
+def check_agents_in_preds(preds: List[IDMAgent], indices) -> bool:
+    '''
+    Check if there are n agents in the prediction list
+    '''
+    for i in indices:
+        if i > (len(preds) -1):
+            return i, False
+    return None, True
+
 def filter_preds(preds_list: List[IDMAgent], n: int, ego_state) -> List[IDMAgent]:
     '''
     Choose n agents from the list of predictions based on distance from ego_state
@@ -164,9 +173,29 @@ def filter_preds(preds_list: List[IDMAgent], n: int, ego_state) -> List[IDMAgent
     #Sort agents based on distance from ego
     dists = [np.sqrt((agent.to_se2().x-x)**2 + (agent.to_se2().y-y)**2) for agent in preds_list[0]] #distance from ego at current time
     sorted_inds = np.argsort(dists)   
-    preds_list = [[*map(pred.__getitem__, sorted_inds[:n])] for pred in preds_list] #Choose n closest agents
+    if n > len(preds_list[0]):
+        m = len(preds_list[0])
+    else:
+        m = n
 
-    return preds_list
+    # output = [[pred[i] for i in sorted_inds[:m]] for pred in preds_list]
+    output = []
+    for t, pred in enumerate(preds_list):
+        i, flag = check_agents_in_preds(pred,list(sorted_inds[:m]))
+        if flag:
+            output.append([*map(pred.__getitem__, sorted_inds[:m])])
+        else:
+            temp_inds = list(sorted_inds[:m])
+            temp_inds.remove(i)
+            #get index of element i in sorted_inds[:m]
+            add_ind = list(sorted_inds[:m]).index(i)
+            temp_list = [pred[m] for m in temp_inds]
+            temp_list.insert(add_ind,preds_list[t-1][i])
+            output.append(temp_list)
+            # pdb.set_trace()
+    # preds_list = [[*map(pred.__getitem__, sorted_inds[:m])] for pred in preds_list] #Choose n closest agents
+
+    return output
 
 def convert_listofrollouts(paths, concat_rew=True):
     """

@@ -79,7 +79,6 @@ def run_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner, Li
     run_runners(runners=runners, common_builder=common_builder, cfg=cfg, profiler_name='running_simulation')
     logger.info('Finished running simulation!')
 
-
 def clean_up_s3_artifacts() -> None:
     """
     Cleanup lingering s3 artifacts that are written locally.

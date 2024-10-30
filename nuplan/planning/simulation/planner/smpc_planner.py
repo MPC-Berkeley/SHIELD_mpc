@@ -4,6 +4,9 @@ from typing import List, Tuple
 import numpy as np
 from shapely.geometry import LineString, Point, Polygon
 import pdb 
+import datetime
+import pickle
+import os
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.maps.abstract_map_objects import LaneGraphEdgeMapObject
 from nuplan.common.actor_state.state_representation import StateSE2, StateVector2D, TimePoint
@@ -61,7 +64,7 @@ class SMPCPlanner(IDMPlanner):
             self.config['a_min'],
             self.config['N'],
             self.config['dt'],
-            20, #Occupancy_map_radius (Not used)
+            100, #Occupancy_map_radius (Not used)
         )
 
         self.ev_noise_std = ev_noise_std
@@ -69,6 +72,12 @@ class SMPCPlanner(IDMPlanner):
 
         self.u_prev = 0.0 #initialze previous control input(acceleration) to 0 
         self.x_sol = None
+        
+        self.dual_class = []
+        self.expert_action = []
+        self.observation = []
+        self.preds = []
+
         self._initialized = False
 
     def initialize(self, initialization: PlannerInitialization) -> None:
@@ -90,7 +99,7 @@ class SMPCPlanner(IDMPlanner):
             self.ego_traj = self.ego_traj[1:] + [ego_state_tp1]
             return self.ego_traj
         else:
-            #Heuristics for now to get the ego trajectory
+            #Heuristics for now to get the ego trajectory estimation
             ego_state0, _ = history.current_state
             vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
             current_time_point = ego_state0.time_point
@@ -116,21 +125,11 @@ class SMPCPlanner(IDMPlanner):
     
     def get_update_dict(self,current_input: PlannerInput, preds: List) -> dict:
         ego_state, observations = current_input.history.current_state
-
-        # # Ego route and droute
-        # s_arr = [point.progress for point in self._ego_path.get_sampled_path()]
-        # x_arr = [point.x for point in self._ego_path.get_sampled_path()]
-        # y_arr = [point.y for point in self._ego_path.get_sampled_path()]
-        # psi_arr = [point.heading for point in self._ego_path.get_sampled_path()]
-        # v_arr = [0 for _ in self._ego_path.get_sampled_path()]
-
-        # routes = [make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)]
-        # droutes = [make_jac_fun(routes[-1])]
         routes = [self.ego_route]
         droutes = [self.ego_droute]
         params = {'dt': self.config['dt'], 'N': self.config['N'],'N_TV': self.config['num_tvs']}
         ego_progress = self._ego_path_linestring.project(Point(*ego_state.center.point.array))
-        x0 = np.array([[ego_progress],[ego_state.dynamic_car_state.center_velocity_2d.x]])
+        x0 = np.array([[ego_progress],[ego_state.dynamic_car_state.center_velocity_2d.magnitude()]])
         z_lin, x_glob, dpos, o_glob, u_tvs, routes, droutes, Qs, tv_psi, tv_params = get_preds(current_input,
                                                                                                 preds,
                                                                                                 x0, 
@@ -203,52 +202,43 @@ class SMPCPlanner(IDMPlanner):
             self._initialized = True
 
         # Update the SMPC parameters
-        print('GETTING UPDATE DICT...')
-        test = filter_preds(preds,self.config['num_tvs'],ego_state)
+        # print('GETTING UPDATE DICT...')
         update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state))
         # print(update_dict)
-        self.visualize_scene(current_input, preds)
+        # self.visualize_scene(current_input, preds, 0)
+        # self.visualize_scene(current_input, preds, -1)
         self.prev_update_dict = update_dict
-        ####
-        # import matplotlib.pyplot as plt
-        # i = 0
-        # plt.figure()
-        # x_arr, y_arr = [], []
-        # for t in range(len(update_dict['preds'])):
-        #     x = update_dict['preds'][t][i].progress
-        #     y = update_dict['preds'][t][i].velocity
-        #     x_arr.append(x)
-        #     y_arr.append(y)
-        # plt.plot(x_arr,y_arr)
-        # plt.xlabel('s [m]')
-        # plt.ylabel('v [m/s]')
-        # plt.show()
-        ####
         self.smpc.update(update_dict) 
         # Solve the SMPC
-        # pdb.set_trace()
         sol = self.smpc.solve()
         self.optimal = sol['optimal']
         info = {}
-        # if self.optimal:
-        #     print('Getting the optimal duals...')
-        #     # Get the optimal DUALS
-        #     info.update({"l1_duals":sol["l1_duals"], "ca_duals":sol["ca_duals"]})
-        #     dual_class = 0
-        #     l1_duals_vec = np.fromiter(flatten(info["l1_duals"]),float)
-        #     ca_duals_vec = np.fromiter(flatten(info["ca_duals"]),float)
-        #     l1_dual_active = (1-int(np.all(l1_duals_vec<(self.smpc.l1_lmbd-1e-3)*np.ones(l1_duals_vec.shape[0])))) or (1-int(np.all(l1_duals_vec>1e-3*np.ones(l1_duals_vec.shape[0]))))
-        #     ca_duals_active = np.sum(ca_duals_vec>1e-3*np.ones(ca_duals_vec.shape[0]))/ca_duals_vec.shape[0]
-
-        #     if l1_dual_active == 1:
-        #         if ca_duals_active > 0.05 :
-        #             dual_class = 3
-        #         else:
-        #             dual_class = 1
-        #     elif ca_duals_active > 0.05 :
-        #         dual_class = 2
-
-
+        if self.optimal:
+            # Get the optimal DUALS
+            info.update({"l1_duals":sol["l1_duals"], "ca_duals":sol["ca_duals"]})
+            dual_class = 0
+            l1_duals_vec = np.fromiter(flatten(info["l1_duals"]),float)
+            ca_duals_vec = np.fromiter(flatten(info["ca_duals"]),float)
+            l1_dual_active = (1-int(np.all(l1_duals_vec<(self.smpc.l1_lmbd-1e-3)*np.ones(l1_duals_vec.shape[0])))) or (1-int(np.all(l1_duals_vec>1e-3*np.ones(l1_duals_vec.shape[0]))))
+            ca_duals_active = np.sum(ca_duals_vec>1e-3*np.ones(ca_duals_vec.shape[0]))/ca_duals_vec.shape[0]
+            expert_action = np.concatenate((l1_duals_vec,ca_duals_vec))
+            if l1_dual_active == 1:
+                if ca_duals_active > 0.05 :
+                    dual_class = 3
+                else:
+                    dual_class = 1
+            elif ca_duals_active > 0.05 :
+                dual_class = 2
+            self.dual_class.append(dual_class)
+            self.expert_action.append(expert_action)
+            self.observation.append(observations)
+            self.preds.append(filter_preds(preds,self.config['num_tvs'],ego_state))
+        else:
+            pdb.set_trace()
+            self.visualize_scene(current_input, preds, 0)
+            self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
+            
+            print('No optimal solution found')
         #Update u_prev
         self.u_prev = sol['u_control'] if self.optimal else 0 #scalar
         self.u_opt = sol['u_opt'] #size N-1
@@ -275,12 +265,12 @@ class SMPCPlanner(IDMPlanner):
             ego_traj.append(ego_state)
         self.ego_traj = ego_traj
     
-    def visualize_scene(self, current_input, preds) -> None:
+    def visualize_scene(self, current_input, preds, t=0) -> None:
         ego_state, observations = current_input.history.current_state
         ego_x, ego_y = ego_state.center.point.x,ego_state.center.point.y
         ego_length, ego_width = ego_state.car_footprint.vehicle_parameters.length, ego_state.car_footprint.vehicle_parameters.width
         ego_heading = ego_state.center.heading
-
+        print(ego_x, ego_y,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude())
         import matplotlib.pyplot as plt
         plt.figure()
         #draw ego as a rectangle
@@ -290,17 +280,14 @@ class SMPCPlanner(IDMPlanner):
         plt.ylim([ego_y-30,ego_y+30])
 
         # draw target vehicles
-        for j, agent in enumerate(preds[0]):
+        for j, agent in enumerate(preds[t]):
             x, y = agent.to_se2().x, agent.to_se2().y
             length, width = agent.length, agent.width
             heading = agent.to_se2().heading
             rect = plt.Rectangle((x,y),length,width,angle=heading*180/np.pi,fill=True,color='red')
             plt.gca().add_patch(rect)
         plt.axis('equal')
-
         plt.show()
-
-
 
     def _initialize_ego_path(self, ego_state: EgoState) -> None:
         """
@@ -375,3 +362,74 @@ class SMPCPlanner(IDMPlanner):
             )
 
         return route_plan, path_found
+    
+    def visualize_observations(self,ego_state: EgoState, observations: list):
+        """
+        Visualize ego state and observations in a 2D top-down view.
+        :param ego_state: The current state of the ego vehicle.
+        :param observations: List of detected objects (DetectionTrack).
+        """
+        # Set up the plot
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        from nuplan.common.actor_state.agent import Agent
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.set_aspect('equal')
+        
+        # Plot ego vehicle
+        ego_x, ego_y = ego_state.center.point.x, ego_state.center.point.y
+        ego_heading = ego_state.center.heading  # In radians
+        ego_length, ego_width = ego_state.car_footprint.vehicle_parameters.length, ego_state.car_footprint.vehicle_parameters.width
+        ego_box = patches.Rectangle((ego_x - ego_length/2, ego_y - ego_width/2), ego_length, ego_width, 
+                                    angle=np.degrees(ego_heading),
+                                    edgecolor='green', facecolor='green', alpha=1)
+        ax.add_patch(ego_box)
+        # plt.plot(ego_x, ego_y, 'bo', label="Ego Vehicle")
+
+        # Plot each detection
+        for obs in observations:
+            if isinstance(obs, Agent):
+                x, y = obs.box.center.x, obs.box.center.y
+                width, length = obs.box.width, obs.box.length
+                heading = obs.box.center.heading
+
+                # Add rectangle for detected object
+                det_box = patches.Rectangle((x - length / 2, y - width / 2), length, width, 
+                                            angle=np.degrees(heading),
+                                            edgecolor='red', facecolor='red', alpha=1)
+                ax.add_patch(det_box)
+                # plt.plot(x, y, 'ro')
+        
+        ax.set_xlim(ego_x - 30, ego_x + 30)
+        ax.set_ylim(ego_y - 30, ego_y + 30)
+        plt.xlabel("X Position")
+        plt.ylabel("Y Position")
+        plt.legend()
+        plt.title("Ego and Observations Visualization")
+        plt.show()
+
+    def _callback_end_simulation(self) -> None:
+        """Callback to be executed at the end of the simulation."""
+        #Delete SMPC instance for serialization
+        #Store the observation, preds, dual_class, expert_action in a pickle form
+        filepath = self.config['save_dir']
+        if not os.path.exists(filepath): 
+            with open(filepath, 'wb') as f:
+                pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            with open(filepath, 'rb') as f:
+                data = pickle.load(f)
+                data['optimal_duals'].extend(self.expert_action)
+                data['observation'].extend(self.observation)
+                data['dual_class'].extend(self.dual_class)
+                data['preds'].extend(self.preds)
+            with open(filepath, 'wb') as f:
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        #Delete for memory management and lightweight serialization
+        del self.smpc
+        del self.expert_action
+        del self.observation
+        del self.dual_class
+        
+        self._initialized = False

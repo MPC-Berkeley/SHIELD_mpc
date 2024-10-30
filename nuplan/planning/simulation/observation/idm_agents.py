@@ -1,6 +1,7 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Type
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.planning.simulation.observation.idm.idm_agent import IDMAgent
 from nuplan.common.actor_state.tracked_objects import TrackedObject
@@ -119,7 +120,9 @@ class IDMAgents(AbstractObservation):
         if self._open_loop_detections_types:
             open_loop_detections = self._get_open_loop_track_objects(self.current_iteration)
             detections.tracked_objects.tracked_objects.extend(open_loop_detections)
-        return detections, self._get_idm_agent_manager().agents
+        return detections, self._get_idm_agent_manager().get_active_agents(
+            self.current_iteration, self._planned_trajectory_samples, self._planned_trajectory_sample_interval,pred_mode=True
+        )
 
     def update_observation(
         self, iteration: SimulationIteration, next_iteration: SimulationIteration, history: SimulationHistoryBuffer
@@ -160,26 +163,26 @@ class IDMAgents(AbstractObservation):
         Method for obtaining open-loop predictions of the surrounding agents based on the IDM and traffic lights data. 
         The ego vehicle is simulated using the IDM planner (i.e. the surrounding vehicles assume the ego vehicle follows an IDM)
         """
-        import pdb
+        # print(self.current_iteration,iteration.index)
         idm_agent_manager_copy = copy.deepcopy(self._get_idm_agent_manager())
-        if next_iteration is None:
-            current_iteration = min(iteration.index,self._scenario.get_number_of_iterations()-1)
-        else:
-            current_iteration = min(next_iteration.index,self._scenario.get_number_of_iterations()-1)
+        # if next_iteration is None:
+        current_iteration = min(iteration.index,self._scenario.get_number_of_iterations()-1)
+        # print(self.get_observation()[0].tracked_objects.tracked_objects[2].box.center.x)
+        # print(idm_agent_manager_copy.get_active_agents(current_iteration,self._planned_trajectory_samples, self._planned_trajectory_sample_interval,pred_mode=True)[2].to_se2().x)
+        # print(self._get_idm_agent_manager().get_active_agents(current_iteration,self._planned_trajectory_samples, self._planned_trajectory_sample_interval,pred_mode=True)[2].to_se2().x)
+        # else:
+        #     current_iteration = min(next_iteration.index,self._scenario.get_number_of_iterations()-1)
         # tspan = next_iteration.time_s - iteration.time_s
         tspan = 0.1
         # print(f'Tspan: {tspan}')
         traffic_light_data = self._scenario.get_traffic_light_status_at_iteration(current_iteration)
-
         # Extract traffic light data into Dict[traffic_light_status, lane_connector_ids]
         traffic_light_status: Dict[TrafficLightStatusType, List[str]] = defaultdict(list)
-
         for data in traffic_light_data:
             traffic_light_status[data.status].append(str(data.lane_connector_id))
-
         # ego_state, _ = history.current_state
-        preds = [idm_agent_manager_copy.get_active_agents(current_iteration,pred_mode=True,traffic_light_status=traffic_light_status)] #initial_state
-        for t in range(num_samples):
+        preds = [idm_agent_manager_copy.get_active_agents(current_iteration,self._planned_trajectory_samples, self._planned_trajectory_sample_interval,pred_mode=True)] #initial_state
+        for t in range(num_samples):            
             idm_agent_manager_copy.propagate_agents(
                 x_ego[t],
                 tspan,
@@ -189,9 +192,19 @@ class IDMAgents(AbstractObservation):
                 self._radius,
             )
             #Get the agents at the current time
-            preds.append(idm_agent_manager_copy.get_active_agents(current_iteration,pred_mode=True))
+            preds.append(idm_agent_manager_copy.get_active_agents(current_iteration,self._planned_trajectory_samples, self._planned_trajectory_sample_interval,pred_mode=True))
             current_iteration += 1
             current_iteration = min(current_iteration,self._scenario.get_number_of_iterations()-1)
             #Assumes the traffic light status is fixed within the prediction horizon
+            traffic_light_data = self._scenario.get_traffic_light_status_at_iteration(current_iteration)
+
+            # Extract traffic light data into Dict[traffic_light_status, lane_connector_ids]
+            traffic_light_status: Dict[TrafficLightStatusType, List[str]] = defaultdict(list)
+
+            for data in traffic_light_data:
+                traffic_light_status[data.status].append(str(data.lane_connector_id))
+            # print(t, preds[0][2].to_se2().x)
+        # import pdb
+        # pdb.set_trace()
         assert len(preds) == num_samples+1
         return preds

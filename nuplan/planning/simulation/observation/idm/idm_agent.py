@@ -70,6 +70,23 @@ class IDMAgent:
         self._prediction_computation: bool = False
         self._u_prev = 0.
 
+    def copy(self) -> 'IDMAgent':  
+        """
+        Returns a copy of the IDMAgent instance.
+        :return: A new instance of IDMAgent with the same attributes and states
+        """
+        import copy
+        agent= IDMAgent(
+            self._start_iteration,
+            self._initial_state,
+            list(self._route),
+            self._policy,
+            self._minimum_path_length,
+        )
+        agent._state = copy.deepcopy(self._state)
+        agent._path = copy.deepcopy(self._path)
+        return agent
+    
     def propagate(self, lead_agent: IDMLeadAgentState, tspan: float) -> None:
         """
         Propagate agent forward according to the IDM policy.
@@ -191,7 +208,7 @@ class IDMAgent:
         :param sampling_time: [s] time interval of sequence to sample from.
         :return: the agent's trajectory as a list of Agent
         """
-        self._prediction_computation = True
+        # self._prediction_computation = True
         return self._get_agent_at_progress(self._get_bounded_progress(), num_samples, sampling_time)
 
     def plan_route(self, traffic_light_status: Dict[TrafficLightStatusType, List[str]]) -> None:
@@ -241,7 +258,7 @@ class IDMAgent:
         :return: the agent as a Agent object at the given progress
         """
         # Caching
-        if not self._requires_state_update and not self._prediction_computation:
+        if not self._requires_state_update:
             return self._full_agent_state
 
         if self._path is not None:
