@@ -26,7 +26,12 @@ directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini
 log_list = [f.split('.db')[0] for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
 nuboard = True
 log_list = ['2021.06.09.11.54.15_veh-12_04366_04810']
+# log_list = ['2021.06.09.12.39.51_veh-26_05620_06003'] #dual class 0
+# log_list = ['2021.05.12.23.36.44_veh-35_01133_01535'] #infeasible
+#2021.05.12.23.36.44_veh-35_01133_01535 #Infeasibility from start
+# log_list = log_list[2:]
 for it, log in enumerate(log_list):
+    print('#'.center(50, '#'))
     try:
         print(f'Iter: {it}... Collecting data from log: ', log)
         EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]

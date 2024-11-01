@@ -119,14 +119,14 @@ class SimulationRunner(AbstractRunner):
             else:
                 preds = []
                 trajectory = self.planner.compute_trajectory(planner_input,preds)
-
+            
             # Propagate simulation based on planner trajectory
             self._simulation.callback.on_planner_end(self.simulation.setup, self.planner, trajectory)
             self.simulation.propagate(trajectory)
 
             # Execute specific callback
             self.simulation.callback.on_step_end(self.simulation.setup, self.planner, self.simulation.history.last())
-
+            
             # Store reports for simulations which just finished running
             current_time = time.perf_counter()
             if not self.simulation.is_simulation_running():
@@ -135,7 +135,7 @@ class SimulationRunner(AbstractRunner):
 
         # Execute specific callback
         if isinstance(self.planner, SMPCPlanner):
-            self.planner._callback_end_simulation()
+            self.planner._callback_end_simulation(logname=self.simulation.scenario.log_name)
         self.simulation.callback.on_simulation_end(self.simulation.setup, self.planner, self.simulation.history)
 
         planner_report = self.planner.generate_planner_report()

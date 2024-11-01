@@ -308,7 +308,7 @@ class SMPC():
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
-                cost+=100*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
+                cost+=10*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
 
                 '''
                 OBCA constraints
@@ -339,7 +339,7 @@ class SMPC():
                     # Tightening
                     # -self.tight*||Am@(ptw)||_2 >= d_min-[Am@pt-bm.T @ obca_lmbd[k][:,t-1]]
                     # z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][:,t-1] #(144x1)
-                    z = self.tight**(0.5)*(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][:,t-1] #(144x1)
+                    z = self.tight*(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][:,t-1] #(144x1)
                     y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][:,t-1] #+ 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal 
                     # y = -d_min + (A_m @ (pt - tv_nom)-ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2)).T @ obca_lmbd[k][:,t-1] + 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1)
                     # self.ca_constr[k][j][t-1]+=[z.T@z<=y**2, 0<=y]
@@ -351,17 +351,17 @@ class SMPC():
                     self.opti.subject_to(((A_m @ Rev ).T @ obca_lmbd[k][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][:,t-1]) <= 1)
                     self.opti.subject_to(obca_lmbd[k][:,t-1] >= 0)
           
-                    # Linearised obstacle avoidance constraints
-                    # EV position projection onto obstacle ellipse
-                    oa_ref=self.pos_tvs[k][m][:,t]
-                    # oa_ref+=(self.x_pos[:,t]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,t]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-self.pos_tvs[k][m][:,t]))**(0.5)
-                    oa_ref+=(self.x_pos[:,0]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,0]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,0]-self.pos_tvs[k][m][:,t]))**(0.5)
-                    # Coefficient of random variables in affine chance constraint
-                    z=self.tight*((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:]-int(l==k)*self.dpos_tvs[k][m][t-1]@E_tv[k][m][2*t,:] for l in range(self.N_TV)])))
+                    # # Linearised obstacle avoidance constraints
+                    # # EV position projection onto obstacle ellipse
+                    # oa_ref=self.pos_tvs[k][m][:,t]
+                    # # oa_ref+=(self.x_pos[:,t]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,t]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-self.pos_tvs[k][m][:,t]))**(0.5)
+                    # oa_ref+=(self.x_pos[:,0]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,0]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,0]-self.pos_tvs[k][m][:,t]))**(0.5)
+                    # # Coefficient of random variables in affine chance constraint
+                    # z=self.tight*((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:]-int(l==k)*self.dpos_tvs[k][m][t-1]@E_tv[k][m][2*t,:] for l in range(self.N_TV)])))
                     
-                    # constant term in affine chance constraint
-                    # y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h[j]-self.z_lin[0,t]))
-                    y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h-self.z_lin[0,t]))
+                    # # constant term in affine chance constraint
+                    # # y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h[j]-self.z_lin[0,t]))
+                    # y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h-self.z_lin[0,t]))
                     
                     
                     if self.solver=="ipopt":
@@ -469,7 +469,6 @@ class SMPC():
                 nom_z = np.hstack([self.A**t @ self.x0 if t>0 else self.x0 for t in range(self.N+1)]) # 0 acceleration and constant speed prediction.
             # print(u_opt)
             is_opt = False
-            pdb.set_trace()
 
         t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
         t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall'))

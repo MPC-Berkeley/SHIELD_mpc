@@ -85,6 +85,7 @@ class IDMAgent:
         )
         agent._state = copy.deepcopy(self._state)
         agent._path = copy.deepcopy(self._path)
+        agent._u_prev = copy.deepcopy(self._u_prev)
         return agent
     
     def propagate(self, lead_agent: IDMLeadAgentState, tspan: float) -> None:

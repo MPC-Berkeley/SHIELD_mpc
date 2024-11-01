@@ -6,6 +6,7 @@ from shapely.geometry import LineString, Point, Polygon
 import pdb 
 import datetime
 import pickle
+import gzip
 import os
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.maps.abstract_map_objects import LaneGraphEdgeMapObject
@@ -26,7 +27,7 @@ from nuplan.planning.simulation.planner.utils.smpc_utils import flatten, get_pre
 logger = logging.getLogger(__name__)
 
 
-class SMPCPlanner(IDMPlanner):
+class SMPCPlanner(AbstractIDMPlanner):
     """
     The SMPC planner is composed of two parts:
         1. Route planner that constructs a route to the same road block as the goal pose.
@@ -77,6 +78,7 @@ class SMPCPlanner(IDMPlanner):
         self.expert_action = []
         self.observation = []
         self.preds = []
+        self.cl_ego_traj = []
 
         self._initialized = False
 
@@ -101,6 +103,7 @@ class SMPCPlanner(IDMPlanner):
         else:
             #Heuristics for now to get the ego trajectory estimation
             ego_state0, _ = history.current_state
+            print('Get x_ego:', ego_state0.center.point.x, ego_state0.center.point.y)
             vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
             current_time_point = ego_state0.time_point
             if not self._initialized:
@@ -160,6 +163,7 @@ class SMPCPlanner(IDMPlanner):
         """Inherited, see superclass."""
         # Ego current state
         ego_state, observations = current_input.history.current_state
+        print(f'{t}: compute_planner_trajectory:', ego_state.center.point.x, ego_state.center.point.y, ego_state.dynamic_car_state.center_velocity_2d.magnitude())
         if not self._initialized:
             self._initialize_ego_path(ego_state)
             
@@ -201,6 +205,9 @@ class SMPCPlanner(IDMPlanner):
         
             self._initialized = True
 
+        # Get 
+            
+
         # Update the SMPC parameters
         # print('GETTING UPDATE DICT...')
         update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state))
@@ -233,12 +240,19 @@ class SMPCPlanner(IDMPlanner):
             self.expert_action.append(expert_action)
             self.observation.append(observations)
             self.preds.append(filter_preds(preds,self.config['num_tvs'],ego_state))
+            self.cl_ego_traj.append(ego_state)
+            # print(ca_duals_vec)
+            print(dual_class)
+            print(ca_duals_active,l1_dual_active)
+            if ego_state.dynamic_car_state.center_velocity_2d.magnitude() > 3:
+                pdb.set_trace()
         else:
+            print('No optimal solution found')
             pdb.set_trace()
             self.visualize_scene(current_input, preds, 0)
             self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
             
-            print('No optimal solution found')
+            
         #Update u_prev
         self.u_prev = sol['u_control'] if self.optimal else 0 #scalar
         self.u_opt = sol['u_opt'] #size N-1
@@ -246,9 +260,32 @@ class SMPCPlanner(IDMPlanner):
         #Convert smpc solution to NuPlan Trajectory
         # print(sol['nom_z'])
         self._sol2ego_state(sol['nom_z'],ego_state)
-
         return InterpolatedTrajectory(self.ego_traj) #self.ego_traj is a list of EgoState
 
+    def red_light_leading_idm_agent(self,ego_state,observations,current_input):
+        # RED LIGHT
+        # Create occupancy map
+        occupancy_map, unique_observations = self._construct_occupancy_map(ego_state, observations)
+        ego_progress = self._ego_path_linestring.project(Point(*ego_state.center.point.array))
+        ego_idm_state = IDMAgentState(progress=ego_progress, velocity=ego_state.dynamic_car_state.center_velocity_2d.x)
+        # Traffic light handling
+        traffic_light_data = current_input.traffic_light_data
+        self._annotate_occupancy_map(traffic_light_data, occupancy_map)
+        intersecting_agents = occupancy_map.intersects(self._get_expanded_ego_path(ego_state, ego_idm_state))
+        # Check if there are agents intersecting the ego's baseline
+        if intersecting_agents.size > 0:
+
+            # Extract closest object
+            intersecting_agents.insert(self._ego_token, ego_state.car_footprint.geometry)
+            nearest_id, nearest_agent_polygon, relative_distance = intersecting_agents.get_nearest_entry_to(
+                self._ego_token
+            )
+
+            # Red light at intersection
+            if self._red_light_token in nearest_id:
+                return self._get_red_light_leading_idm_state(relative_distance)
+        return None
+    
     def _sol2ego_state(self, sol,ego_state0):
         ego_idm_state = IDMAgentState(progress=sol[0,0], velocity=sol[1,0])
         vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
@@ -270,7 +307,7 @@ class SMPCPlanner(IDMPlanner):
         ego_x, ego_y = ego_state.center.point.x,ego_state.center.point.y
         ego_length, ego_width = ego_state.car_footprint.vehicle_parameters.length, ego_state.car_footprint.vehicle_parameters.width
         ego_heading = ego_state.center.heading
-        print(ego_x, ego_y,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude())
+
         import matplotlib.pyplot as plt
         plt.figure()
         #draw ego as a rectangle
@@ -385,7 +422,6 @@ class SMPCPlanner(IDMPlanner):
                                     angle=np.degrees(ego_heading),
                                     edgecolor='green', facecolor='green', alpha=1)
         ax.add_patch(ego_box)
-        # plt.plot(ego_x, ego_y, 'bo', label="Ego Vehicle")
 
         # Plot each detection
         for obs in observations:
@@ -399,7 +435,6 @@ class SMPCPlanner(IDMPlanner):
                                             angle=np.degrees(heading),
                                             edgecolor='red', facecolor='red', alpha=1)
                 ax.add_patch(det_box)
-                # plt.plot(x, y, 'ro')
         
         ax.set_xlim(ego_x - 30, ego_x + 30)
         ax.set_ylim(ego_y - 30, ego_y + 30)
@@ -409,22 +444,30 @@ class SMPCPlanner(IDMPlanner):
         plt.title("Ego and Observations Visualization")
         plt.show()
 
-    def _callback_end_simulation(self) -> None:
+    def _callback_end_simulation(self,logname: str = None) -> None:
         """Callback to be executed at the end of the simulation."""
         #Delete SMPC instance for serialization
         #Store the observation, preds, dual_class, expert_action in a pickle form
-        filepath = self.config['save_dir']
+        filepath = self.config['save_dir'] + '.gz'
         if not os.path.exists(filepath): 
-            with open(filepath, 'wb') as f:
-                pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with gzip.open(filepath, 'wb') as f:
+                # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                # if logname is not None:
+                pickle.dump({'logname': [logname], 'ego_states': self.cl_ego_traj, 'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                # else:
+                #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
+
         else:
-            with open(filepath, 'rb') as f:
+            with gzip.open(filepath, 'rb') as f:
                 data = pickle.load(f)
-                data['optimal_duals'].extend(self.expert_action)
-                data['observation'].extend(self.observation)
-                data['dual_class'].extend(self.dual_class)
-                data['preds'].extend(self.preds)
-            with open(filepath, 'wb') as f:
+            data['optimal_duals'].extend(self.expert_action)
+            data['observation'].extend(self.observation)
+            data['dual_class'].extend(self.dual_class)
+            data['ego_states'].extend(self.cl_ego_traj)
+            # data['preds'].extend(self.preds)
+            # if logname is not None:
+            data['logname'].extend([logname])
+            with gzip.open(filepath, 'wb') as f:
                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
         #Delete for memory management and lightweight serialization
         del self.smpc

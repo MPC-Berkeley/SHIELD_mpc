@@ -185,14 +185,20 @@ def filter_preds(preds_list: List[IDMAgent], n: int, ego_state) -> List[IDMAgent
         if flag:
             output.append([*map(pred.__getitem__, sorted_inds[:m])])
         else:
-            temp_inds = list(sorted_inds[:m])
-            temp_inds.remove(i)
-            #get index of element i in sorted_inds[:m]
-            add_ind = list(sorted_inds[:m]).index(i)
-            temp_list = [pred[m] for m in temp_inds]
-            temp_list.insert(add_ind,preds_list[t-1][i])
-            output.append(temp_list)
-            # pdb.set_trace()
+            try:
+                temp_inds = list(sorted_inds[:m])
+                temp_inds.remove(i)
+                #get index of element i in sorted_inds[:m]
+                add_ind = list(sorted_inds[:m]).index(i)
+                temp_list = [pred[m] for m in temp_inds]
+                offset = 1
+                while len(preds_list[t-offset]) - 1 < i:
+                    offset += 1
+                temp_list.insert(add_ind,preds_list[t-offset][i])
+                # temp_list.insert(add_ind,output[-1][i])
+                output.append(temp_list)
+            except:
+                pdb.set_trace()
     # preds_list = [[*map(pred.__getitem__, sorted_inds[:m])] for pred in preds_list] #Choose n closest agents
 
     return output
