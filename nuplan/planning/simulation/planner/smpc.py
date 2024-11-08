@@ -101,8 +101,6 @@ class SMPC():
                     yield from _flatten2ca(x)
             else:
                 yield ca.vec(xs)
-
-
        
         self.params = []
         
@@ -149,6 +147,7 @@ class SMPC():
                               [[[np.ones((2,1))]*self.N]*self.N_modes[k] for k in range(self.N_TV)], [[[np.eye(2)]*self.N]*self.N_modes[k] for k in range(self.N_TV)])
         self._update_tv_psi([np.zeros((1,self.N+1))]*self.N_TV)
         self._update_tv_params([[4.47, 2]]*self.N_TV)
+        self._update_red_light(None)
 
         if not self.offline: 
             self._update_gain_and_constr_keeps()            
@@ -162,6 +161,8 @@ class SMPC():
     
         h0=self.opti.variable(1)
         self.obca_lmbd = [self.opti.variable(4, self.N-1) for _ in range(self.N_TV)] #Assuming rectangular obstacles
+        self.obca_lmbd_redlight = self.opti.variable(4, self.N-1)
+        self.redlight = self.opti.parameter(2,1)
         # Uncomment next line for disturbance feedback when using Gurobi. 
         # Runs slow with Ipopt (default)
         # M=[[[self.opti.variable(1, 2) for n in range(t)] for t in range(self.N)] for j in range(self.N_modes)]
@@ -228,7 +229,7 @@ class SMPC():
                         TB_tv[k][j][t*2:(t+1)*2,:]=self.Atv@TB_tv[k][j][(t-1)*2:t*2,:]
                         TB_tv[k][j][t*2:(t+1)*2,t-1:t]=self.Btv
                         E_tv[k][j][t*2:(t+1)*2,:]=self.Atv@E_tv[k][j][(t-1)*2:t*2,:]    
-                        E_tv[k][j][t*2:(t+1)*2,(t-1)*2:t*2]=E
+                        E_tv[k][j][t*2:(t+1)*2,(t-1)*2:t*2]=E * (t/2)
 
                 c_tv[k][j]=TB_tv[k][j]@u_tvs[k][j]             
 
@@ -304,12 +305,31 @@ class SMPC():
 
         obca_lmbd = self.obca_lmbd
         d_min = 2
+        # OBCA for redlight
+        redlight_obca_lmbd = self.obca_lmbd_redlight
+        d_min_red = 0
+        for t in range(1,self.N):
+            ego_psi = self.route(nom_s[t])[2]
+            Rev = ca.vertcat(
+                ca.horzcat(ca.cos(ego_psi), -ca.sin(ego_psi)),
+                ca.horzcat(ca.sin(ego_psi), ca.cos(ego_psi))
+            )
+            #Rotation matrix
+            R_mk = Rev
+            A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T
+            tv_nom = self.redlight #(2x1)
+            b_m = ca.vertcat(0.1/2, 0.1/2,4/2,4/2) + A_m @ tv_nom #Artibrary length = 0.1 m, width = 4 m to represent a stop line
+            pt = self.route(nom_s[t])[:2]
+            y = -d_min_red + (A_m @ pt - b_m).T @ redlight_obca_lmbd[:,t-1]
+            self.opti.subject_to(0<=y)
+            self.opti.subject_to(((A_m @ Rev ).T @ redlight_obca_lmbd[:,t-1]).T @((A_m @ Rev).T @ redlight_obca_lmbd[:,t-1]) <= 1)
+            self.opti.subject_to(redlight_obca_lmbd[:,t-1] >= 0)
 
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
                 cost+=10*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
-
+            
                 '''
                 OBCA constraints
                 '''
@@ -362,8 +382,7 @@ class SMPC():
                     # # constant term in affine chance constraint
                     # # y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h[j]-self.z_lin[0,t]))
                     # y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h-self.z_lin[0,t]))
-                    
-                    
+                     
                     if self.solver=="ipopt":
                         # norm_2(z)<=y
                         # if self.offline:
@@ -528,6 +547,7 @@ class SMPC():
                                 update_dict['droutes'], update_dict['Qs'])
         self._update_tv_psi(update_dict['tv_psi'])
         self._update_tv_params(update_dict['tv_params'])
+        self._update_red_light(update_dict['red_light'])
         if not self.offline:
             if 'l1_duals' in update_dict.keys():
                 if 'canon_prob' in update_dict.keys():
@@ -542,6 +562,13 @@ class SMPC():
         #     # print('warm starting'.center(80,'#'))
         #     self.opti.set_initial(self.vars_pol,self.vars_ws)
         #     self.opti.set_initial(self.vars_epi,self.vars_epi_ws)
+
+    def _update_red_light(self, red_light_agent = None):
+        if red_light_agent is None:
+            self.opti.set_value(self.redlight, [0,0]) #default red light positon, really far away from ego
+        else:
+            red_light = [red_light_agent.to_se2().x,red_light_agent.to_se2().y] #global x and y of red light agent
+            self.opti.set_value(self.redlight, red_light)
 
     def _update_ev_initial_condition(self, x0, u_prev):
         self.x0 = x0

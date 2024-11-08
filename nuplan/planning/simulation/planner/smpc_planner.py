@@ -10,6 +10,7 @@ import gzip
 import os
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.maps.abstract_map_objects import LaneGraphEdgeMapObject
+from nuplan.common.maps.maps_datatypes import SemanticMapLayer, TrafficLightStatusData, TrafficLightStatusType
 from nuplan.common.actor_state.state_representation import StateSE2, StateVector2D, TimePoint
 from nuplan.planning.simulation.observation.idm.utils import create_path_from_se2, path_to_linestring
 from nuplan.planning.simulation.planner.abstract_idm_planner import AbstractIDMPlanner
@@ -150,7 +151,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         'dpos': dpos,
                         'u_tvs': u_tvs,
                         'o_glob': o_glob,
-                        'droutes': droutes,
+                        'droutes': droutes, 
                         'routes': routes,
                         'preds': preds,
                         'Qs': Qs,
@@ -163,14 +164,14 @@ class SMPCPlanner(AbstractIDMPlanner):
         """Inherited, see superclass."""
         # Ego current state
         ego_state, observations = current_input.history.current_state
-        print(f'{t}: compute_planner_trajectory:', ego_state.center.point.x, ego_state.center.point.y, ego_state.dynamic_car_state.center_velocity_2d.magnitude())
+        # print('compute_planner_trajectory:', ego_state.center.point.x, ego_state.center.point.y, ego_state.dynamic_car_state.center_velocity_2d.magnitude())
         if not self._initialized:
             self._initialize_ego_path(ego_state)
             
             N = self.config['N']
             dt = self.config['dt']
 
-            # Lineraized Ego Vehicle Dynamics
+            # Lineraized Ego Vehicle Dynamics   
             A = np.array([[1., dt], [0., 1.]])
             B = np.array([0.5*dt**2,dt])
 
@@ -202,18 +203,11 @@ class SMPCPlanner(AbstractIDMPlanner):
                     eval_mode = False,
                     route = self.ego_route,
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state))
-        
-            self._initialized = True
-
-        # Get 
-            
+            self._initialized = True     
 
         # Update the SMPC parameters
-        # print('GETTING UPDATE DICT...')
         update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state))
-        # print(update_dict)
-        # self.visualize_scene(current_input, preds, 0)
-        # self.visualize_scene(current_input, preds, -1)
+        update_dict.update({'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
         self.prev_update_dict = update_dict
         self.smpc.update(update_dict) 
         # Solve the SMPC
@@ -244,21 +238,17 @@ class SMPCPlanner(AbstractIDMPlanner):
             # print(ca_duals_vec)
             print(dual_class)
             print(ca_duals_active,l1_dual_active)
-            if ego_state.dynamic_car_state.center_velocity_2d.magnitude() > 3:
-                pdb.set_trace()
         else:
-            print('No optimal solution found')
+            print('No optimal solution found') 
             pdb.set_trace()
             self.visualize_scene(current_input, preds, 0)
-            self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
-            
-            
+            # self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
+             
         #Update u_prev
         self.u_prev = sol['u_control'] if self.optimal else 0 #scalar
         self.u_opt = sol['u_opt'] #size N-1
 
         #Convert smpc solution to NuPlan Trajectory
-        # print(sol['nom_z'])
         self._sol2ego_state(sol['nom_z'],ego_state)
         return InterpolatedTrajectory(self.ego_traj) #self.ego_traj is a list of EgoState
 
@@ -283,6 +273,7 @@ class SMPCPlanner(AbstractIDMPlanner):
 
             # Red light at intersection
             if self._red_light_token in nearest_id:
+                print('RED LIGHT DETECTED'.center(50, '-'))
                 return self._get_red_light_leading_idm_state(relative_distance)
         return None
     
@@ -311,7 +302,8 @@ class SMPCPlanner(AbstractIDMPlanner):
         import matplotlib.pyplot as plt
         plt.figure()
         #draw ego as a rectangle
-        ego_rect = plt.Rectangle((ego_x,ego_y),ego_length,ego_width,angle=ego_heading*180/np.pi,fill=True,color='green')
+        ego_rect = plt.Rectangle((ego_x-ego_length/2,ego_y-ego_width/2),ego_length,ego_width,angle=ego_heading*180/np.pi,fill=True,color='green',rotation_point='center')
+
         plt.gca().add_patch(ego_rect)
         plt.xlim([ego_x-30,ego_x+30])
         plt.ylim([ego_y-30,ego_y+30])
@@ -321,8 +313,17 @@ class SMPCPlanner(AbstractIDMPlanner):
             x, y = agent.to_se2().x, agent.to_se2().y
             length, width = agent.length, agent.width
             heading = agent.to_se2().heading
-            rect = plt.Rectangle((x,y),length,width,angle=heading*180/np.pi,fill=True,color='red')
+            # rect = plt.Rectangle((x,y),length,width,angle=heading*180/np.pi,fill=True,color='red') #center it to (x,y)
+            #rectangle with center x,y
+            rect = plt.Rectangle((x-length/2,y-width/2),length,width,angle=heading*180/np.pi,fill=True,color='red',rotation_point='center')
+
             plt.gca().add_patch(rect)
+        
+        #Plot planned traj
+        if hasattr(self, '_ego_path'):
+            for point in self._ego_path.get_sampled_path():
+                plt.plot(point.x,point.y,'gs',markersize=3)
+                
         plt.axis('equal')
         plt.show()
 

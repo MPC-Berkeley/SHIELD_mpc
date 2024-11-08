@@ -237,9 +237,32 @@ class NuPlanScenario(AbstractScenario):
 
     def get_route_roadblock_ids(self) -> List[str]:
         """Inherited, see superclass."""
-        roadblock_ids = get_roadblock_ids_for_lidarpc_token_from_db(self._log_file, self._initial_lidar_token)
-        assert roadblock_ids is not None, "Unable to find Roadblock ids for current scenario"
-        return cast(List[str], roadblock_ids)
+        # import pdb
+        # from nuplan.common.maps.maps_datatypes import SemanticMapLayer
+        # roadblock_ids = get_roadblock_ids_for_lidarpc_token_from_db(self._log_file, self._initial_lidar_token)
+        # ###
+        # # This is a temporary fix to get the roadblock ids for the current scenario. Author: hansung@berkeley.edu
+        # ###
+        # future_rd_blks = []
+        # for t in range(1,self.get_number_of_iterations()):
+        #     future_rd_blks.extend(self.map_api.get_all_map_objects(self.get_ego_state_at_iteration(t).center.point, SemanticMapLayer.ROADBLOCK))
+        #     future_rd_blks.extend(self.map_api.get_all_map_objects(self.get_ego_state_at_iteration(t).center.point, SemanticMapLayer.ROADBLOCK_CONNECTOR)) 
+        # future_rd_blks = list(set(future_rd_blks))
+        # future_rd_blks_ids = [rd_blk.id for rd_blk in future_rd_blks]
+        # # roadblock_ids = []
+        # for t in range(self.get_number_of_iterations()):
+        #     rd_blks = self.map_api.get_all_map_objects(self.get_ego_state_at_iteration(t).center.point, SemanticMapLayer.ROADBLOCK)
+        #     rd_blks = self.map_api.get_all_map_objects(self.get_ego_state_at_iteration(t).center.point, SemanticMapLayer.ROADBLOCK_CONNECTOR) if not rd_blks else rd_blks
+        #     for rd_blk in rd_blks:
+        #         for edge in rd_blk.outgoing_edges:
+        #             if edge.id in future_rd_blks_ids:
+        #                 roadblock_ids.append(rd_blk.id)
+        #                 break
+        # import pdb
+        # pdb.set_trace()
+        # assert roadblock_ids is not None, "Unable to find Roadblock ids for current scenario"
+        # return cast(List[str], roadblock_ids)
+        return self._route_roadblock_ids
 
     def get_expert_goal_state(self) -> StateSE2:
         """Inherited, see superclass."""

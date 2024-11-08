@@ -7,7 +7,8 @@
 import os
 from pathlib import Path
 import tempfile
-
+from nuplan.planning.script.run_simulation import run_simulation as main_simulation
+from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner, IDMPlanner
 import hydra
 
 from tutorials.utils.tutorial_utils import construct_simulation_hydra_paths
@@ -25,7 +26,7 @@ directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini
 #Data directory
 log_list = [f.split('.db')[0] for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
 nuboard = True
-log_list = ['2021.06.09.11.54.15_veh-12_04366_04810']
+# log_list = ['2021.06.09.11.54.15_veh-12_04366_04810']
 # log_list = ['2021.06.09.12.39.51_veh-26_05620_06003'] #dual class 0
 # log_list = ['2021.05.12.23.36.44_veh-35_01133_01535'] #infeasible
 #2021.05.12.23.36.44_veh-35_01133_01535 #Infeasibility from start
@@ -51,7 +52,7 @@ for it, log in enumerate(log_list):
         cfg = hydra.compose(config_name=simulation_hydra_paths.config_name, overrides=[
             f'group={SAVE_DIR}',
             f'experiment_name=smpc_expert_trajectory',
-            f'job_name=data_collection',
+            f'job_name=data_collection', 
             'experiment=${experiment_name}/${job_name}',
             'worker=sequential',
             f'ego_controller={EGO_CONTROLLER}',
@@ -64,14 +65,21 @@ for it, log in enumerate(log_list):
         '''
         Initilize the planner
         '''
-        from nuplan.planning.script.run_simulation import run_simulation as main_simulation
-        from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner
+
 
         # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
         ev_noise_std=[0.01,0.1]
         tv_noise_std=[0.1, 0.1]
 
         planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std)
+        # planner = IDMPlanner(target_velocity = 12.,
+        # min_gap_to_lead_agent = 3.,
+        # headway_time= 3.,
+        # accel_max = 3.,
+        # decel_max = 4.,
+        # planned_trajectory_samples = 10,
+        # planned_trajectory_sample_interval = 0.1,
+        # occupancy_map_radius = 50,)
 
         # Run the simulation loop (real-time visualization not yet supported, see next section for visualization)
         main_simulation(cfg, planner)

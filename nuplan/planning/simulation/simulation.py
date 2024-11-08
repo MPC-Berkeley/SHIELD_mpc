@@ -128,7 +128,6 @@ class Simulation:
 
         # Add the current state into the history buffer
         self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation()[0])
-        
         # Return the planner initialization structure for this simulation
         return PlannerInitialization(
             route_roadblock_ids=self._scenario.get_route_roadblock_ids(),

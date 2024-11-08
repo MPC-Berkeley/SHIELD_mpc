@@ -196,6 +196,7 @@ class AbstractIDMPlanner(AbstractPlanner, ABC):
 
             # Red light at intersection
             if self._red_light_token in nearest_id:
+                print('RED LIGHT DETECTED') 
                 return self._get_red_light_leading_idm_state(relative_distance)
 
             # An agent is the leading agent
