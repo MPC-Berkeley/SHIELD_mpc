@@ -119,7 +119,6 @@ def set_up_common_builder(cfg: DictConfig, profiler_name: str) -> CommonBuilder:
         profiler=profiler,
     )
 
-
 def run_runners(
     runners: List[AbstractRunner], common_builder: CommonBuilder, profiler_name: str, cfg: DictConfig
 ) -> None:

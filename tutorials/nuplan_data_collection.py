@@ -25,11 +25,12 @@ SAVE_DIR = tempfile.mkdtemp()
 directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/'
 #Data directory
 log_list = [f.split('.db')[0] for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
-nuboard = True
+nuboard = False
 # log_list = ['2021.06.09.11.54.15_veh-12_04366_04810']
 # log_list = ['2021.06.09.12.39.51_veh-26_05620_06003'] #dual class 0
 # log_list = ['2021.05.12.23.36.44_veh-35_01133_01535'] #infeasible
 #2021.05.12.23.36.44_veh-35_01133_01535 #Infeasibility from start
+# log_list = ['2021.06.14.16.32.09_veh-35_05038_05402']
 # log_list = log_list[2:]
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
@@ -41,7 +42,7 @@ for it, log in enumerate(log_list):
             'scenario_builder=nuplan_mini',  # use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
             'scenario_filter=one_continuous_log',  # simulate only one log
             f"scenario_filter.log_names=[{str(log)}]",
-            'scenario_filter.limit_total_scenarios=1',  # use 2 total scenarios
+            'scenario_filter.limit_total_scenarios=2',  # use 2 total scenarios
         ]
         #2021.07.16.20.45.29_veh-35_01095_01486
         # Initialize configuration management system
