@@ -33,11 +33,12 @@ def make_jac_fun(pos_fun):
     pos_jac=ca.jacobian(pos_fun(s_sym), s_sym)
     return ca.Function("pos_jac",[s_sym], [pos_jac])      
 
-def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, droutes, u_opt = None, ego_traj = None):
+def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, droutes, u_opt = None, ego_traj = None,ego_p0=None):
     '''
     Getting EV predictions from previous MPC solution.
     This is used for linearizing the collision avoidance constraints
     '''
+    assert ego_p0 is not None, 'Ego initial position must be provided'
     ego_state, observations = current_input.history.current_state
     
     #Convert IDM predictions to global coordinates
@@ -64,14 +65,10 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     #Convert InterpolatedPath to casadi functions (routes and droutes)
     for path in agent_paths:
         s_arr = [point.progress for point in path.get_sampled_path()]
-        x_arr = [point.x for point in path.get_sampled_path()]
-        y_arr = [point.y for point in path.get_sampled_path()]
+        x_arr = [point.x for point in path.get_sampled_path()] #relative to ego initial position to scale the global coordinates
+        y_arr = [point.y for point in path.get_sampled_path()] #relative to ego initial position to scale the global coordinates
         psi_arr = [point.heading for point in path.get_sampled_path()]
         v_arr = [0 for _ in path.get_sampled_path()]
-        test_s = np.array(s_arr)
-        if not np.all((test_s[1:] - test_s[:-1]) > 0):
-            print('s_arr not increasing')
-            pdb.set_trace()
         routes.append(make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr))
         droutes.append(make_jac_fun(routes[-1]))
 
@@ -198,7 +195,10 @@ def filter_preds(preds_list: List[IDMAgent], n: int, ego_state) -> List[IDMAgent
                 # temp_list.insert(add_ind,output[-1][i])
                 output.append(temp_list)
             except:
-                pdb.set_trace()
+                #backup. append exiting agents
+                temp_inds.insert(add_ind,temp_inds[0])
+                output.append([*map(pred.__getitem__, temp_inds)])
+                # pdb.set_trace()
     # preds_list = [[*map(pred.__getitem__, sorted_inds[:m])] for pred in preds_list] #Choose n closest agents
 
     return output

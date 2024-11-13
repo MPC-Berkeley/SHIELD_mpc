@@ -113,7 +113,15 @@ class SimulationRunner(AbstractRunner):
             if isinstance(self.planner, SMPCPlanner): 
                 #Get IDM predictions for planner
                 time_controller_copy = copy.deepcopy(self.simulation._time_controller)
-                preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                self.simulation.scenario.get_expert_ego_trajectory()
+                # 
+                # import pdb
+                # pdb.set_trace()
+                if self.simulation._time_controller.get_iteration().index == 0:
+                    ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
+                    preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                else:
+                    preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
                 # Plan path based on all planner's inputs
                 trajectory = self.planner.compute_trajectory(planner_input,preds)
             else:

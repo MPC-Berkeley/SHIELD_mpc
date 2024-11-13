@@ -31,6 +31,7 @@ class SMPC():
                 TV_NOISE_STD    =[[0.01, 0.02]]*5,
                 Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
                 R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
+                ev_length = 4.47,
                 offline_mode=True,
                 solver="ipopt",
                 open_loop = False,
@@ -45,6 +46,7 @@ class SMPC():
         self.V_MAX=V_MAX
         self.A_MAX=A_MAX
         self.A_MIN=A_MIN
+        self.ev_length = ev_length
 
         self.preds = preds #Predictions of the vehicles List[List[IDMAgent]]. Outer list is of length N+1 and inner list is of length N_TV
         self.N_TV=len(preds[0])
@@ -163,6 +165,7 @@ class SMPC():
         self.obca_lmbd = [self.opti.variable(4, self.N-1) for _ in range(self.N_TV)] #Assuming rectangular obstacles
         self.obca_lmbd_redlight = self.opti.variable(4, self.N-1)
         self.redlight = self.opti.parameter(2,1)
+        self.slack = self.opti.variable(1)
         # Uncomment next line for disturbance feedback when using Gurobi. 
         # Runs slow with Ipopt (default)
         # M=[[[self.opti.variable(1, 2) for n in range(t)] for t in range(self.N)] for j in range(self.N_modes)]
@@ -194,7 +197,7 @@ class SMPC():
         M_stack=ca.vertcat(*[ca.horzcat(*[M[t][n] for n in range(t)], ca.DM(1,2*(self.N-t))) for t in range(self.N)])
         K_stack=[[ca.diagcat(ca.DM(1,2),*[K[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
         
-        self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
+        self.vars_pol = ca.vertcat(h_stack, self.slack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
         if self.offline:
             self.vars_epi = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(self.gain_l1[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
         self.vars_ws, self.vars_epi_ws  = None, None 
@@ -229,7 +232,7 @@ class SMPC():
                         TB_tv[k][j][t*2:(t+1)*2,:]=self.Atv@TB_tv[k][j][(t-1)*2:t*2,:]
                         TB_tv[k][j][t*2:(t+1)*2,t-1:t]=self.Btv
                         E_tv[k][j][t*2:(t+1)*2,:]=self.Atv@E_tv[k][j][(t-1)*2:t*2,:]    
-                        E_tv[k][j][t*2:(t+1)*2,(t-1)*2:t*2]=E * (t/2)
+                        E_tv[k][j][t*2:(t+1)*2,(t-1)*2:t*2]=E #*(t/2)#* (t/3 if t < int(3*self.N/2) else int(self.N/2)/3)
 
                 c_tv[k][j]=TB_tv[k][j]@u_tvs[k][j]             
 
@@ -270,9 +273,7 @@ class SMPC():
     def _add_constraints_and_cost(self):
         """
         Constructs obstacle avoidance, state-input constraints for Stochastic MPC, based on https://arxiv.org/abs/2109.09792
-        """   
-
-        
+        """           
         [A,B,E]=self._get_LTV_EV_dynamics()
         [T_tv,c_tv,E_tv]=self._get_ATV_TV_dynamics()
         [h,M,K]=self.policy
@@ -285,17 +286,14 @@ class SMPC():
         self.opti.subject_to(self.opti.bounded(self.A_MIN, h, self.A_MAX))
 
         
-
-        
         nom_z=A@self.z_curr+B@h
         self.nom_z = nom_z
         nom_s=ca.vec(nom_z.reshape((2,-1))[0,:])
         nom_z_diff=ca.vec(ca.diff(nom_z.reshape((2,-1)),1,1))
 
-        # cost+=-2.7*self.Q*ca.sum1(nom_s) +2.*self.Q*nom_z_diff.T@nom_z_diff# penalizes slow progress
-        cost+=-1.*self.Q*ca.sum1(nom_s) + 3.5*self.Q*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -2.5, 2)
+        # cost+=-2.7*self.Q*ca.sum1(nom_s) +2.*self.Q*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -2.5, 2)
+        cost+=-4.*self.Q*ca.sum1(nom_s) + 3.5*self.Q*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -1, 3.5)
         cost+=self.R*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates
-
         
         if self.offline:
             self.lin_ineq_l1 = []
@@ -304,7 +302,8 @@ class SMPC():
             self.ca_constr=[[[ [] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
 
         obca_lmbd = self.obca_lmbd
-        d_min = 2
+        d_min = self.ev_length/2
+
         # OBCA for redlight
         redlight_obca_lmbd = self.obca_lmbd_redlight
         d_min_red = 0
@@ -318,7 +317,7 @@ class SMPC():
             R_mk = Rev
             A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T
             tv_nom = self.redlight #(2x1)
-            b_m = ca.vertcat(0.1/2, 0.1/2,4/2,4/2) + A_m @ tv_nom #Artibrary length = 0.1 m, width = 4 m to represent a stop line
+            b_m = ca.vertcat(0.5/2, 0.5/2,2/2,2/2) + A_m @ tv_nom #Artibrary length = 0.1 m, width = 4 m to represent a stop line
             pt = self.route(nom_s[t])[:2]
             y = -d_min_red + (A_m @ pt - b_m).T @ redlight_obca_lmbd[:,t-1]
             self.opti.subject_to(0<=y)
@@ -368,8 +367,11 @@ class SMPC():
                     self.opti.subject_to(self.ca_constr[k][j][t-1][0])
                     # self.opti.subject_to(self.ca_constr[k][j][t-1][1])
         
-                    self.opti.subject_to(((A_m @ Rev ).T @ obca_lmbd[k][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][:,t-1]) <= 1)
+                    self.opti.subject_to(((A_m @ Rev ).T @ obca_lmbd[k][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][:,t-1]) <= 1 + self.slack)
                     self.opti.subject_to(obca_lmbd[k][:,t-1] >= 0)
+
+                    #slack cost
+                    cost += 1e5*self.slack
           
                     # # Linearised obstacle avoidance constraints
                     # # EV position projection onto obstacle ellipse
@@ -474,6 +476,7 @@ class SMPC():
             is_opt     = True
         except:
             # self.opti.debug.show_infeasibilities()
+            # pdb.set_trace()
             if self.offline:
                 self.vars_ws , self.vars_epi_ws = None, None  
             infeas_status = ['Infeasible_Problem_Detected'] if self.solver=="ipopt" else ["INF_OR_UNBD"]
@@ -485,7 +488,14 @@ class SMPC():
             else:
                 u_control  = self.u_backup
                 u_opt = np.array([self.u_backup]*(self.N-1)).reshape((1,-1))
-                nom_z = np.hstack([self.A**t @ self.x0 if t>0 else self.x0 for t in range(self.N+1)]) # 0 acceleration and constant speed prediction.
+                accumulated_dynamics = []
+                for t in range(self.N+1):
+                    temp = 0
+                    for offset in range(t):
+                        temp += np.linalg.matrix_power(self.A,t-offset)@self.B*self.u_backup if t-offset > 0 else 0
+                    accumulated_dynamics.append(temp)
+                nom_z = np.hstack([sum(x) for x in zip([np.linalg.matrix_power(self.A,t)@self.x0 for t in range(self.N+1)], accumulated_dynamics)]) #maximum braking
+                # nom_z = np.hstack([self.A**t @ self.x0 if t>0 else self.x0 for t in range(self.N+1)]) # 0 acceleration and constant speed prediction.
             # print(u_opt)
             is_opt = False
 
@@ -499,14 +509,14 @@ class SMPC():
         sol_dict['u_opt']      = u_opt      # optimal control sequence
         sol_dict['optimal']    = is_opt      # whether the solution is optimal or not
         if is_opt:
-                sol_dict['h_opt']=h_opt
-                sol_dict['M_opt']=M_opt
-                sol_dict['K_opt']=K_opt
-                sol_dict['nom_z_tv']=nom_z_tv
+            sol_dict['h_opt']=h_opt
+            sol_dict['M_opt']=M_opt
+            sol_dict['K_opt']=K_opt
+            sol_dict['nom_z_tv']=nom_z_tv
 
-                if self.offline and self.solver == 'ipopt':
-                    sol_dict['l1_duals']=l1_duals
-                    sol_dict['ca_duals']=ca_duals
+            if self.offline and self.solver == 'ipopt':
+                sol_dict['l1_duals']=l1_duals
+                sol_dict['ca_duals']=ca_duals
                 
                 
         sol_dict['solve_time'] = solve_time  # how long the solver took in seconds
@@ -567,7 +577,7 @@ class SMPC():
         if red_light_agent is None:
             self.opti.set_value(self.redlight, [0,0]) #default red light positon, really far away from ego
         else:
-            red_light = [red_light_agent.to_se2().x,red_light_agent.to_se2().y] #global x and y of red light agent
+            red_light = [red_light_agent.x,red_light_agent.y] #global x and y of red light agent
             self.opti.set_value(self.redlight, red_light)
 
     def _update_ev_initial_condition(self, x0, u_prev):
@@ -785,7 +795,7 @@ class SMPC():
                             vars_seen.add((k,j,t))
                         # print(f'k,m,t: {k,m,t} \n  ca_duals dim: {len(ca_duals),len(ca_duals[k]),len(ca_duals[k][m])}')
                         constr_keep =int(np.linalg.norm(ca_duals[k][m][t][0])>1e-3)
-                        # constr_keep = _safe_screen(ca_duals[k][m][t][0], gap_radius= gap ,dual_type='ca_dual')
+                        # constr_keep = _safe_screen(ca_duals[k][m][t][0], gap_radius=gap ,dual_type='ca_dual')
                         if t <= 1: 
                             constr_keep = 1
                         constr_kept+=constr_keep

@@ -1,7 +1,7 @@
 N: 10
 dt: 0.1
 num_tvs: 5
-a_max: 2.0
+a_max: 3.0
 a_min: -5.0
 v_max: 15.
 v_min: -1.

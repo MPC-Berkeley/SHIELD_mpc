@@ -25,13 +25,38 @@ SAVE_DIR = tempfile.mkdtemp()
 directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/'
 #Data directory
 log_list = [f.split('.db')[0] for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
-nuboard = False
+nuboard = True
 # log_list = ['2021.06.09.11.54.15_veh-12_04366_04810']
 # log_list = ['2021.06.09.12.39.51_veh-26_05620_06003'] #dual class 0
 # log_list = ['2021.05.12.23.36.44_veh-35_01133_01535'] #infeasible
 #2021.05.12.23.36.44_veh-35_01133_01535 #Infeasibility from start
-# log_list = ['2021.06.14.16.32.09_veh-35_05038_05402']
+# log_list = ['2021.06.07.12.54.00_veh-35_01843_02314']
 # log_list = log_list[2:]
+scenario_types=[
+  'behind_long_vehicle',
+  'crossed_by_vehicle',
+  'following_lane_with_lead',
+  'following_lane_with_slow_lead',
+  'following_lane_without_lead',
+  'high_lateral_acceleration',
+  'high_magnitude_jerk',
+  'high_magnitude_speed',
+  'low_magnitude_speed',
+  'medium_magnitude_speed',
+  'near_high_speed_vehicle',
+  'near_long_vehicle',
+  'near_multiple_vehicles',
+  'on_intersection',
+  'on_traffic_light_intersection',
+  'starting_high_speed_turn',
+  'starting_protected_cross_turn',
+  'starting_protected_noncross_turn',
+  'starting_right_turn',
+  'starting_u_turn',
+  'starting_unprotected_cross_turn',
+  'starting_unprotected_noncross_turn',
+  'traversing_intersection',
+  'traversing_traffic_light_intersection',]
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
     try:
@@ -40,11 +65,13 @@ for it, log in enumerate(log_list):
         OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
         DATASET_PARAMS = [
             'scenario_builder=nuplan_mini',  # use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
-            'scenario_filter=one_continuous_log',  # simulate only one log
             f"scenario_filter.log_names=[{str(log)}]",
-            'scenario_filter.limit_total_scenarios=2',  # use 2 total scenarios
+            f'scenario_filter.scenario_types={scenario_types}', #non-stationary ego scenarios only
+            'scenario_filter.ego_displacement_minimum_m=0.1', #non-stationary threshold: ego moves at least this many meters in the scenario
+            'scenario_filter.limit_total_scenarios=1',  # use 2 total scenarios
+            'scenario_filter.remove_invalid_goals=true',  # use 1 scenario per log
         ]
-        #2021.07.16.20.45.29_veh-35_01095_01486
+
         # Initialize configuration management system
         hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
         hydra.initialize(config_path=simulation_hydra_paths.config_path)

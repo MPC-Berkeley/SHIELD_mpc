@@ -59,14 +59,14 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.config = yaml.load(f, Loader=yaml.FullLoader)
 
         super(SMPCPlanner, self).__init__(
-            5.0, # (Not used)
-            2.0, #min_gap_to_lead_agent (Not used)
-            2.0, #headway time (Not used)
-            self.config['a_max'],
-            self.config['a_min'],
-            self.config['N'],
-            self.config['dt'],
-            100, #Occupancy_map_radius (Not used)
+            target_velocity=20.0, # (Not used)
+            min_gap_to_lead_agent=2.0, #min_gap_to_lead_agent (Not used)
+            headway_time=2.0, #headway time (Not used)
+            accel_max=self.config['a_max'],
+            decel_max=-self.config['a_min'],
+            planned_trajectory_samples=self.config['N'],
+            planned_trajectory_sample_interval=self.config['dt'],
+            occupancy_map_radius=100, #Occupancy_map_radius (Not used)
         )
 
         self.ev_noise_std = ev_noise_std
@@ -141,7 +141,8 @@ class SMPCPlanner(AbstractIDMPlanner):
                                                                                                 routes,
                                                                                                 droutes,
                                                                                                 u_opt=self.u_opt if hasattr(self, 'u_opt') and self.optimal else None,
-                                                                                                ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None)
+                                                                                                ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None,
+                                                                                                ego_p0=self.ego_initial_position)
        
         update_dict =   {'x0': x0,
                          'o0': [np.array([[agent.progress],[agent.velocity]]) for agent in preds[0]],
@@ -167,6 +168,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         # print('compute_planner_trajectory:', ego_state.center.point.x, ego_state.center.point.y, ego_state.dynamic_car_state.center_velocity_2d.magnitude())
         if not self._initialized:
             self._initialize_ego_path(ego_state)
+            self.ego_initial_position = ego_state.center.point
             
             N = self.config['N']
             dt = self.config['dt']
@@ -177,11 +179,10 @@ class SMPCPlanner(AbstractIDMPlanner):
 
             # Ego route and droute
             s_arr = [point.progress for point in self._ego_path.get_sampled_path()]
-            x_arr = [point.x for point in self._ego_path.get_sampled_path()]
-            y_arr = [point.y for point in self._ego_path.get_sampled_path()]
+            x_arr = [point.x for point in self._ego_path.get_sampled_path()] #relative to initial ego position to scale
+            y_arr = [point.y for point in self._ego_path.get_sampled_path()] #relative to initial ego position to scale
             psi_arr = [point.heading for point in self._ego_path.get_sampled_path()]
             v_arr = [0 for _ in self._ego_path.get_sampled_path()]
-
             self.ego_route = make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)
             self.ego_droute = make_jac_fun(self.ego_route)
 
@@ -192,11 +193,11 @@ class SMPCPlanner(AbstractIDMPlanner):
                     V_MAX        = self.config['v_max'], 
                     A_MIN        = self.config['a_min'],
                     A_MAX        =  self.config['a_max'],
-                    TIGHTENING   =  2.6, #2.4
                     EV_NOISE_STD    =  self.ev_noise_std,
                     TV_NOISE_STD    = self.tv_noise_std,
                     Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
                     R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
+                    ev_length=ego_state.car_footprint.vehicle_parameters.length,
                     offline_mode=True,
                     solver="ipopt",
                     open_loop = False,
@@ -235,13 +236,14 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.observation.append(observations)
             self.preds.append(filter_preds(preds,self.config['num_tvs'],ego_state))
             self.cl_ego_traj.append(ego_state)
-            # print(ca_duals_vec)
+            print(ca_duals_vec)
             print(dual_class)
             print(ca_duals_active,l1_dual_active)
+            pdb.set_trace()
         else:
             print('No optimal solution found') 
             pdb.set_trace()
-            self.visualize_scene(current_input, preds, 0)
+            # self.visualize_scene(current_input, preds, 0)
             # self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
              
         #Update u_prev
@@ -274,7 +276,8 @@ class SMPCPlanner(AbstractIDMPlanner):
             # Red light at intersection
             if self._red_light_token in nearest_id:
                 print('RED LIGHT DETECTED'.center(50, '-'))
-                return self._get_red_light_leading_idm_state(relative_distance)
+                return self._ego_path.get_state_at_progress(ego_progress+relative_distance)
+                # return self._get_red_light_leading_idm_state(relative_distance)
         return None
     
     def _sol2ego_state(self, sol,ego_state0):

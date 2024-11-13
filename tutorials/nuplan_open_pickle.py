@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 
 def load_simulation_log(file_path: str):
     """Load simulation log from a pickle file."""
-    pdb.set_trace()
     with gzip.open(file_path, 'rb') as f:
         data = pickle.load(f)
     return data
@@ -103,9 +102,10 @@ def main(args):
     print(args.file_path)
     data = load_simulation_log(args.file_path)
     print(data.keys())
+    pdb.set_trace()
     # print(data['optimal_duals'])
     # print(data['observation'])
-    print(data['dual_class'])
+    # print(data['dual_class'])
     # print(data['preds'])
     # visualize_observation(data,0)
     replay_simulation(data)
@@ -115,7 +115,7 @@ def main(args):
     plt.ylabel('Frequency')
     plt.title('Histogram of Dual Class')
     plt.show()
-    pdb.set_trace()
+    # pdb.set_trace()
 
 
 
