@@ -7,6 +7,7 @@ import time
 # from nuplan.planning.simulation.planner.idm_planner import IDMPlanner
 from nuplan.common.actor_state.agent import Agent, PredictedTrajectory
 from nuplan.planning.simulation.observation.observation_type import Observation
+from nuplan.planning.simulation.observation.idm_agents import IDMAgents
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
 from nuplan.planning.simulation.callback.abstract_callback import AbstractCallback
 from nuplan.planning.simulation.callback.multi_callback import MultiCallback
@@ -69,18 +70,6 @@ class Simulation:
         # Flag that keeps track whether simulation is still running
         self._is_simulation_running = True
 
-        # #IDM Planner for predictions
-        # self.idm_planner = IDMPlanner(
-        #     target_velocity=10,
-        #     min_gap_to_lead_agent=0.5,
-        #     headway_time=1.5,
-        #     accel_max=1.0,
-        #     decel_max=2.0,
-        #     planned_trajectory_samples=OCP_N,
-        #     planned_trajectory_sample_interval=0.2,
-        #     occupancy_map_radius=20,
-        # )
-
     def __reduce__(self) -> Tuple[Type[Simulation], Tuple[Any, ...]]:
         """
         Hints on how to reconstruct the object when pickling.
@@ -111,7 +100,7 @@ class Simulation:
         # Restart simulation
         self._is_simulation_running = True
 
-    def initialize(self) -> PlannerInitialization:
+    def initialize(self,sim_mode: str) -> PlannerInitialization:
         """
         Initialize the simulation
          - Initialize Planner with goals and maps
@@ -124,10 +113,19 @@ class Simulation:
             self._history_buffer_size, self._scenario, self._observations.observation_type()
         )
         # Initialize observations
-        self._observations.initialize()
+        if sim_mode == 'openloop':
+            self._tv_paths_se2 = self._scenario._get_agent_paths_from_log()
+        else:
+            self._tv_paths_se2 = None
+        self._observations.initialize(self._tv_paths_se2)
+
 
         # Add the current state into the history buffer
-        self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation()[0])
+        if isinstance(self._setup.observations,IDMAgents):
+            self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation()[0])
+        else:
+            self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation())
+
         # Return the planner initialization structure for this simulation
         return PlannerInitialization(
             route_roadblock_ids=self._scenario.get_route_roadblock_ids(),
@@ -152,7 +150,10 @@ class Simulation:
         # Extract traffic light status data
         traffic_light_data = list(self._scenario.get_traffic_light_status_at_iteration(iteration.index))
         logger.debug(f"Executing {iteration.index}!")
-        return PlannerInput(iteration=iteration, history=self._history_buffer, traffic_light_data=traffic_light_data,agents=self._observations.get_observation()[1])
+        if isinstance(self._setup.observations,IDMAgents):
+            return PlannerInput(iteration=iteration, history=self._history_buffer, traffic_light_data=traffic_light_data,agents=self._observations.get_observation()[1])
+        else:
+            return PlannerInput(iteration=iteration, history=self._history_buffer, traffic_light_data=traffic_light_data, agents=self._observations.get_observation())
 
     def propagate(self, trajectory: AbstractTrajectory) -> None:
         """
@@ -189,7 +190,10 @@ class Simulation:
             self._is_simulation_running = False
 
         # Append new state into history buffer
-        self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation()[0])
+        if isinstance(self._setup.observations,IDMAgents):
+            self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation()[0])
+        else:
+            self._history_buffer.append(self._ego_controller.get_state(), self._observations.get_observation())
     
     @property
     def scenario(self) -> AbstractScenario:

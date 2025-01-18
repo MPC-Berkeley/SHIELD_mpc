@@ -27,8 +27,9 @@ class TracksObservation(AbstractObservation):
         """Inherited, see superclass."""
         return DetectionsTracks  # type: ignore
 
-    def initialize(self) -> None:
+    def initialize(self,tv_paths_se2 = None) -> None:
         """Inherited, see superclass."""
+        self._tv_paths_se2 = tv_paths_se2
         pass
 
     def get_observation(self) -> DetectionsTracks:

@@ -6,10 +6,11 @@ Functions to edit:
 """
 import numpy as np
 import time
-from typing import List
+from typing import List, Union, Dict
 from torch.autograd import Variable
 from collections.abc import Iterable
 import numpy as np
+from shapely.geometry import LineString, Point, Polygon
 import torch as th
 import pdb
 import time
@@ -17,6 +18,9 @@ import os
 import copy
 import casadi as ca
 from nuplan.planning.simulation.observation.idm.idm_agent import IDMAgent
+from nuplan.common.actor_state.agent import Agent
+from nuplan.planning.simulation.observation.idm.utils import create_path_from_se2, path_to_linestring
+
 
 def make_ca_fun(s, x, y, psi, v):
     x_ca= ca.interpolant("f2gx", "linear", [s], x)
@@ -33,7 +37,7 @@ def make_jac_fun(pos_fun):
     pos_jac=ca.jacobian(pos_fun(s_sym), s_sym)
     return ca.Function("pos_jac",[s_sym], [pos_jac])      
 
-def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, droutes, u_opt = None, ego_traj = None,ego_p0=None):
+def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent]], x0, params, routes, droutes, simulation_t: int, u_opt = None, ego_traj = None,ego_p0=None,tv_paths_se2=None,dt=0.1,is_mm_preds=False):
     '''
     Getting EV predictions from previous MPC solution.
     This is used for linearizing the collision avoidance constraints
@@ -51,16 +55,23 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     agent_paths = []
     for t, agents in enumerate(preds_list):
         for j, agent in enumerate(agents):
-            o_glob[j][:,t] = np.array([agent.to_se2().x,agent.to_se2().y]) #x,y
-            o[j][:,t] = np.array([agent.progress,agent.velocity]) #s,v
-            tv_psi[j][:,t] = agent.to_se2().heading
+            if isinstance(agent,List):
+                agent = agent[0] #use first mode
+            o_glob[j][:,t] = np.array([agent.to_se2().x,agent.to_se2().y]) if isinstance(agent,IDMAgent) else np.array([agent.center.x,agent.center.y])  #x,y
+            o[j][:,t] = np.array([agent.progress,agent.velocity]) if isinstance(agent,IDMAgent) else np.array([path_to_linestring(tv_paths_se2[agent.metadata.track_token]).project(Point(*agent.center.point.array)),agent.velocity.magnitude()]) #s,v
+            tv_psi[j][:,t] = agent.to_se2().heading if isinstance(agent,IDMAgent) else agent.center.heading
             if t < params['N']:
-                u_tvs[j][:,t] = preds_list[t+1][j]._u_prev
+                try:
+                    next_time_agent = preds_list[t+1][j][0] if is_mm_preds else preds_list[t+1][j]
+                    u_tvs[j][:,t] = next_time_agent._u_prev if isinstance(agent,IDMAgent) else (next_time_agent.velocity.magnitude()-agent.velocity.magnitude())/dt #u
+                except:
+                    print('error: u_tvs in get_preds()')
+                    pdb.set_trace()
             if t == 0:
-                agent_paths.append(agent._path)
-                tv_lengths.append(agent.length)
-                tv_widths.append(agent.width)
-                assert agent.length > 0 and agent.width > 0, 'TV length and width must be greater than 0'
+                agent_paths.append(agent._path) if isinstance(agent,IDMAgent) else agent_paths.append(create_path_from_se2(tv_paths_se2[agent.metadata.track_token]))
+                tv_lengths.append(agent.length) if isinstance(agent,IDMAgent) else tv_lengths.append(agent.box.length)
+                tv_widths.append(agent.width) if isinstance(agent,IDMAgent) else tv_widths.append(agent.box.width)
+                assert agent.length if isinstance(agent,IDMAgent) else agent.box.length > 0 and agent.width if isinstance(agent,IDMAgent) else agent.box.width > 0, 'TV length and width must be greater than 0'
 
     #Convert InterpolatedPath to casadi functions (routes and droutes)
     for path in agent_paths:
@@ -75,8 +86,9 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     #Alternatively, we can acquire linearized prediction of the agents using u_tvs and routes
     o0 = []
     for agent in preds_list[0]:
-    # for agent in current_input.agents.values():
-        o0.append(np.array([[agent.progress],[agent.velocity]]))
+        if isinstance(agent,List):
+            agent = agent[0]
+        o0.append(np.array([[agent.progress],[agent.velocity]])) if isinstance(agent,IDMAgent) else o0.append(np.array([[path_to_linestring(tv_paths_se2[agent.metadata.track_token]).project(Point(*agent.center.point.array))],[agent.velocity.magnitude()]])) #s,v
 
     #Ego trajectory
     x = x0 + np.zeros((2,params['N']+1))
@@ -85,7 +97,7 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
     o=[o0[i] + np.zeros((2,params['N']+1)) for i in range(params['N_TV'])]
     o_glob = [routes[i+1](o0[i][0,:])[:2].reshape((-1,1)) + np.zeros((2,params['N']+1)) for i in range(params['N_TV'])]
 
-    #Initialize parametsr
+    #Initialize parameters
     Qs = [[np.identity(2) for _ in range(params['N'])] for _ in range(params['N_TV'])]
     do_glob = [[ca.DM(2,1) for _ in range(params['N'])] for _ in range(params['N_TV'])]
     x_glob = routes[0](x[0,0])[:2].reshape((-1,1))+np.zeros((2, params['N']+1))
@@ -141,11 +153,62 @@ def get_preds(current_input, preds_list: List[IDMAgent], x0, params, routes, dro
                 Qs[i][t]=Sev@Rev.T@V@S@V.T@Rev@Sev if t <=4 else (1/5**2)*np.eye(2) 
 
     #For extension to multi-modal prediction. Here we assume only one mode per TV
-    mm_o_glob = [[o_glob[i]] for i in range(params['N_TV'])]
-    mm_u_tvs = [[u_tvs[i]] for i in range(params['N_TV'])]
-    mm_routes = [[routes[i+1]] for i in range(params['N_TV'])]
-    mm_do_glob = [[do_glob[i]] for i in range(params['N_TV'])]
-    mm_Qs = [[Qs[i]] for i in range(params['N_TV'])]
+    if is_mm_preds and isinstance(preds_list[0][0][0],IDMAgent):
+        n_modes =  [2 for _ in range(2)] + [1 for _ in range(params['N_TV']-2)] #2 lane change mode vehicles from adjacent lanes
+        mm_o      = [[copy.deepcopy(o[i]) for _ in range(n_modes[i])] for i in range(params['N_TV'])]
+        mm_o_glob = [[copy.deepcopy(o_glob[i]) for _ in range(n_modes[i])] for i in range(params['N_TV'])]
+        mm_u_tvs = [[copy.deepcopy(u_tvs[i]) for _ in range(n_modes[i])] for i in range(params['N_TV'])]
+        mm_routes = [[copy.deepcopy(routes[i+1]) for _ in range(n_modes[i])] for i in range(params['N_TV'])]
+        mm_droutes = [[copy.deepcopy(do_glob[i]) for _ in range(n_modes[i])] for i in range(params['N_TV'])]
+
+        mm_do_glob = [[copy.deepcopy(do_glob[i]) for _ in range(n_modes[i])] for i in range(params['N_TV'])]
+        mm_Qs = [[copy.deepcopy(Qs[i]) for _ in range(n_modes[i])] for i in range(params['N_TV'])]
+
+        #Lane change mode routes for the first two vehicles in preds_list
+        routes_mm = []
+        droutes_mm = []
+        for i in range(2):
+            s_arr = [preds_list[0][i][-1].progress]
+            for t in range(params['N']-1):
+                s_arr.append(s_arr[-1]+dt*preds_list[t][i][-1].velocity+0.5*preds_list[t][i][-1]._u_prev*dt**2)
+            x_arr = [preds_list[t][i][-1].to_se2().x for t in range(params['N'])] #relative to ego initial position to scale the global coordinates
+            y_arr = [preds_list[t][i][-1].to_se2().y for t in range(params['N'])] #relative to ego initial position to scale the global coordinates
+            psi_arr = [preds_list[t][i][-1].to_se2().heading for t in range(params['N'])]
+            v_arr = [0 for _ in range(params['N'])]
+
+            routes_mm.append(make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr))
+            droutes_mm.append(make_jac_fun(routes_mm[-1]))
+
+        for i in range(params['N_TV']):
+            if n_modes[i] > 1 and len(preds_list[0][i]) > 1: 
+                for t in range(params['N']):
+                    psi= routes[0](x[0,t+1])[2]
+                    Rev=np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
+                    
+                    n = 1 #lane change mode index
+                        
+                    if t==0:
+                        mm_routes[i][n]=routes_mm[i]
+
+                    mm_o[i][n][:,t+1]=A @ mm_o[i][n][:,t] + B @ u_tvs[i][:,t] #assume same u_tvs for all modes (lane change modes)
+                    mm_o_glob[i][n][:,t+1]=routes_mm[i](mm_o[i][n][0,t+1])[:2]
+                    mm_droutes[i][n][t]=droutes_mm[i](mm_o[i][n][0,t+1])[:2]
+                    mm_u_tvs[i][n][0,t]=u_tvs[i][:,t]
+                    psi=routes_mm[i](mm_o[i][n][0,t+1])[2]
+                    Rtv=np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
+                    Stv_ = np.diag([tv_lengths[i], tv_widths[i]])
+                    Stv = np.linalg.inv(Stv_)
+                    mat=Rev@iSev@Rtv.T@Stv@Stv@Rtv@iSev@Rev.T 
+                    E, V =np.linalg.eigh(mat)
+                    S=np.diag((E**(-0.5)+1.0)**(-2))
+                    mm_Qs[i][n][t]=Sev@Rev.T@V@S@V.T@Rev@Sev if t <=4 else (1/5**2)*np.eye(2)
+    else:
+        mm_o_glob = [[o_glob[i]] for i in range(params['N_TV'])]
+        mm_u_tvs = [[u_tvs[i]] for i in range(params['N_TV'])]
+        mm_routes = [[routes[i+1]] for i in range(params['N_TV'])]
+        mm_do_glob = [[do_glob[i]] for i in range(params['N_TV'])]
+        mm_Qs = [[Qs[i]] for i in range(params['N_TV'])]
+    # pdb.set_trace()
 
     #tv length and width
     tv_params = [[tv_lengths[k], tv_widths[k]] for k in range(params['N_TV'])]
@@ -156,19 +219,28 @@ def check_agents_in_preds(preds: List[IDMAgent], indices) -> bool:
     '''
     Check if there are n agents in the prediction list
     '''
+    agents = []
     for i in indices:
         if i > (len(preds) -1):
-            return i, False
-    return None, True
+            agents.append(i)
+    if agents:
+        return agents, False
+    else:
+        return None, True
 
-def filter_preds(preds_list: List[IDMAgent], n: int, ego_state) -> List[IDMAgent]:
+def filter_preds(preds_list: Union[List[IDMAgent],List[Agent]], n: int, ego_state) -> List[IDMAgent]:
     '''
     Choose n agents from the list of predictions based on distance from ego_state
     '''
     x,y = ego_state.center.x, ego_state.center.y
 
     #Sort agents based on distance from ego
-    dists = [np.sqrt((agent.to_se2().x-x)**2 + (agent.to_se2().y-y)**2) for agent in preds_list[0]] #distance from ego at current time
+    if isinstance(preds_list[0][0],IDMAgent):
+        dists = [np.sqrt((agent.to_se2().x-x)**2 + (agent.to_se2().y-y)**2) for agent in preds_list[0]] #distance from ego at current time
+    elif isinstance(preds_list[0][0],Agent):
+        dists = [np.sqrt((agent.center.x-x)**2 + (agent.center.y-y)**2) for agent in preds_list[0]]
+    else:
+        raise ValueError('Unknown agent type')
     sorted_inds = np.argsort(dists)   
     if n > len(preds_list[0]):
         m = len(preds_list[0])
@@ -178,27 +250,36 @@ def filter_preds(preds_list: List[IDMAgent], n: int, ego_state) -> List[IDMAgent
     # output = [[pred[i] for i in sorted_inds[:m]] for pred in preds_list]
     output = []
     for t, pred in enumerate(preds_list):
-        i, flag = check_agents_in_preds(pred,list(sorted_inds[:m]))
+        indices, flag = check_agents_in_preds(pred,list(sorted_inds[:m]))
         if flag:
             output.append([*map(pred.__getitem__, sorted_inds[:m])])
         else:
             try:
+                add_inds = []
                 temp_inds = list(sorted_inds[:m])
-                temp_inds.remove(i)
-                #get index of element i in sorted_inds[:m]
-                add_ind = list(sorted_inds[:m]).index(i)
-                temp_list = [pred[m] for m in temp_inds]
-                offset = 1
-                while len(preds_list[t-offset]) - 1 < i:
-                    offset += 1
-                temp_list.insert(add_ind,preds_list[t-offset][i])
+                for i in indices:
+                    temp_inds.remove(i)
+                    #get index of element i in sorted_inds[:m]
+                    add_inds.append(list(sorted_inds[:m]).index(i))
+                try:
+                    temp_list = [pred[m] for m in temp_inds]
+                except:
+                    print('Error temp_list failed in filter_preds')
+                    pdb.set_trace()
+
+                for add_ind in add_inds:
+                    i = sorted_inds[add_ind]
+                    offset = 1
+                    while len(preds_list[t-offset]) - 1 < i:
+                        offset += 1
+                    temp_list.insert(add_ind,preds_list[t-offset][i])
                 # temp_list.insert(add_ind,output[-1][i])
                 output.append(temp_list)
             except:
                 #backup. append exiting agents
                 temp_inds.insert(add_ind,temp_inds[0])
                 output.append([*map(pred.__getitem__, temp_inds)])
-                # pdb.set_trace()
+    # pdb.set_trace()
     # preds_list = [[*map(pred.__getitem__, sorted_inds[:m])] for pred in preds_list] #Choose n closest agents
 
     return output
@@ -274,49 +355,6 @@ def unflatten_duals(x,l1_dual_dim,ca_dual_dim,data2tar = False):
 
     return l1_dual, ca_dual
 
-def obs_normalize(obs, reduced_mode =True):
-    '''
-    Assume reduced_mode = True
-    obs #shape (N, 17)
-    "mmpreds" : MultiDiscrete([4,3,5])
-    '''
-    obs_norm = copy.deepcopy(obs)
-    
-    def clip(input,min,max):
-        if isinstance(input,th.Tensor):
-            return th.clip(input,min, max)
-        else:
-            return NotImplementedError
-        
-    if reduced_mode:
-        #Ego normalization
-        obs_norm[:,0] = (obs[:,0] / 110)
-        v_max = 10; v_min = -1
-        obs_norm[:,1] = (clip(obs[:,1],v_min, v_max) - v_min)/(v_max - v_min) #min-max normalization
-        a_max = 2; a_min = -5
-        obs_norm[:,2] = (clip(obs[:,2], a_min, a_max) - a_min) / (a_max - a_min) #min-max normalization
-        obs_norm[:,3] /= 2 #ego route: Discrete(2)
-
-        #ittc normalization
-        obs_norm[:,4:4+4] = (clip(obs_norm[:,4:4+4], 0.05, 10) - 0.05)/ (10 - 0.05)
-
-        #o0 normalization
-        obs_norm[:,8] /= th.where(obs[:,8] == -15., th.tensor(15.), th.tensor(110))
-        obs_norm[:,10] /= th.where(obs[:,10] == -15., th.tensor(15.), th.tensor(110))
-        obs_norm[:,12] /= th.where(obs[:,12] == -15., th.tensor(15.), th.tensor(110))
-
-        obs_norm[:,9] = (clip(obs_norm[:,9],v_min, v_max) - v_min)/(v_max - v_min)
-        obs_norm[:,11] = (clip(obs_norm[:,9],v_min, v_max) - v_min)/(v_max - v_min)
-        obs_norm[:,13] = (clip(obs_norm[:,9],v_min, v_max) - v_min)/(v_max - v_min)
-
-        #mmpreds normalization
-        obs_norm[:,14] /= 4 - 1
-        obs_norm[:,15] /= 3 - 1
-        obs_norm[:,16] /= 5 - 1
-
-    return obs_norm
-    
-
 def observation_flatten(obs, use_ttc=True):
     if use_ttc:
         return np.concatenate([ obs['x0'],np.array([obs['u_prev'],obs['ev_route']]), obs['ttc'], np.stack(obs['o0'],axis=0).flatten(),obs['mmpreds']]).astype('float32')
@@ -336,118 +374,6 @@ def observation_unflatten(obs_flat, n_tv, use_ttc=True):
         if use_ttc:
             obs_dict.update({'ttc':obs_flat[4:4+1+n_tv] })
         return obs_dict
-        
-def sample_trajectory(env, policy=None, max_path_length=100, use_cuda = False,seed=None,render=False,ani_save_dir=None,expert=True, binary_pred= True,tertiary_l1 = False, normalize_obs=False,dagger_mode=False): 
-    """Sample a rollout in the environment from a policy."""
-    print('Sampling a trajectory...')
-    rollout_done = False
-    ob, info = env.reset(seed=seed)
-    obs, acs, rewards, next_obs, terminals, solve_times, infeas, collisions, vars_kept, const_kept, NN_query_times, dual_classes= [], [], [], [], [], [], [], [], [], [], [], []
-    t_wall_sums, t_proc_sums = [], []
-    steps = 0
-    only_ca_pred = True
-    
-
-    while steps <= max_path_length and not rollout_done:
-        # print(f"Steps {steps}".center(80,'-'))
-        if policy is None:
-            new_ob, reward, done, _, infos = env.step(action=None)
-            NN_query_time = 0
-        else:
-            st = time.time()
-            l1_pred = th.zeros((1,sum(env.smpc.N_modes)*(env.smpc.N-1)*2)).to(device="cuda" if use_cuda else "cpu") #Dummy l1 duals required for downstream smpcfr.py
-            ca_pred = th.sigmoid(policy(obs_normalize(to_tensor_var(observation_flatten(ob), use_cuda=use_cuda)[None]) if normalize_obs else to_tensor_var(observation_flatten(ob), use_cuda=use_cuda)[None])).round()
-            NN_query_time = time.time() - st
-            action = th.hstack((l1_pred,ca_pred))
-            
-            l1_dual, ca_dual = unflatten_duals(action.detach().cpu().numpy(), [env.smpc.N-1, env.smpc.N_modes, env.smpc.N_TV], [env.smpc.N-1, len(env.smpc.mode_map), env.smpc.N_TV] )
-            action = [l1_dual, ca_dual]
-            new_ob, reward, done, _, infos = env.step(action=action)        
-            # print("Step taken ",new_ob["x0"] )
-
-        steps += 1
-        rollout_done = done or infos['discard']
-        if rollout_done:
-            if infos['infeas']:
-                infeas.append(infos['infeas'])
-            
-        if not infos['infeas']:
-            l1_duals = np.fromiter(flatten(infos["l1_duals"]),float)
-            ca_duals = np.fromiter(flatten(infos["ca_duals"]),float)
-            expert_action = np.concatenate((l1_duals,ca_duals))
-            action = expert_action
-            
-            obs.append(observation_flatten(ob))
-            acs.append(action)
-            rewards.append(reward)
-            next_obs.append(observation_flatten(new_ob))
-            terminals.append(rollout_done)
-            solve_times.append(infos['solve_time'])
-            NN_query_times.append(NN_query_time)
-            infeas.append(infos['infeas'])
-            collisions.append(infos['discard'])
-            dual_classes.append(infos["dual_class"])
-            if 'vars_kept' in infos.keys():
-                vars_kept.append(infos['vars_kept'])
-                const_kept.append(infos['const_kept'])
-
-            if env.env_mode == 2:
-                t_wall_sums.append(infos['t_wall_sum'])
-                t_proc_sums.append(infos['t_proc_sum'])
-            else:
-                #Append placeholders
-                t_wall_sums.append(-1)
-                t_proc_sums.append(-1)
-        elif infos['infeas'] and not dagger_mode:
-            infeas.append(infos['infeas'])
-            solve_times.append(None)
-            NN_query_times.append(None)
-            collisions.append(infos['discard'])
-            dual_classes.append(None)
-            t_wall_sums.append(None)
-            t_proc_sums.append(None)
-            vars_kept.append(None)
-            const_kept.append(None)            
-        ob = new_ob
-    print(f'Steps: {steps}')
-    if not infos['discard'] or dagger_mode:
-        path = {'observation':obs,'reward': np.array(rewards, dtype=np.float32), 'action': np.array(acs, dtype=np.float32),'next_observation': next_obs, "terminal": np.array(terminals, dtype=np.float32), "infeas": infeas, "solve_time":solve_times, 'collision': collisions, 'vars_kept': vars_kept, 'const_kept':const_kept, 'NN_query_time': NN_query_times, "dual_classes":dual_classes, 't_wall_sum': t_wall_sums, 't_proc_sum':t_proc_sums}     #state and expert action  
-    else:
-        path = None
-
-    if render:
-        animation = env.render()
-        if expert:
-            name = 'expert'
-        else:
-            name = 'HMPC'
-        if os.path.isdir(ani_save_dir):
-            pass
-        else:
-            os.mkdir(ani_save_dir)
-        animation.save(ani_save_dir + 'eval_' + name +'.mp4')
-    return path
-
-def get_pathlength(path):
-    return len(path["reward"])
-
-def sample_trajectories(env, policy, min_timesteps_per_batch, max_path_length, use_cuda = False,seed=None,tertiary_l1 = False,normalize_obs=False,dagger_mode=False):
-    """Collect rollouts until we have collected min_timesteps_per_batch steps."""
-
-    timesteps_this_batch = 0
-    paths = []
-    while timesteps_this_batch < min_timesteps_per_batch:
-
-        #collect rollout
-        path = sample_trajectory(env, policy, max_path_length,use_cuda=use_cuda,seed=seed,tertiary_l1 = tertiary_l1,normalize_obs=normalize_obs,dagger_mode=dagger_mode)
-        if path is not None: #if not discard
-            paths.append(path)
-            timesteps_this_batch += get_pathlength(path)
-        else:
-            seed += 1
-        
-
-    return paths, timesteps_this_batch
     
 def to_tensor_var(x, use_cuda=True, dtype="float"):
     FloatTensor = th.cuda.FloatTensor if use_cuda else th.FloatTensor

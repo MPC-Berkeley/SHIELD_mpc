@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Generator, List, Optional, Set, Tuple, Type, cast
+from typing import Any, Generator, List, Optional, Set, Tuple, Type, cast, Dict
 
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.actor_state.state_representation import StateSE2, TimePoint
@@ -13,6 +13,7 @@ from nuplan.common.maps.maps_datatypes import TrafficLightStatusData, TrafficLig
 from nuplan.common.maps.nuplan_map.map_factory import get_maps_api
 from nuplan.common.maps.nuplan_map.utils import get_roadblock_ids_from_trajectory
 from nuplan.database.common.blob_store.local_store import LocalStore
+from nuplan.common.actor_state.tracked_objects import TrackedObjectType
 from nuplan.database.common.blob_store.s3_store import S3Store
 from nuplan.database.nuplan_db.lidar_pc import LidarPc
 from nuplan.database.nuplan_db.nuplan_db_utils import get_lidarpc_sensor_data
@@ -530,3 +531,30 @@ class NuPlanScenario(AbstractScenario):
         }
 
         return Sensors(pointcloud=lidar_pcs, images=images if images else None)
+
+    def _get_agent_paths_from_log(self) -> Dict[List[StateSE2]]:
+        """
+        Get the paths to the agent logs from the log file.
+        :return: The paths to the agent logs.
+        """
+        tv_traj = {}
+        for iteration in range(self.get_number_of_iterations()):
+            for tv in extract_tracked_objects(self._lidarpc_tokens[iteration], self._log_file, False).get_tracked_objects_of_type(tracked_object_type=TrackedObjectType.VEHICLE):
+                if tv.metadata.track_token not in tv_traj.keys():
+                    tv_traj.update({tv.metadata.track_token: [tv.center]})
+                else:
+                    tv_traj[tv.metadata.track_token].append(tv.center)
+        return tv_traj #Dict of list of StateSE2 of the logged trajectories
+    
+    def _get_log_predictions(self,cur_iteration,num_samples) -> List:
+        tv_preds = []
+        t_range = [t for t in range(cur_iteration.index,min(cur_iteration.index+num_samples+1,self.get_number_of_iterations()))]
+        if len(t_range) < num_samples+1:
+            for _ in range(num_samples+1-len(t_range)):
+                t_range.append(t_range[-1])
+        for t in t_range:
+            tv_pred_at_t = []
+            for tv in extract_tracked_objects(self._lidarpc_tokens[t], self._log_file, False).get_tracked_objects_of_type(tracked_object_type=TrackedObjectType.VEHICLE):
+                tv_pred_at_t.append(tv)
+            tv_preds.append(tv_pred_at_t)
+        return tv_preds

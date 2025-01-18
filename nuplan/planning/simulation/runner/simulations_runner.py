@@ -8,6 +8,7 @@ from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
 from nuplan.planning.simulation.planner.abstract_planner import AbstractPlanner
 from nuplan.planning.simulation.runner.abstract_runner import AbstractRunner
 from nuplan.planning.simulation.runner.runner_report import RunnerReport
+from nuplan.planning.simulation.observation.idm_agents import IDMAgents
 from nuplan.planning.simulation.simulation import Simulation
 from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class SimulationRunner(AbstractRunner):
         self._simulation.callback.on_initialization_start(self._simulation.setup, self.planner)
 
         # Initialize Planner
-        self.planner.initialize(self._simulation.initialize())
+        self.planner.initialize(self._simulation.initialize(sim_mode='closedloop'))
 
         # Execute specific callback
         self._simulation.callback.on_initialization_end(self._simulation.setup, self.planner)
@@ -113,20 +114,24 @@ class SimulationRunner(AbstractRunner):
             if isinstance(self.planner, SMPCPlanner): 
                 #Get IDM predictions for planner
                 time_controller_copy = copy.deepcopy(self.simulation._time_controller)
-                self.simulation.scenario.get_expert_ego_trajectory()
-                # 
-                # import pdb
-                # pdb.set_trace()
-                if self.simulation._time_controller.get_iteration().index == 0:
-                    ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
-                    preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                if isinstance(self.simulation.setup.observations,IDMAgents):
+                    if self.simulation._time_controller.get_iteration().index == 0:
+                        ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
+                        preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                    else:
+                        preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                    tv_paths_se2 = None
                 else:
-                    preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                    preds = self.simulation.scenario._get_log_predictions(time_controller_copy.get_iteration(), num_samples=self.planner.config['N'])
+                    tv_paths_se2 = self.simulation._scenario._get_agent_paths_from_log()
                 # Plan path based on all planner's inputs
-                trajectory = self.planner.compute_trajectory(planner_input,preds)
+                # #TODO: tv_paths_se2 is not used in the planner
+                # tv_paths_se2 = None
+                trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
             else:
                 preds = []
-                trajectory = self.planner.compute_trajectory(planner_input,preds)
+                tv_paths_se2 = None
+                trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
             
             # Propagate simulation based on planner trajectory
             self._simulation.callback.on_planner_end(self.simulation.setup, self.planner, trajectory)

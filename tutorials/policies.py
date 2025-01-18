@@ -1,22 +1,20 @@
 from typing import Any
 import torch as th
 from torch import nn
-import numpy as np
 import pdb
-from tutorials.utils import observation_flatten, observation_unflatten
+import numpy as np
+import scipy as sp
 
 class RAID_NET(nn.Module):
   '''
     Recurrent Transformer architecture for predicting the dual variables of a Stochastic MPC problem
   '''
-  def __init__(self,input_dim, embed_dim, output_dim, horizon, num_layers,hidden_size,lambda_dim = None, reduced_mode=True, eps = 0.8, lambda_ubd = 1000, pred_mode=["both duals",'tertiary','binary'],device='cuda:0'):
+  def __init__(self,input_dim, embed_dim, output_dim, horizon, num_layers, hidden_size,include_traj_features=False,lambda_dim = None, eps = 0.8, lambda_ubd = 1000, pred_mode=["both duals",'tertiary','binary'],device='cuda:0'):
         super(RAID_NET ,self).__init__()
         self.pred_mode = pred_mode
+        self.include_traj_features = include_traj_features
         self.eps = eps
-        if reduced_mode:
-          self.Q_dim = [4,3]   # num_vs x [state, mode]
-        else:
-          self.Q_dim = [6,3]
+        self.Q_dim = [6,5]   # num_vs x [state, mode]
         self.lift=nn.Linear(self.Q_dim[1], embed_dim)
         self.norm = nn.BatchNorm2d(3)  # input, key, value are the features
         self.mh_attn=nn.MultiheadAttention(embed_dim, 1)
@@ -57,7 +55,7 @@ class RAID_NET(nn.Module):
         self.fc_out_d = nn.Linear(hidden_size, embed_dim)
         self.pred_d = nn.Sequential(self.fc_in_d,self.fc_hidden_d,self.fc_out_d)
 
-        self.drop_dec = th.nn.Dropout( p = 0.1)
+        self.drop_dec = th.nn.Dropout(p = 0.1)
 
         self.project = nn.Linear(embed_dim * self.Q_dim[0], int(output_dim/self.N*3) if self.pred_mode[0]== "l1" and self.pred_mode[1]=='tertiary' else int(output_dim/self.N)) 
 
@@ -86,18 +84,37 @@ class RAID_NET(nn.Module):
             else:
               self.clip_fn = lambda x: (th.tanh(4*x) + 1) /2 #This is needed for cont. pred 
 
+  def _set_obs_stats(self,mean,cov):
+      self.obs_mean = mean
+      self.obs_cov = cov
 
-
-  def _get_Q(self, input, n_tv):
+  def _get_Q(self, obs, n_tv,include_traj=False):
       '''
       constructs Q from input
       Q = [[ego x, ego r], [tv x, tv p],...]: np.ndarray ## -> th.Tensor
       '''
-      obs = observation_unflatten(input,n_tv = n_tv) #check if it works with batched inputs
-      ittc=obs['ttc']
-      Q = th.hstack([obs['x0'].reshape(1,-1),1e3*th.tensor([obs['ev_route']], device=self.device).reshape(1,-1)]) #1st row of Q
-      for i, tv_x in enumerate(obs['o0']):
-        Q = th.vstack((Q,th.hstack([tv_x.reshape(1,-1), 1e3*th.tensor([obs['mmpreds'][i]], device=self.device).reshape(1,-1) ])))
+      if include_traj:
+         pass
+      # ittc=obs['ttc']
+      Q = obs[:5].reshape(1,-1) #1st row of Q
+
+      #o0=[dx,dy,dv,dheading] w.r.t. the ego
+      #mm_pred = 1 or 0 (1 if multi modal prediction aka lane change mode is present)
+      dist = [1e6] #1 because this will be used as a scale in graph encoder and we wish to not change the scaling for the first row which corresponds to the ego vehicle
+
+      for i in range(n_tv):
+        Q = th.vstack((Q,th.hstack([obs[5+4*i:5+4*(i+1)].reshape(1,-1), obs[5+4*n_tv+i].reshape(1,-1)])))
+        mean = self.obs_mean[5+4*i:5+4*(i+1)][:2].reshape(-1,1)
+        cov = self.obs_cov[5+4*i:5+4*(i+1),5+4*i:5+4*(i+1)][:2,:2]
+        dist.append(sp.linalg.norm(sp.linalg.sqrtm(cov)@(obs[5+4*i:5+4*(i+1)][:2]).cpu().numpy().reshape(-1,1) + mean))
+        #unnormalize obs[5+4*i:5+4*(i+1)][:2].reshape(1,-1)
+      
+      #ittc should be of size n_tv + 1
+      #for now, use the distance to the tv from the ego
+
+      #unnormalize the observation
+      dist = th.tensor(dist)
+      ittc = (1/dist).to(th.float32)
       return self._graph_encoder(Q, ittc)
 
 
@@ -106,7 +123,7 @@ class RAID_NET(nn.Module):
       compute ttc encoding as 
       Q_new[i]= Q[i]+ ittc[i]
       '''
-      Q_new=Q+th.tensor(th.diag(ittc), device=self.device)@th.ones_like(Q, device=self.device)
+      Q_new=Q+th.diag(ittc).to(self.device)@th.ones_like(Q, device=self.device)
       return self.lift(Q_new)
   
   def _clip(self, state):
@@ -115,10 +132,9 @@ class RAID_NET(nn.Module):
           lambda_dv, mu_dv = state[:,:self.clip_lmbd_dim], state[:,self.clip_lmbd_dim:]
         else:
           lambda_dv, mu_dv = state[:,:self.clip_lmbd_dim], state[:,self.clip_lmbd_dim:]
-        return th.concat((self.clip_fn(lambda_dv), mu_dv),dim=1)  
+        return th.cat((lambda_dv, mu_dv),dim=1) if self.clip_fn is None else th.cat((self.clip_fn(lambda_dv), mu_dv),dim=1)  
       else:
-            return state if self.clip_fn is None else self.clip_fn(state)
-      
+        return state if self.clip_fn is None else self.clip_fn(state)
 
   def __call__(self, x):
       '''
@@ -127,12 +143,15 @@ class RAID_NET(nn.Module):
       '''
       ## Encoder ####
       batch_size=x.shape[0]
-      n_tv = int((x.shape[1] - 5) / 4)
-
-      Q=th.stack([self._get_Q(x[i],n_tv) for i in range(batch_size)])
+      if self.include_traj_features:
+        n_tv = int((x.shape[1] - 5 - 2*self.N) / 5)
+      else:
+        n_tv = int((x.shape[1] - 5) / 5)
+      Q=th.stack([self._get_Q(x[i],n_tv,self.include_traj_features) for i in range(batch_size)])
       # Q_n = self.norm(th.stack([Q,Q,Q], dim=1))
       # Q = Q_n[:,0,:,:]
       attn, _ =self.mh_attn(Q,Q,Q)
+
       # attn = self.drop(attn)
       x=self.add_norm(Q+attn)
       x=self.add_norm(x+self.pred(x))
@@ -140,7 +159,6 @@ class RAID_NET(nn.Module):
       ## Recurrent units
 
       h_0 = th.zeros_like(x)
-
       h=h_0
       if self.pred_mode[0]=="both duals":
         l1_duals=[]; ca_duals = []
@@ -149,7 +167,7 @@ class RAID_NET(nn.Module):
           attn, _=self.mh_attn_dc(x,x,h)
           attn = self.drop_dec(attn)
           attn=self.add_norm(x+attn)
-          h=self.add_norm(attn+self.pred_d(attn)) #shape: (n_batch, n_tv + 1, embed_dim)
+          h=self.add_norm(attn+self.pred_d(attn)) #shape: (n_batch, n_tv + 1, embed_dim
           duals = self._clip(self.project(th.flatten(h,start_dim=1))) #shape: (n_batch, lambda_dim + mu_dim)
           x_o, h_o = self.rnn_d(x, th.stack([th.flatten(h,start_dim=1)]))
           # h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
@@ -172,7 +190,8 @@ class RAID_NET(nn.Module):
 
           if self.pred_mode[0] == 'l1' and self.pred_mode[1] == 'tertiary':
              temp = dual.view(batch_size,int(self.output_dim/self.N),3)   
-             dual = self.log_softmax(temp)  #shape: (N_batch, l1_dim/N, 3)       
+             dual = self.log_softmax(temp)  #shape: (N_batch, l1_dim/N, 3)    
+
           x_o, h_o = self.rnn_d(x, th.stack([th.flatten(h,start_dim=1)]))
           # h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
           # x, h = self.rnn_d(x, h)
@@ -185,3 +204,4 @@ class RAID_NET(nn.Module):
             duals.append(dual[:,:self.clip_lmbd_dim])
           
         return th.hstack(duals) if self.pred_mode[0] == 'l1' and self.pred_mode[1] == 'tertiary' else th.hstack(duals).flatten(start_dim=1)
+      

@@ -4,7 +4,7 @@ import abc
 import time
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Any, List, Optional, Type
+from typing import Any, List, Optional, Type, Dict
 import pdb
 from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.maps.abstract_map import AbstractMap
@@ -90,7 +90,7 @@ class AbstractPlanner(abc.ABC):
         """
         pass
 
-    def compute_trajectory(self, current_input: PlannerInput, preds: Optional[List]) -> AbstractTrajectory:
+    def compute_trajectory(self, current_input: PlannerInput, preds: Optional[List],tv_paths_se2: Optional[Dict]) -> AbstractTrajectory:
         """
         Computes the ego vehicle trajectory, where we check that if planner can not consume batched inputs,
             we require that the input list has exactly one element
@@ -105,7 +105,7 @@ class AbstractPlanner(abc.ABC):
         # obstacles_preds = [agent.predictions[0] for agent in preds.tracked_objects.tracked_objects if agent.predictions]
         # print(obstacles_preds[0].trajectory.get_sampled_trajectory())
         try:
-            trajectory = self.compute_planner_trajectory(current_input, preds)
+            trajectory = self.compute_planner_trajectory(current_input, preds, tv_paths_se2)
         except Exception as e:
             self._compute_trajectory_runtimes.append(time.perf_counter() - start_time)
             raise e

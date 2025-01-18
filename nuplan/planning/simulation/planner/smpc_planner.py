@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 import numpy as np
 from shapely.geometry import LineString, Point, Polygon
 import pdb 
@@ -19,11 +19,15 @@ from nuplan.planning.simulation.planner.abstract_planner import PlannerInitializ
 from nuplan.planning.simulation.planner.utils.breadth_first_search import BreadthFirstSearch
 from nuplan.planning.simulation.trajectory.abstract_trajectory import AbstractTrajectory
 from nuplan.planning.simulation.observation.idm.idm_states import IDMAgentState
+from nuplan.planning.simulation.observation.idm.idm_agent import IDMAgent
+from nuplan.common.actor_state.agent import Agent
+from nuplan.planning.simulation.planner.smpc_predictor import MultiModalPreds as MultiModalPreds
 from typing import Optional
 import yaml
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.planner.smpc import SMPC
 # from nuplan.planning.simulation.planner.smpc_nlp import SMPC
+
 from nuplan.planning.simulation.planner.utils.smpc_utils import flatten, get_preds, make_ca_fun, make_jac_fun, filter_preds
 logger = logging.getLogger(__name__)
 
@@ -80,8 +84,11 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.observation = []
         self.preds = []
         self.cl_ego_traj = []
-
+        self.iteration_data = []
+        self.ego_planned_trajs = []
+        
         self._initialized = False
+        self.t = 0
 
     def initialize(self, initialization: PlannerInitialization) -> None:
         """Inherited, see superclass."""
@@ -127,7 +134,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.ego_traj = ego_traj
             return self.ego_traj
     
-    def get_update_dict(self,current_input: PlannerInput, preds: List) -> dict:
+    def get_update_dict(self,current_input: PlannerInput, preds: List, tv_paths_se2: Dict) -> dict:
         ego_state, observations = current_input.history.current_state
         routes = [self.ego_route]
         droutes = [self.ego_droute]
@@ -140,12 +147,15 @@ class SMPCPlanner(AbstractIDMPlanner):
                                                                                                 params,
                                                                                                 routes,
                                                                                                 droutes,
+                                                                                                simulation_t=self.t,
                                                                                                 u_opt=self.u_opt if hasattr(self, 'u_opt') and self.optimal else None,
                                                                                                 ego_traj=self.ego_traj if hasattr(self, 'ego_traj') else None,
-                                                                                                ego_p0=self.ego_initial_position)
-       
+                                                                                                ego_p0=self.ego_initial_position,
+                                                                                                tv_paths_se2 = tv_paths_se2,
+                                                                                                dt=self.config['dt'],is_mm_preds=self.config['is_mm_preds'])
+        #Assume is_mm_preds is True
         update_dict =   {'x0': x0,
-                         'o0': [np.array([[agent.progress],[agent.velocity]]) for agent in preds[0]],
+                         'o0': [np.array([[agent[0].progress],[agent[0].velocity]]) for agent in preds[0]] if isinstance(preds[0][0],List) else [np.array([[path_to_linestring(tv_paths_se2[agent.metadata.track_token]).project(Point(*agent.center.point.array))],[agent.velocity.magnitude()]]) for agent in preds[0]],
                         'u_prev': self.u_prev,
                         'z_lin': z_lin,
                         'x_pos': x_glob,
@@ -161,7 +171,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 }
         return update_dict
 
-    def compute_planner_trajectory(self, current_input: PlannerInput, preds: Optional[List]) -> AbstractTrajectory:
+    def compute_planner_trajectory(self, current_input: PlannerInput, preds: Optional[List],tv_paths_se2: Optional[Dict]=None) -> AbstractTrajectory:
         """Inherited, see superclass."""
         # Ego current state
         ego_state, observations = current_input.history.current_state
@@ -185,6 +195,9 @@ class SMPCPlanner(AbstractIDMPlanner):
             v_arr = [0 for _ in self._ego_path.get_sampled_path()]
             self.ego_route = make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)
             self.ego_droute = make_jac_fun(self.ego_route)
+            self.is_mm_preds = self.config['is_mm_preds']
+            if self.is_mm_preds:
+                self.mm_predictor = MultiModalPreds(a_lat=self.config['a_lat'],dt=self.config['dt']) 
 
             # Initialize the SMPC
             self.smpc = SMPC(ev=(A,B),
@@ -202,12 +215,17 @@ class SMPCPlanner(AbstractIDMPlanner):
                     solver="ipopt",
                     open_loop = False,
                     eval_mode = False,
+                    eval_mode_category=self.config['eval_mode_category'],
                     route = self.ego_route,
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state))
             self._initialized = True     
 
         # Update the SMPC parameters
-        update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state))
+        if not self.is_mm_preds:
+            update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state),tv_paths_se2)
+        else:
+            mm_preds = self.mm_predictor.predict(filter_preds(preds,self.config['num_tvs'],ego_state),ego_state)
+            update_dict = self.get_update_dict(current_input, mm_preds,tv_paths_se2)
         update_dict.update({'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
         self.prev_update_dict = update_dict
         self.smpc.update(update_dict) 
@@ -233,27 +251,62 @@ class SMPCPlanner(AbstractIDMPlanner):
                 dual_class = 2
             self.dual_class.append(dual_class)
             self.expert_action.append(expert_action)
-            self.observation.append(observations)
-            self.preds.append(filter_preds(preds,self.config['num_tvs'],ego_state))
+            self.check_preds(preds)
+            if not self.is_mm_preds:
+                self.preds.append(filter_preds(preds,self.config['num_tvs'],ego_state))
+            else:
+                self.preds.append(mm_preds)
+            self.observation.append(self.get_observation(ego_state,self.preds[-1][0])) 
+            self.iteration_data.append(observations)
             self.cl_ego_traj.append(ego_state)
+            self.ego_planned_trajs.append(self.s2xy(sol['nom_z'][0,1:]))
             print(ca_duals_vec)
             print(dual_class)
             print(ca_duals_active,l1_dual_active)
-            pdb.set_trace()
+            # self.visualize_scene(current_input, preds, 0)
         else:
             print('No optimal solution found') 
-            pdb.set_trace()
+            # pdb.set_trace()
             # self.visualize_scene(current_input, preds, 0)
             # self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
-             
+        
         #Update u_prev
         self.u_prev = sol['u_control'] if self.optimal else 0 #scalar
         self.u_opt = sol['u_opt'] #size N-1
 
         #Convert smpc solution to NuPlan Trajectory
         self._sol2ego_state(sol['nom_z'],ego_state)
+        self.t += 1
         return InterpolatedTrajectory(self.ego_traj) #self.ego_traj is a list of EgoState
-
+    
+    def get_observation(self,ego_state, predictions):
+        '''
+        x0: ego's current states (x,y,v,heading)
+        u_prev: previous control input (acceleration)
+        o0: TV's current states w.r.t. ego's current states (x,y,v,heading)
+        mm_preds: multimodal predictions of TV's future states (0: single mode, 1: lane change mode). Size N_TV
+        ttc?? some kind of graph encoding of the scene w.r.t. ego vehicle
+        '''
+        obs = np.zeros((1,5*self.config['num_tvs']+4+1))
+        obs[:,:4] = np.array([ego_state.center.point.x,ego_state.center.point.y,ego_state.dynamic_car_state.center_velocity_2d.magnitude(),ego_state.center.heading])
+        obs[:,4] = self.u_prev
+        for i in range(self.config['num_tvs']):
+            obs[:,5+4*i:5+4*(i+1)] = np.array([predictions[i][0].to_se2().x,predictions[i][0].to_se2().y,predictions[i][0].velocity,predictions[i][0].to_se2().heading]) if self.is_mm_preds and isinstance(predictions[i],List) else np.array([predictions[i].center.x,predictions[i].center.y,predictions[i].velocity.magnitude(),predictions[i].center.heading]) #TV's current states
+            obs[:,5+4*i:5+4*(i+1)] -= obs[:,:4] #relative to ego's current states
+            if self.is_mm_preds and isinstance(predictions[i],List):
+                obs[:,5+4*self.config['num_tvs']+i] = 1 if len(predictions[i]) > 1 else 0
+            else:
+                obs[:,5+4*self.config['num_tvs']+i] = 0
+        return obs
+    
+    def check_preds(self,preds):
+        for pred in preds:
+            if len(pred) > 0:
+                pass
+            else:
+                pdb.set_trace()
+                raise ValueError('Empty Prediction detected')
+            
     def red_light_leading_idm_agent(self,ego_state,observations,current_input):
         # RED LIGHT
         # Create occupancy map
@@ -280,6 +333,15 @@ class SMPCPlanner(AbstractIDMPlanner):
                 # return self._get_red_light_leading_idm_state(relative_distance)
         return None
     
+    def s2xy(self,s_arr):
+        '''
+        Convert s to x,y
+        '''
+        xy_list = []
+        for s in s_arr:
+            xy_list.append(np.array(self.ego_route(s)[:2]))
+        return xy_list
+
     def _sol2ego_state(self, sol,ego_state0):
         ego_idm_state = IDMAgentState(progress=sol[0,0], velocity=sol[1,0])
         vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
@@ -313,9 +375,15 @@ class SMPCPlanner(AbstractIDMPlanner):
 
         # draw target vehicles
         for j, agent in enumerate(preds[t]):
-            x, y = agent.to_se2().x, agent.to_se2().y
-            length, width = agent.length, agent.width
-            heading = agent.to_se2().heading
+            if isinstance(agent, IDMAgent):
+                x, y = agent.to_se2().x, agent.to_se2().y 
+                length, width = agent.length, agent.width
+                heading = agent.to_se2().heading
+            else:
+                x, y = agent.center.x, agent.center.y
+                length, width = agent.box.length, agent.box.width
+                heading = agent.center.heading
+            
             # rect = plt.Rectangle((x,y),length,width,angle=heading*180/np.pi,fill=True,color='red') #center it to (x,y)
             #rectangle with center x,y
             rect = plt.Rectangle((x-length/2,y-width/2),length,width,angle=heading*180/np.pi,fill=True,color='red',rotation_point='center')
@@ -457,26 +525,32 @@ class SMPCPlanner(AbstractIDMPlanner):
             with gzip.open(filepath, 'wb') as f:
                 # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
                 # if logname is not None:
-                pickle.dump({'logname': [logname], 'ego_states': self.cl_ego_traj, 'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump({'logname': [logname], 'ego_states': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data], 'optimal_duals': [self.expert_action], 'observation':[self.observation], 'dual_class':[self.dual_class]}, f, protocol=pickle.HIGHEST_PROTOCOL)
                 # else:
                 #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
-
         else:
             with gzip.open(filepath, 'rb') as f:
                 data = pickle.load(f)
-            data['optimal_duals'].extend(self.expert_action)
-            data['observation'].extend(self.observation)
-            data['dual_class'].extend(self.dual_class)
-            data['ego_states'].extend(self.cl_ego_traj)
-            # data['preds'].extend(self.preds)
+            data['optimal_duals'].append(self.expert_action)
+            data['observation'].append(self.observation)
+            data['iteration_data'].append(self.iteration_data)
+            data['dual_class'].append(self.dual_class)
+            data['ego_states'].append(self.cl_ego_traj)
+            data['ego_planned_trajs'].append(self.ego_planned_trajs)
+            # data['preds'].append(self.preds)
             # if logname is not None:
-            data['logname'].extend([logname])
+            data['logname'].append(logname)
             with gzip.open(filepath, 'wb') as f:
                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
         #Delete for memory management and lightweight serialization
         del self.smpc
-        del self.expert_action
-        del self.observation
-        del self.dual_class
-        
+        self.expert_action = []
+        self.observation = []
+        self.dual_class = []
+        self.iteration_data = []
+        self.cl_ego_traj = []
+        self.ego_planned_trajs = []
+        self.u_prev = 0.0 #initialze previous control input(acceleration) to 0 
+        self.x_sol = None
+        self.t = 0
         self._initialized = False

@@ -25,7 +25,7 @@ SAVE_DIR = tempfile.mkdtemp()
 directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/'
 #Data directory
 log_list = [f.split('.db')[0] for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
-nuboard = True
+nuboard = False
 # log_list = ['2021.06.09.11.54.15_veh-12_04366_04810']
 # log_list = ['2021.06.09.12.39.51_veh-26_05620_06003'] #dual class 0
 # log_list = ['2021.05.12.23.36.44_veh-35_01133_01535'] #infeasible
@@ -62,13 +62,14 @@ for it, log in enumerate(log_list):
     try:
         print(f'Iter: {it}... Collecting data from log: ', log)
         EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
+        # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
         OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
         DATASET_PARAMS = [
             'scenario_builder=nuplan_mini',  # use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
             f"scenario_filter.log_names=[{str(log)}]",
             f'scenario_filter.scenario_types={scenario_types}', #non-stationary ego scenarios only
-            'scenario_filter.ego_displacement_minimum_m=0.1', #non-stationary threshold: ego moves at least this many meters in the scenario
-            'scenario_filter.limit_total_scenarios=1',  # use 2 total scenarios
+            'scenario_filter.ego_displacement_minimum_m=10', #non-stationary threshold: ego moves at least this many meters in the scenario
+            'scenario_filter.limit_total_scenarios=2',  # use 2 total scenarios
             'scenario_filter.remove_invalid_goals=true',  # use 1 scenario per log
         ]
 
@@ -113,6 +114,7 @@ for it, log in enumerate(log_list):
         main_simulation(cfg, planner)
 
         if nuboard:
+            print('Initializing Nuboard'.center(50, '*'))
             # #Nuboard
             # Get nuBoard simulation file for visualization later on
             simulation_file = [str(file) for file in Path(cfg.output_dir).iterdir() if file.is_file() and file.suffix == '.nuboard']
@@ -139,5 +141,5 @@ for it, log in enumerate(log_list):
             # Run nuBoard
             main_nuboard(cfg)
     except:
-        print(f'Error occurred while processing log: {log}')
+        print(f'Error occurred while processing Nuboard for log: {log}')
         continue

@@ -45,6 +45,7 @@ class IDMAgent:
         policy: IDMPolicy,
         minimum_path_length: float,
         max_route_len: int = 5,
+        path = None,
     ):
         """
         Constructor for IDMAgent.
@@ -59,7 +60,10 @@ class IDMAgent:
         self._initial_state = initial_state
         self._state = IDMAgentState(initial_state.path_progress, initial_state.velocity.x)
         self._route: Deque[LaneGraphEdgeMapObject] = deque(route, maxlen=max_route_len)
-        self._path = self._convert_route_to_path()
+        if path is not None:
+            self._path = create_path_from_se2(path) #path is a list of StateSE2
+        else:
+            self._path = self._convert_route_to_path()
         self._policy = policy
         self._minimum_path_length = minimum_path_length
         self._size = (initial_state.box.width, initial_state.box.length, initial_state.box.height)
@@ -88,6 +92,15 @@ class IDMAgent:
         agent._u_prev = copy.deepcopy(self._u_prev)
         return agent
     
+    def set_state(self,x,y,s,v) -> None:
+        """
+        Set the agent's state to the current state.
+        """
+        self._state.progress = s
+        self._state.velocity = v
+        self._get_agent_at_progress(self._get_bounded_progress()).box.center.x = x
+        self._get_agent_at_progress(self._get_bounded_progress()).box.center.y = y
+
     def propagate(self, lead_agent: IDMLeadAgentState, tspan: float) -> None:
         """
         Propagate agent forward according to the IDM policy.
@@ -293,7 +306,7 @@ class IDMAgent:
                 velocity=self._velocity_to_global_frame(init_pose.heading),
                 tracked_object_type=self._initial_state.tracked_object_type,
                 predictions=[future_trajectory] if future_trajectory is not None else [],
-                u_tv_L4SMPC=None
+                u_tv=None
             )
 
         else:

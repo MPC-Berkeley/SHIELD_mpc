@@ -68,6 +68,8 @@ class IDMAgents(AbstractObservation):
         self._idm_agent_manager: Optional[IDMAgentManager] = None
         self._initialize_open_loop_detection_types(open_loop_detections_types)
 
+        self._tv_paths_se2 = None
+
     def reset(self) -> None:
         """Inherited, see superclass."""
         self.current_iteration = 0
@@ -100,6 +102,7 @@ class IDMAgents(AbstractObservation):
                 self._minimum_path_length,
                 self._scenario,
                 self._open_loop_detections_types,
+                self._tv_paths_se2,
             )
             self._idm_agent_manager = IDMAgentManager(agents, agent_occupancy, self._scenario.map_api)
 
@@ -109,9 +112,11 @@ class IDMAgents(AbstractObservation):
         """Inherited, see superclass."""
         return DetectionsTracks  # type: ignore
 
-    def initialize(self) -> None:
+    def initialize(self,tv_paths_se2=None) -> None:
         """Inherited, see superclass."""
+        self._tv_paths_se2 = tv_paths_se2
         pass
+
     def get_observation(self) -> DetectionsTracks:
         """Inherited, see superclass."""
         detections = self._get_idm_agent_manager().get_active_agents(
@@ -193,6 +198,8 @@ class IDMAgents(AbstractObservation):
             )
             #Get the agents at the current time
             preds.append(idm_agent_manager_copy.get_active_agents(current_iteration,self._planned_trajectory_samples, self._planned_trajectory_sample_interval,pred_mode=True))
+            # import pdb
+            # pdb.set_trace()
             current_iteration += 1
             current_iteration = min(current_iteration,self._scenario.get_number_of_iterations()-1)
             #Assumes the traffic light status is fixed within the prediction horizon
@@ -204,7 +211,6 @@ class IDMAgents(AbstractObservation):
             for data in traffic_light_data:
                 traffic_light_status[data.status].append(str(data.lane_connector_id))
             # print(t, preds[0][2].to_se2().x)
-        # import pdb
-        # pdb.set_trace()
+
         assert len(preds) == num_samples+1
         return preds

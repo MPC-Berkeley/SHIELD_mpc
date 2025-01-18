@@ -63,6 +63,7 @@ def build_idm_agents_on_map_rails(
     minimum_path_length: float,
     scenario: AbstractScenario,
     open_loop_detections_types: List[TrackedObjectType],
+    tv_paths_se2: Optional[dict] = None,
 ) -> Tuple[UniqueIDMAgents, OccupancyMap]:
     """
     Build unique agents from a scenario. InterpolatedPaths are created for each agent according to their driven path
@@ -146,5 +147,6 @@ def build_idm_agents_on_map_rails(
                 route=[route],
                 policy=IDMPolicy(target_velocity, min_gap_to_lead_agent, headway_time, accel_max, decel_max),
                 minimum_path_length=minimum_path_length,
+                path = tv_paths_se2[agent.track_token] if tv_paths_se2 else None,
             )
     return unique_agents, occupancy_map

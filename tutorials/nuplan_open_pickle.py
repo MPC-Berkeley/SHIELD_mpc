@@ -7,12 +7,22 @@ import matplotlib.animation as animation
 import matplotlib.patches as patches
 from nuplan.common.actor_state.agent import Agent
 import matplotlib.pyplot as plt
+from typing import List
 
 def load_simulation_log(file_path: str):
     """Load simulation log from a pickle file."""
     with gzip.open(file_path, 'rb') as f:
         data = pickle.load(f)
-    return data
+    data_temp = {}
+    if isinstance(data['iteration_data'][0],List):
+        for key in data.keys():
+            temp = []
+            for i in range(len(data[key])):
+                temp.extend(data[key][i])
+            data_temp.update({key: temp})
+        return data_temp
+    else:
+        return data
 
 def visualize_observation(data,t):
     """Replay the observation from the simulation log."""
@@ -29,7 +39,7 @@ def visualize_observation(data,t):
                                 edgecolor='green', facecolor='green', alpha=1)
     ax.add_patch(ego_box)
     # for t in range(len(data['observation'])):
-    observations = data['observation'][t].tracked_objects.tracked_objects
+    observations = data['iteration_data'][t].tracked_objects.tracked_objects
     
     for obs in observations:
         if isinstance(obs, Agent):
@@ -64,7 +74,8 @@ def replay_simulation(data):
     def animate(frame):
         ax.clear()
         artists = []
-        observations = data['observation'][frame].tracked_objects.tracked_objects
+    
+        observations = data['iteration_data'][frame].tracked_objects.tracked_objects
         ego_state = data['ego_states'][frame]
         # Plot ego vehicle
         ego_x, ego_y = ego_state.center.point.x, ego_state.center.point.y

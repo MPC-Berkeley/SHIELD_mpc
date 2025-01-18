@@ -1,0 +1,19 @@
+root_dir: /home/mpc/nuplan-devkit/nuplan/
+training_log_path: nn_training_logs/
+
+lr: 0.001
+batch_size: 32
+n_epochs: 3000
+num_layers: 3
+hidden_dim: 64
+normalize: True
+optimizer: Adam
+include_trajs: False
+joint_dual_pred: False
+
+pretrain: False
+expert_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N10.pkl.gz
+
+max_replay_buffer_size: 100000
+model_save_period: 500
+model_save_dir: nn_models/

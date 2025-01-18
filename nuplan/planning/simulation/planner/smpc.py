@@ -36,6 +36,7 @@ class SMPC():
                 solver="ipopt",
                 open_loop = False,
                 eval_mode = False,
+                eval_mode_category: int = 0, #0: closed-loop with IDMAgent observation, 1: open-loop (TVs do not react to EV) using logged trajectories 
                 route = None,
                 preds = List
                 ):
@@ -50,7 +51,14 @@ class SMPC():
 
         self.preds = preds #Predictions of the vehicles List[List[IDMAgent]]. Outer list is of length N+1 and inner list is of length N_TV
         self.N_TV=len(preds[0])
-        self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles
+        self.eval_mode_category = eval_mode_category
+        if self.eval_mode_category==0:
+            assert self.N_TV > 2
+            self.N_modes=[2 for _ in range(2)] + [1 for _ in range(self.N_TV - 2)]
+        elif self.eval_mode_category==1:
+            self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles
+        else:
+            raise ValueError("Invalid eval_mode_category")
 
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3)
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
@@ -66,9 +74,9 @@ class SMPC():
         self.A=ev[0]
         self.B=ev[1]
         
-        self.Atv=self.A
+        self.Atv=self.A 
         self.Btv=self.B
-
+          
         self.vars_kept = None
         self.constr_kept = None
         self.offline=offline_mode
@@ -162,7 +170,7 @@ class SMPC():
         """ 
     
         h0=self.opti.variable(1)
-        self.obca_lmbd = [self.opti.variable(4, self.N-1) for _ in range(self.N_TV)] #Assuming rectangular obstacles
+        self.obca_lmbd = [[self.opti.variable(4, self.N-1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)] #Assuming rectangular obstacles
         self.obca_lmbd_redlight = self.opti.variable(4, self.N-1)
         self.redlight = self.opti.parameter(2,1)
         self.slack = self.opti.variable(1)
@@ -196,8 +204,7 @@ class SMPC():
         # h_stack=[ca.vertcat(h0,*[h[j][t] for t in range(self.N-1)]) for j in range(m.prod(self.N_modes))]
         M_stack=ca.vertcat(*[ca.horzcat(*[M[t][n] for n in range(t)], ca.DM(1,2*(self.N-t))) for t in range(self.N)])
         K_stack=[[ca.diagcat(ca.DM(1,2),*[K[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
-        
-        self.vars_pol = ca.vertcat(h_stack, self.slack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
+        self.vars_pol = ca.vertcat(h_stack, self.slack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
         if self.offline:
             self.vars_epi = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(self.gain_l1[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
         self.vars_ws, self.vars_epi_ws  = None, None 
@@ -358,8 +365,8 @@ class SMPC():
                     # Tightening
                     # -self.tight*||Am@(ptw)||_2 >= d_min-[Am@pt-bm.T @ obca_lmbd[k][:,t-1]]
                     # z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][:,t-1] #(144x1)
-                    z = self.tight*(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][:,t-1] #(144x1)
-                    y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][:,t-1] #+ 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal 
+                    z = self.tight*(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][m][:,t-1] #(144x1)
+                    y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][m][:,t-1] #+ 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal 
                     # y = -d_min + (A_m @ (pt - tv_nom)-ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2)).T @ obca_lmbd[k][:,t-1] + 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1)
                     # self.ca_constr[k][j][t-1]+=[z.T@z<=y**2, 0<=y]
                     self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
@@ -367,8 +374,8 @@ class SMPC():
                     self.opti.subject_to(self.ca_constr[k][j][t-1][0])
                     # self.opti.subject_to(self.ca_constr[k][j][t-1][1])
         
-                    self.opti.subject_to(((A_m @ Rev ).T @ obca_lmbd[k][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][:,t-1]) <= 1 + self.slack)
-                    self.opti.subject_to(obca_lmbd[k][:,t-1] >= 0)
+                    self.opti.subject_to(((A_m @ Rev ).T @ obca_lmbd[k][m][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][m][:,t-1]) <= 1 + self.slack)
+                    self.opti.subject_to(obca_lmbd[k][m][:,t-1] >= 0)
 
                     #slack cost
                     cost += 1e5*self.slack
@@ -524,7 +531,6 @@ class SMPC():
         sol_dict['t_proc_sum'] = t_proc_sum
         sol_dict['vars'] = self.vars_kept
         sol_dict['constr'] = self.constr_kept
-
 
         return sol_dict
 

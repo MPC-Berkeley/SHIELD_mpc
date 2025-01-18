@@ -64,7 +64,7 @@ class IDMPlanner(AbstractIDMPlanner):
         self._initialize_route_plan(initialization.route_roadblock_ids)
         self._initialized = False
 
-    def compute_planner_trajectory(self, current_input: PlannerInput,preds) -> AbstractTrajectory:
+    def compute_planner_trajectory(self, current_input: PlannerInput,preds,tv_paths_se2) -> AbstractTrajectory:
         """Inherited, see superclass."""
         # Ego current state
         ego_state, observations = current_input.history.current_state
