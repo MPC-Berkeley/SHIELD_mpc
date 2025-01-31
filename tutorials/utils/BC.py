@@ -87,6 +87,7 @@ class BC():
             self.l1_dual_ind = self.policy.lambda_dim
         else:
             self.bce_loss = th.nn.BCEWithLogitsLoss(pos_weight=4*th.ones(self.policy[1].lambda_dim, device=th.device('cuda')))
+            self.bce_loss_l1 = th.nn.BCEWithLogitsLoss(pos_weight=20*th.ones(self.policy[0].lambda_dim, device=th.device('cuda')))
             self.ce_loss = th.nn.CrossEntropyLoss(weight=th.tensor([1.,20.,20.], device=th.device('cuda')))
             self.w_mse_loss = weighted_MSEloss(self.policy[0].lmbd_ubd)
             self.l1_dual_max = self.policy[0].lmbd_ubd
@@ -194,10 +195,18 @@ class BC():
                 # pdb.set_trace()
                 self.training_loss.append(loss_value) #for batches
             else:
-                l1_duals = expert_ac_batch[:,:self.policy[0].lambda_dim]
-                l1_class = th.where(l1_duals<1e-3,2*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where(l1_duals>self.l1_dual_max - 1e-3,3*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where((1e-3 <= l1_duals) & (l1_duals <= self.l1_dual_max - 1e-3),th.ones_like(l1_duals),th.zeros_like(l1_duals))
-                assert not 0 in l1_class
-                self.l1_dual_class_exp = to_tensor_var(l1_class.cpu() - th.ones_like(l1_class).cpu())#to follow the class convention: 0,1,2
+                if self.policy[0].pred_mode[1] == 'tertiary':
+                    l1_duals = expert_ac_batch[:,:self.policy[0].lambda_dim]
+                    l1_class = th.where(l1_duals<1e-3,2*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where(l1_duals>self.l1_dual_max - 1e-3,3*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where((1e-3 <= l1_duals) & (l1_duals <= self.l1_dual_max - 1e-3),th.ones_like(l1_duals),th.zeros_like(l1_duals))
+                    assert not 0 in l1_class
+                    self.l1_dual_class_exp = to_tensor_var(l1_class.cpu() - th.ones_like(l1_class).cpu())#to follow the class convention: 0,1,2
+                elif self.policy[0].pred_mode[1] == 'binary':
+                    l1_duals = expert_ac_batch[:,:self.policy[0].lambda_dim]
+                    l1_class = th.where(l1_duals<1e-3,2*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where(l1_duals>self.l1_dual_max - 1e-3,3*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where((1e-3 <= l1_duals) & (l1_duals <= self.l1_dual_max - 1e-3),th.ones_like(l1_duals),th.zeros_like(l1_duals))
+                    assert not 0 in l1_class
+                    self.l1_dual_class = to_tensor_var((l1_class.cpu() - th.ones_like(l1_class).cpu()) > 1e-3)
+                else:
+                    raise ValueError('Invalid pred_mode for policy[0]')
                 self.loss = []
                 for i, optim in enumerate(self.optimizer):
                     optim.zero_grad()
@@ -211,20 +220,28 @@ class BC():
                         self.loss.append(self.bce_loss(self.policy[1](to_tensor_var(ob_batch, use_cuda=self.use_cuda)),expert_ac_batch[:,self.policy[0].lambda_dim:]))
                         # self.loss = self.bce_loss(self.policy(to_tensor_var(ob_batch, use_cuda=self.use_cuda)),expert_ac_batch[:,-self.policy.lambda_dim:])
                     else:
-                        '''
-                        tetiary pred
-                        '''
-                        correct_l1 = th.sum((th.argmax(th.exp(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda))), dim=-1)) == (self.l1_dual_class_exp))
-                        training_l1_acc = correct_l1.item()/(n_batches*(self.policy[0].output_dim))
-                        sum_pred = th.sum((th.argmax(th.exp(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda))), dim=-1)) > 1e-3)
-                        sum_tar = th.sum(self.l1_dual_class_exp > 1e-3)
-                        print("Correct L1: ",correct_l1.item(), " out of ", n_batches*(self.policy[0].output_dim), training_l1_acc*100,'% acc')
-                        print(f'Non-zero class in pred L1: {sum_pred}, Non-zero class in target L1: {sum_tar}')
-                        '''
-                        Pred: from the policy and is shape (batch_size,l1_dim,3)
-                        Label: from the expert and is shape (batch_size,l1_dim)
-                        '''
-                        self.loss.append(self.ce_loss(th.exp(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda))).movedim(2,1),self.l1_dual_class_exp.long()))    
+                        if self.policy[0].pred_mode[1] == 'tertiary':
+                            '''
+                            tetiary pred
+                            '''
+                            correct_l1 = th.sum((th.argmax(th.exp(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda))), dim=-1)) == (self.l1_dual_class_exp))
+                            training_l1_acc = correct_l1.item()/(n_batches*(self.policy[0].output_dim))
+                            sum_pred = th.sum((th.argmax(th.exp(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda))), dim=-1)) > 1e-3)
+                            sum_tar = th.sum(self.l1_dual_class_exp > 1e-3)
+                            print("Correct L1: ",correct_l1.item(), " out of ", n_batches*(self.policy[0].output_dim), training_l1_acc*100,'% acc')
+                            print(f'Non-zero class in pred L1: {sum_pred}, Non-zero class in target L1: {sum_tar}')
+                            self.loss.append(self.ce_loss(th.exp(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda))).movedim(2,1),self.l1_dual_class_exp.long()))    
+                        elif self.policy[0].pred_mode[1] == 'binary':
+                            '''
+                            binary pred
+                            '''
+                            correct_l1 = th.sum((th.sigmoid(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda))).round()) == (self.l1_dual_class).float())
+                            training_l1_acc = correct_l1.item()/(n_batches*(self.policy[0].output_dim))
+                            sum_pred = th.sum(th.sigmoid(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda))).round())
+                            sum_tar = th.sum(expert_ac_batch[:,:self.policy[0].lambda_dim]>1e-3)
+                            print("Correct L1: ",correct_l1.item(), " out of ", n_batches*(self.policy[0].output_dim), training_l1_acc*100,'% acc')
+                            print(f'Non-zero class in pred L1: {sum_pred}, Non-zero class in target L1: {sum_tar}')
+                            self.loss.append(self.bce_loss_l1(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda)),self.l1_dual_class))
                     self.loss[-1].backward()
                     self.optimizer[i].step()
                     if hasattr(self,'lr_sched'):

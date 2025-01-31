@@ -77,9 +77,10 @@ def Train_BC(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     return bc_learner
 
 def main(smpc_config,config):
-    n_modes = [2]*2 + [1]*(smpc_config['num_tvs']-2) #2 vehicles with lane change modes
+    # n_modes = [2]*2 + [1]*(smpc_config['num_tvs']-2) #2 vehicles with lane change modes
+    n_modes = [1 for _ in range(smpc_config['num_tvs'])]
     mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(smpc_config['num_tvs'])])))
-    observation_dim = 4 + 1 + 5*smpc_config['num_tvs'] + smpc_config['N']*2 if config['include_trajs'] else 4 + 1 + 5*smpc_config['num_tvs']
+    observation_dim = 4 + 1 + 4*smpc_config['num_tvs'] + smpc_config['N']*2 if config['include_trajs'] else 4 + 1 + 4*smpc_config['num_tvs']
     ca_num = len(mode_map)*(smpc_config['N']-1)*smpc_config['num_tvs']
     l1_num = sum(n_modes)*(smpc_config['N']-1)*2
     num_layers = config['num_layers']
@@ -98,8 +99,8 @@ def main(smpc_config,config):
         policy.to(device)
     else:
         pred_mode = ['both duals','tertiary','binary']
-        l1_policy = RAID_NET(observation_dim, 2*observation_dim, l1_num, smpc_config['N']-1, num_layers//2, hidden_dim//2, include_traj_features=config['include_trajs'],lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
-        ca_policy = RAID_NET(observation_dim, 2*observation_dim, ca_num, smpc_config['N']-1, num_layers//2, hidden_dim//2, include_traj_features=config['include_trajs'],lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','tertiary','binary'])
+        l1_policy = RAID_NET(observation_dim, 2*observation_dim, l1_num, smpc_config['N']-1, num_layers//2, hidden_dim//2, include_traj_features=config['include_trajs'],lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','binary','binary'])
+        ca_policy = RAID_NET(observation_dim, 2*observation_dim, ca_num, smpc_config['N']-1, num_layers//2, hidden_dim//2, include_traj_features=config['include_trajs'],lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
         device=th.device("cuda:0" if th.cuda.is_available() else "cpu")
         l1_policy.to(device)
         ca_policy.to(device)

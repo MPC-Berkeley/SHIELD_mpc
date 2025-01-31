@@ -14,7 +14,7 @@ class RAID_NET(nn.Module):
         self.pred_mode = pred_mode
         self.include_traj_features = include_traj_features
         self.eps = eps
-        self.Q_dim = [6,5]   # num_vs x [state, mode]
+        self.Q_dim = [6,4]   # num_vs x [state, mode]
         self.lift=nn.Linear(self.Q_dim[1], embed_dim)
         self.norm = nn.BatchNorm2d(3)  # input, key, value are the features
         self.mh_attn=nn.MultiheadAttention(embed_dim, 1)
@@ -96,14 +96,14 @@ class RAID_NET(nn.Module):
       if include_traj:
          pass
       # ittc=obs['ttc']
-      Q = obs[:5].reshape(1,-1) #1st row of Q
+      Q = obs[:4].reshape(1,-1) #1st row of Q
 
       #o0=[dx,dy,dv,dheading] w.r.t. the ego
       #mm_pred = 1 or 0 (1 if multi modal prediction aka lane change mode is present)
       dist = [1e6] #1 because this will be used as a scale in graph encoder and we wish to not change the scaling for the first row which corresponds to the ego vehicle
 
       for i in range(n_tv):
-        Q = th.vstack((Q,th.hstack([obs[5+4*i:5+4*(i+1)].reshape(1,-1), obs[5+4*n_tv+i].reshape(1,-1)])))
+        Q = th.vstack((Q,obs[5+4*i:5+4*(i+1)].reshape(1,-1)))
         mean = self.obs_mean[5+4*i:5+4*(i+1)][:2].reshape(-1,1)
         cov = self.obs_cov[5+4*i:5+4*(i+1),5+4*i:5+4*(i+1)][:2,:2]
         dist.append(sp.linalg.norm(sp.linalg.sqrtm(cov)@(obs[5+4*i:5+4*(i+1)][:2]).cpu().numpy().reshape(-1,1) + mean))
@@ -144,9 +144,9 @@ class RAID_NET(nn.Module):
       ## Encoder ####
       batch_size=x.shape[0]
       if self.include_traj_features:
-        n_tv = int((x.shape[1] - 5 - 2*self.N) / 5)
+        n_tv = int((x.shape[1] - 5 - 2*self.N) / 4)
       else:
-        n_tv = int((x.shape[1] - 5) / 5)
+        n_tv = int((x.shape[1] - 5) / 4)
       Q=th.stack([self._get_Q(x[i],n_tv,self.include_traj_features) for i in range(batch_size)])
       # Q_n = self.norm(th.stack([Q,Q,Q], dim=1))
       # Q = Q_n[:,0,:,:]
