@@ -36,7 +36,7 @@ class SMPC():
                 solver="ipopt",
                 open_loop = False,
                 eval_mode = False,
-                eval_mode_category: int = 0, #0: closed-loop with IDMAgent observation, 1: open-loop (TVs do not react to EV) using logged trajectories 
+                is_mm_preds: bool = False, 
                 route = None,
                 preds = List
                 ):
@@ -51,14 +51,13 @@ class SMPC():
 
         self.preds = preds #Predictions of the vehicles List[List[IDMAgent]]. Outer list is of length N+1 and inner list is of length N_TV
         self.N_TV=len(preds[0])
-        self.eval_mode_category = eval_mode_category
-        if self.eval_mode_category==0:
+        self.is_mm_preds = is_mm_preds
+        if self.is_mm_preds:
             assert self.N_TV > 2
             self.N_modes=[2 for _ in range(2)] + [1 for _ in range(self.N_TV - 2)]
-        elif self.eval_mode_category==1:
-            self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles
         else:
-            raise ValueError("Invalid eval_mode_category")
+            self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles
+
 
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3)
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
@@ -291,7 +290,6 @@ class SMPC():
         cost = 0
         self.opti.subject_to(self.opti.bounded(self.V_MIN, A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h, self.V_MAX))
         self.opti.subject_to(self.opti.bounded(self.A_MIN, h, self.A_MAX))
-
         
         nom_z=A@self.z_curr+B@h
         self.nom_z = nom_z
@@ -508,7 +506,7 @@ class SMPC():
 
         t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
         t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall'))
-        solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum
+        # solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum
         
         sol_dict = {}
         sol_dict['nom_z']      = nom_z      # nominal state predictions
@@ -527,6 +525,7 @@ class SMPC():
                 
                 
         sol_dict['solve_time'] = solve_time  # how long the solver took in seconds
+        print(f'Optimization Solve Time [{self.solver}]: {solve_time} s')
         sol_dict['t_wall_sum'] = t_wall_sum
         sol_dict['t_proc_sum'] = t_proc_sum
         sol_dict['vars'] = self.vars_kept

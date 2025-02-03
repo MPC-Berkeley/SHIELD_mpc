@@ -8,7 +8,7 @@ class MultiModalPreds:
         self.a_lat = a_lat #m/s^2
         self.dt = dt
 
-    def predict(self, preds,ego_state,visualize=False):
+    def predict(self, preds,ego_state,visualize=False,is_mm_preds=False):
         '''
         Input:
             preds: List[List] where outer list is the prediction horizon length and inner list is the [x, y] prediction
@@ -21,28 +21,32 @@ class MultiModalPreds:
         for t in range(len(preds)):
             for i, agent in enumerate(preds[t]):
                 assert isinstance(agent, IDMAgent)
-                #check if the TV is relative
+                #check if the TV is relative (the TV is ahead of the EV and in the adjacent lane)
                 if t ==0 :
                     dot_product = np.dot( (np.array([preds[0][i].to_se2().x,preds[0][i].to_se2().y])-np.array([ego_state.center.point.x,ego_state.center.point.y])), np.array([np.cos(ego_state.center.heading),np.sin(ego_state.center.heading)])) 
+                    #get the angle between two vectors
+                    angle = np.arccos(dot_product/(np.linalg.norm(np.array([preds[0][i].to_se2().x,preds[0][i].to_se2().y])-np.array([ego_state.center.point.x,ego_state.center.point.y]))))
                 else:
                     dot_product = np.dot( (np.array([preds[0][i][0].to_se2().x,preds[0][i][0].to_se2().y])-np.array([ego_state.center.point.x,ego_state.center.point.y])), np.array([np.cos(ego_state.center.heading),np.sin(ego_state.center.heading)]))
-                if dot_product> 0:
+                    angle = np.arccos(dot_product/(np.linalg.norm(np.array([preds[0][i][0].to_se2().x,preds[0][i][0].to_se2().y])-np.array([ego_state.center.point.x,ego_state.center.point.y]))))
+                # print(f'angle: {angle/np.pi*180} deg')
+                if dot_product> 0 and (np.pi/18 < abs(angle) < np.pi/6):
                     if t == 0:
                         x_p= preds[0][i].to_se2().x + 0.5*np.sin(preds[0][i].to_se2().heading)
                         y_p= preds[0][i].to_se2().y + 0.5*np.cos(preds[0][i].to_se2().heading)
                         dist_p = np.linalg.norm([x_p-ego_state.center.x,y_p-ego_state.center.y])
                         dist_0 = np.linalg.norm([preds[0][i].to_se2().x-ego_state.center.x,preds[0][i].to_se2().y-ego_state.center.y])
                         sign = -np.sign(dist_p-dist_0)
-                        sign1 = np.sign(ego_state.center.x-preds[0][i].to_se2().x) * np.sign(np.sin(preds[0][i].to_se2().heading))
-                        sign2 = np.sign(ego_state.center.y-preds[0][i].to_se2().y) * np.sign(np.cos(preds[0][i].to_se2().heading))
+                        # sign1 = np.sign(ego_state.center.x-preds[0][i].to_se2().x) * np.sign(np.sin(preds[0][i].to_se2().heading))
+                        # sign2 = np.sign(ego_state.center.y-preds[0][i].to_se2().y) * np.sign(np.cos(preds[0][i].to_se2().heading))
                     else:
                         x_p= preds[0][i][0].to_se2().x + 0.5*np.sin(preds[0][i][0].to_se2().heading)
                         y_p= preds[0][i][0].to_se2().y + 0.5*np.cos(preds[0][i][0].to_se2().heading)
                         dist_p = np.linalg.norm([x_p-ego_state.center.x,y_p-ego_state.center.y])
                         dist_0 = np.linalg.norm([preds[0][i][0].to_se2().x-ego_state.center.x,preds[0][i][0].to_se2().y-ego_state.center.y])
                         sign = -np.sign(dist_p-dist_0)
-                        sign1 = np.sign(ego_state.center.x-preds[0][i][0].to_se2().x) * np.sign(np.sin(preds[0][i][0].to_se2().heading))
-                        sign2 = np.sign(ego_state.center.y-preds[0][i][0].to_se2().y) * np.sign(np.cos(preds[0][i][0].to_se2().heading))
+                        # sign1 = np.sign(ego_state.center.x-preds[0][i][0].to_se2().x) * np.sign(np.sin(preds[0][i][0].to_se2().heading))
+                        # sign2 = np.sign(ego_state.center.y-preds[0][i][0].to_se2().y) * np.sign(np.cos(preds[0][i][0].to_se2().heading))
                     #get x and y coordinates of the idm agent
 
                     ey_t = 0.5*self.a_lat*(t*self.dt)**2
@@ -65,7 +69,10 @@ class MultiModalPreds:
                     mm_preds[t][i] = [agent]      
         if visualize:
             self.visualize(mm_preds,ego_state)
-        return self.prune_mm_preds(mm_preds,ego_state)
+        if is_mm_preds:
+            return self.prune_mm_preds(mm_preds,ego_state)
+        else:
+            return self.single_mode_preds(self.prune_mm_preds(mm_preds,ego_state))
 
     def prune_mm_preds(self,mm_preds,ego_state):
         temp_mm_preds = [[[None for _ in agent] for agent in mm_preds[t]] for t in range(len(mm_preds))] #same structure as mm_preds filled with filler None
@@ -98,6 +105,18 @@ class MultiModalPreds:
                 else:
                     pass
         return temp_mm_preds
+    
+    def single_mode_preds(self,mm_preds):
+        temp_mm_preds = [[None for _ in mm_preds[t]] for t in range(len(mm_preds))] #reduced structure as mm_preds filled with filler None
+        for t in range(len(mm_preds)):
+            for i, agent in enumerate(mm_preds[t]):
+                assert isinstance(agent,List)
+                if len(agent)>1:
+                    temp_mm_preds[t][i] = mm_preds[t][i][-1]
+                else:
+                    temp_mm_preds[t][i] = mm_preds[t][i][0]
+        return temp_mm_preds
+                
 
     def visualize(self,mm_preds,ego_state):
         import matplotlib.pyplot as plt

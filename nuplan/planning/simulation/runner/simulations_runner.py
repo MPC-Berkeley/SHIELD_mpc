@@ -103,6 +103,7 @@ class SimulationRunner(AbstractRunner):
             # print(f'Simulation t: {counter}:')
             # Execute specific callback
             self.simulation.callback.on_step_start(self.simulation.setup, self.planner)
+            self.planner.set_scenario_id(self.simulation.scenario.token)
 
             # Perform step
             planner_input = self._simulation.get_planner_input()

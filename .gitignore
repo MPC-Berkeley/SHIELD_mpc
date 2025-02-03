@@ -1,3 +1,6 @@
+*.pkl
+*.pkl.gz
+*.mp4
 *._*
 *.aux
 .bazel
@@ -32,4 +35,8 @@ _ext
 .pytest_cache/*
 docs/_build/
 nuplan/dataset/
+nuplan/expert_data/
+nuplan/nn_models/
+nuplan/nn_training_logs/
+
 docs/generated/

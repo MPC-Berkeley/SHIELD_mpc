@@ -4,7 +4,7 @@ from typing import List, Tuple, Dict
 import numpy as np
 from shapely.geometry import LineString, Point, Polygon
 import pdb 
-import datetime
+import datetime, cv2
 import pickle
 import gzip
 import os
@@ -86,6 +86,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.cl_ego_traj = []
         self.iteration_data = []
         self.ego_planned_trajs = []
+        self.figs_w_preds = []
         
         self._initialized = False
         self.t = 0
@@ -155,7 +156,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                                                                                                 dt=self.config['dt'],is_mm_preds=self.config['is_mm_preds'])
         #Assume is_mm_preds is True
         update_dict =   {'x0': x0,
-                         'o0': [np.array([[agent[0].progress],[agent[0].velocity]]) for agent in preds[0]] if isinstance(preds[0][0],List) else [np.array([[path_to_linestring(tv_paths_se2[agent.metadata.track_token]).project(Point(*agent.center.point.array))],[agent.velocity.magnitude()]]) for agent in preds[0]],
+                         'o0': [np.array([[agent.progress],[agent.velocity]]) for agent in preds[0]] if isinstance(preds[0][0],IDMAgent) else [np.array([[path_to_linestring(tv_paths_se2[agent.metadata.track_token]).project(Point(*agent.center.point.array))],[agent.velocity.magnitude()]]) for agent in preds[0]],
                         'u_prev': self.u_prev,
                         'z_lin': z_lin,
                         'x_pos': x_glob,
@@ -196,7 +197,8 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.ego_route = make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)
             self.ego_droute = make_jac_fun(self.ego_route)
             self.is_mm_preds = self.config['is_mm_preds']
-            if self.is_mm_preds:
+            if self.config['eval_mode_category'] == 0:
+                # Initialize the Multi-Modal Predictor
                 self.mm_predictor = MultiModalPreds(a_lat=self.config['a_lat'],dt=self.config['dt']) 
 
             # Initialize the SMPC
@@ -215,16 +217,16 @@ class SMPCPlanner(AbstractIDMPlanner):
                     solver="ipopt",
                     open_loop = False,
                     eval_mode = False,
-                    eval_mode_category=self.config['eval_mode_category'],
+                    is_mm_preds=self.config['is_mm_preds'],
                     route = self.ego_route,
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state))
             self._initialized = True     
 
         # Update the SMPC parameters
-        if not self.is_mm_preds:
+        if not (self.config['eval_mode_category'] == 0):
             update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state),tv_paths_se2)
         else:
-            mm_preds = self.mm_predictor.predict(filter_preds(preds,self.config['num_tvs'],ego_state),ego_state)
+            mm_preds = self.mm_predictor.predict(filter_preds(preds,self.config['num_tvs'],ego_state),ego_state,is_mm_preds=self.config['is_mm_preds'])
             update_dict = self.get_update_dict(current_input, mm_preds,tv_paths_se2)
         update_dict.update({'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
         self.prev_update_dict = update_dict
@@ -252,10 +254,12 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.dual_class.append(dual_class)
             self.expert_action.append(expert_action)
             self.check_preds(preds)
-            if not self.is_mm_preds:
-                self.preds.append(filter_preds(preds,self.config['num_tvs'],ego_state))
-            else:
+            if (self.config['eval_mode_category']==0):
+                pred = mm_preds
                 self.preds.append(mm_preds)
+            else:
+                pred = filter_preds(preds,self.config['num_tvs'],ego_state)
+                self.preds.append(filter_preds(preds,self.config['num_tvs'],ego_state))
             self.observation.append(self.get_observation(ego_state,self.preds[-1][0])) 
             self.iteration_data.append(observations)
             self.cl_ego_traj.append(ego_state)
@@ -263,7 +267,8 @@ class SMPCPlanner(AbstractIDMPlanner):
             print(ca_duals_vec)
             print(dual_class)
             print(ca_duals_active,l1_dual_active)
-            # self.visualize_scene(current_input, preds, 0)
+            fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"])
+            self.figs_w_preds.append(fig)
         else:
             print('No optimal solution found') 
             # pdb.set_trace()
@@ -279,24 +284,26 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.t += 1
         return InterpolatedTrajectory(self.ego_traj) #self.ego_traj is a list of EgoState
     
+    def set_scenario_id(self, sc_id):
+        self.scenario_id = sc_id
+
     def get_observation(self,ego_state, predictions):
         '''
         x0: ego's current states (x,y,v,heading)
         u_prev: previous control input (acceleration)
         o0: TV's current states w.r.t. ego's current states (x,y,v,heading)
-        mm_preds: multimodal predictions of TV's future states (0: single mode, 1: lane change mode). Size N_TV
         ttc?? some kind of graph encoding of the scene w.r.t. ego vehicle
         '''
-        obs = np.zeros((1,5*self.config['num_tvs']+4+1))
+        obs = np.zeros((1,4*self.config['num_tvs']+4+1))
         obs[:,:4] = np.array([ego_state.center.point.x,ego_state.center.point.y,ego_state.dynamic_car_state.center_velocity_2d.magnitude(),ego_state.center.heading])
         obs[:,4] = self.u_prev
         for i in range(self.config['num_tvs']):
-            obs[:,5+4*i:5+4*(i+1)] = np.array([predictions[i][0].to_se2().x,predictions[i][0].to_se2().y,predictions[i][0].velocity,predictions[i][0].to_se2().heading]) if self.is_mm_preds and isinstance(predictions[i],List) else np.array([predictions[i].center.x,predictions[i].center.y,predictions[i].velocity.magnitude(),predictions[i].center.heading]) #TV's current states
+            obs[:,5+4*i:5+4*(i+1)] = np.array([predictions[i].to_se2().x,predictions[i].to_se2().y,predictions[i].velocity,predictions[i].to_se2().heading]) if isinstance(predictions[i],IDMAgent) else np.array([predictions[i].center.x,predictions[i].center.y,predictions[i].velocity.magnitude(),predictions[i].center.heading]) #TV's current states
             obs[:,5+4*i:5+4*(i+1)] -= obs[:,:4] #relative to ego's current states
-            if self.is_mm_preds and isinstance(predictions[i],List):
-                obs[:,5+4*self.config['num_tvs']+i] = 1 if len(predictions[i]) > 1 else 0
-            else:
-                obs[:,5+4*self.config['num_tvs']+i] = 0
+            # if self.is_mm_preds and isinstance(predictions[i],List):
+            #     obs[:,5+4*self.config['num_tvs']+i] = 1 if len(predictions[i]) > 1 else 0
+            # else:
+            #     obs[:,5+4*self.config['num_tvs']+i] = 0
         return obs
     
     def check_preds(self,preds):
@@ -358,14 +365,15 @@ class SMPCPlanner(AbstractIDMPlanner):
             ego_traj.append(ego_state)
         self.ego_traj = ego_traj
     
-    def visualize_scene(self, current_input, preds, t=0) -> None:
+    def visualize_scene(self, current_input, preds, t=0, ca_duals=[]) -> None:
         ego_state, observations = current_input.history.current_state
         ego_x, ego_y = ego_state.center.point.x,ego_state.center.point.y
         ego_length, ego_width = ego_state.car_footprint.vehicle_parameters.length, ego_state.car_footprint.vehicle_parameters.width
         ego_heading = ego_state.center.heading
 
         import matplotlib.pyplot as plt
-        plt.figure()
+        import matplotlib.patches as patches
+        fig = plt.figure()
         #draw ego as a rectangle
         ego_rect = plt.Rectangle((ego_x-ego_length/2,ego_y-ego_width/2),ego_length,ego_width,angle=ego_heading*180/np.pi,fill=True,color='green',rotation_point='center')
 
@@ -374,29 +382,67 @@ class SMPCPlanner(AbstractIDMPlanner):
         plt.ylim([ego_y-30,ego_y+30])
 
         # draw target vehicles
-        for j, agent in enumerate(preds[t]):
-            if isinstance(agent, IDMAgent):
-                x, y = agent.to_se2().x, agent.to_se2().y 
-                length, width = agent.length, agent.width
-                heading = agent.to_se2().heading
-            else:
-                x, y = agent.center.x, agent.center.y
-                length, width = agent.box.length, agent.box.width
-                heading = agent.center.heading
-            
-            # rect = plt.Rectangle((x,y),length,width,angle=heading*180/np.pi,fill=True,color='red') #center it to (x,y)
-            #rectangle with center x,y
-            rect = plt.Rectangle((x-length/2,y-width/2),length,width,angle=heading*180/np.pi,fill=True,color='red',rotation_point='center')
-
-            plt.gca().add_patch(rect)
+        if ca_duals:
+            for t in range(self.smpc.N):
+                for j, agent in enumerate(preds[t]):
+                    if isinstance(agent, IDMAgent):
+                        x, y = agent.to_se2().x, agent.to_se2().y 
+                        length, width = agent.length, agent.width
+                        heading = agent.to_se2().heading
+                    else:
+                        x, y = agent.center.x, agent.center.y
+                        length, width = agent.box.length, agent.box.width
+                        heading = agent.center.heading
+                    
+                    # rect = plt.Rectangle((x,y),length,width,angle=heading*180/np.pi,fill=True,color='red') #center it to (x,y)
+                    #rectangle with center x,y
+                    if t == 0:
+                        rect = plt.Rectangle((x-length/2,y-width/2),length,width,angle=heading*180/np.pi,fill=True,color='red',rotation_point='center')
+                        plt.gca().add_patch(rect)
+                    else:
+                        # pdb.set_trace()
+                        # (self.N -1)* len(self.smpc.mode_map) * self.config['num_tvs']
+                        active_ca_dual = (ca_duals[j][0][t-1][0] > 1e-3)
+                        if active_ca_dual:
+                            color = 'yellow'
+                            alpha = 1
+                        else:
+                            color = 'red'
+                            alpha = 0.3
+                        ellipsoid = patches.Ellipse((x,y),length,width,angle=heading*180/np.pi,fill=True,color=color,alpha=alpha)
+                        plt.gca().add_patch(ellipsoid)
+        else:
+            for j, agent in enumerate(preds[t]):
+                if isinstance(agent, IDMAgent):
+                    x, y = agent.to_se2().x, agent.to_se2().y 
+                    length, width = agent.length, agent.width
+                    heading = agent.to_se2().heading
+                else:
+                    x, y = agent.center.x, agent.center.y
+                    length, width = agent.box.length, agent.box.width
+                    heading = agent.center.heading
+                
+                # rect = plt.Rectangle((x,y),length,width,angle=heading*180/np.pi,fill=True,color='red') #center it to (x,y)
+                #rectangle with center x,y
+                rect = plt.Rectangle((x-length/2,y-width/2),length,width,angle=heading*180/np.pi,fill=True,color='red',rotation_point='center')
+                plt.gca().add_patch(rect)     
         
         #Plot planned traj
-        if hasattr(self, '_ego_path'):
-            for point in self._ego_path.get_sampled_path():
-                plt.plot(point.x,point.y,'gs',markersize=3)
+        if hasattr(self, 'ego_traj'):
+            for state in self.ego_traj:
+                plt.plot(state.center.point.x,state.center.point.y,'gs',markersize=1)
+        # if hasattr(self, '_ego_path'):
+        #     for point in self._ego_path.get_sampled_path():
+        #         if np.sqrt((point.x - ego_x)**2 + (point.y - ego_y)**2) < 10:
+        #             plt.plot(point.x,point.y,'gs',markersize=1)
                 
         plt.axis('equal')
-        plt.show()
+        # center around the ego
+        plt.xlim([ego_x-30,ego_x+30])
+        plt.ylim([ego_y-30,ego_y+30])
+        # plt.show()
+        plt.close(fig)
+        return fig
 
     def _initialize_ego_path(self, ego_state: EgoState) -> None:
         """
@@ -525,13 +571,14 @@ class SMPCPlanner(AbstractIDMPlanner):
             with gzip.open(filepath, 'wb') as f:
                 # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
                 # if logname is not None:
-                pickle.dump({'logname': [logname], 'ego_states': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data], 'optimal_duals': [self.expert_action], 'observation':[self.observation], 'dual_class':[self.dual_class]}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump({'logname': [logname], 'scenario_id': [self.scenario_id], 'ego_states': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data], 'optimal_duals': [self.expert_action], 'observation':[self.observation], 'dual_class':[self.dual_class]}, f, protocol=pickle.HIGHEST_PROTOCOL)
                 # else:
                 #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
         else:
             with gzip.open(filepath, 'rb') as f:
                 data = pickle.load(f)
             data['optimal_duals'].append(self.expert_action)
+            data['scenario_id'].append(self.scenario_id)
             data['observation'].append(self.observation)
             data['iteration_data'].append(self.iteration_data)
             data['dual_class'].append(self.dual_class)
@@ -542,6 +589,25 @@ class SMPCPlanner(AbstractIDMPlanner):
             data['logname'].append(logname)
             with gzip.open(filepath, 'wb') as f:
                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            # Save the list of figures as video
+
+            # Define the codec and create a VideoWriter object
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(self.config['video_save_dir']+self.scenario_id+'.mp4', fourcc, 20.0, (640, 480))
+
+            for fig in self.figs_w_preds:
+                # Convert the figure to an image
+                fig.canvas.draw()
+                img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+                # Write the image to the video file
+                out.write(img)
+
+            # Release the VideoWriter object
+            out.release()
+        print('end of simulation')
+
         #Delete for memory management and lightweight serialization
         del self.smpc
         self.expert_action = []
@@ -550,7 +616,9 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.iteration_data = []
         self.cl_ego_traj = []
         self.ego_planned_trajs = []
+        self.figs_w_preds = []
         self.u_prev = 0.0 #initialze previous control input(acceleration) to 0 
         self.x_sol = None
+        self.scenario_id = None
         self.t = 0
         self._initialized = False
