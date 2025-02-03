@@ -8,7 +8,7 @@ num_layers: 3
 hidden_dim: 64
 normalize: True
 optimizer: Adam
-include_trajs: False
+include_trajs: True
 joint_dual_pred: False
 
 pretrain: False

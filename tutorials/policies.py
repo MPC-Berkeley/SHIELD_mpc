@@ -20,7 +20,7 @@ class RAID_NET(nn.Module):
         self.mh_attn=nn.MultiheadAttention(embed_dim, 1)
         self.add_norm=nn.LayerNorm(embed_dim)
 
-        self.num_layers = num_layers
+        self.dim_layers = num_layers
         self.fc_in = nn.Linear(embed_dim, hidden_size)
         self.hidden_layers = []
 
@@ -35,14 +35,14 @@ class RAID_NET(nn.Module):
         self.fc_out = nn.Linear(hidden_size, embed_dim)
         self.pred = nn.Sequential(self.fc_in,self.fc_hidden,self.fc_out)
 
-        # self.drop= th.nn.Dropout( p = 0.2)
+        self.dim_encoding = 2 #self.Q_dim[0]
 
+        # self.drop= th.nn.Dropout( p = 0.2)
 
         # Decoder attn
         self.N=horizon # should be SMPC.N-1       
 
         self.mh_attn_dc = nn.MultiheadAttention(embed_dim, 1)
-
         
         self.fc_in_d = nn.Linear(embed_dim, hidden_size)
         self.hidden_layers_d = []
@@ -57,9 +57,9 @@ class RAID_NET(nn.Module):
 
         self.drop_dec = th.nn.Dropout(p = 0.1)
 
-        self.project = nn.Linear(embed_dim * self.Q_dim[0], int(output_dim/self.N*3) if self.pred_mode[0]== "l1" and self.pred_mode[1]=='tertiary' else int(output_dim/self.N)) 
+        self.project = nn.Linear(embed_dim * self.dim_encoding, int(output_dim/self.N*3) if self.pred_mode[0]== "l1" and self.pred_mode[1]=='tertiary' else int(output_dim/self.N)) 
 
-        self.rnn_d=nn.GRU(embed_dim, embed_dim*self.Q_dim[0], batch_first=True)
+        self.rnn_d=nn.GRU(embed_dim, embed_dim*self.dim_encoding, batch_first=True)
         self.sigmoid_act = nn.Sigmoid()
         self.log_softmax = th.nn.LogSoftmax(dim=-1)
         
@@ -88,7 +88,7 @@ class RAID_NET(nn.Module):
       self.obs_mean = mean
       self.obs_cov = cov
 
-  def _get_Q(self, obs, n_tv,include_traj=False):
+  def _get_Q(self, obs, n_tv, include_traj=False):
       '''
       constructs Q from input
       Q = [[ego x, ego r], [tv x, tv p],...]: np.ndarray ## -> th.Tensor
@@ -141,7 +141,7 @@ class RAID_NET(nn.Module):
       x: th.Tensor
       out: th.Tensor
       '''
-      ## Encoder ####
+      ### Encoder ####
       batch_size=x.shape[0]
       if self.include_traj_features:
         n_tv = int((x.shape[1] - 5 - 2*self.N) / 4)
@@ -156,8 +156,12 @@ class RAID_NET(nn.Module):
       x=self.add_norm(Q+attn)
       x=self.add_norm(x+self.pred(x))
 
-      ## Recurrent units
+      #Sum over the features
+      if self.dim_encoding == 2:
+        f_sum = th.sum(x[:,1:,:], dim=1).unsqueeze(1) #size: (batch_size, embed_dim)
+        x = th.hstack((x[:,[0],:],f_sum))
 
+      ##### Recurrent units (Decoders) #####
       h_0 = th.zeros_like(x)
       h=h_0
       if self.pred_mode[0]=="both duals":
@@ -195,7 +199,7 @@ class RAID_NET(nn.Module):
           x_o, h_o = self.rnn_d(x, th.stack([th.flatten(h,start_dim=1)]))
           # h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
           # x, h = self.rnn_d(x, h)
-          h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
+          h = h_o[0,:,:].view(batch_size, self.dim_encoding, -1)
           x = x_o[:,:,:self.embed_dim]
 
           if self.pred_mode[0] == 'ca':

@@ -242,6 +242,10 @@ class BC():
                             print("Correct L1: ",correct_l1.item(), " out of ", n_batches*(self.policy[0].output_dim), training_l1_acc*100,'% acc')
                             print(f'Non-zero class in pred L1: {sum_pred}, Non-zero class in target L1: {sum_tar}')
                             self.loss.append(self.bce_loss_l1(self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda)),self.l1_dual_class))
+                            
+                        else:
+                            raise ValueError('Invalid pred_mode for policy[0]')
+
                     self.loss[-1].backward()
                     self.optimizer[i].step()
                     if hasattr(self,'lr_sched'):
