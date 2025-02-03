@@ -369,11 +369,6 @@ class SMPC():
                     # self.ca_constr[k][j][t-1]+=[z.T@z<=y**2, 0<=y]
                     self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
                     self.ca_ineq.append(ca.vertcat(z,y))
-                    self.opti.subject_to(self.ca_constr[k][j][t-1][0])
-                    # self.opti.subject_to(self.ca_constr[k][j][t-1][1])
-        
-                    self.opti.subject_to(((A_m @ Rev ).T @ obca_lmbd[k][m][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][m][:,t-1]) <= 1 + self.slack)
-                    self.opti.subject_to(obca_lmbd[k][m][:,t-1] >= 0)
 
                     #slack cost
                     cost += 1e5*self.slack
@@ -392,12 +387,14 @@ class SMPC():
                      
                     if self.solver=="ipopt":
                         # norm_2(z)<=y
-                        # if self.offline:
-                        #     self.ca_constr[k][j][t-1]+=[z@z.T<=y**2, 0<=y ]
-                        #     self.opti.subject_to(self.ca_constr[k][j][t-1][0])
-                        #     self.opti.subject_to(self.ca_constr[k][j][t-1][1])
+                        if self.offline:
+                            #Old linearized affine chance constraint (No longer used)
+                            # self.ca_constr[k][j][t-1]+=[z@z.T<=y**2, 0<=y ]
+                            # self.ca_ineq.append(ca.vertcat(z,y))
 
-                        #     self.ca_ineq.append(ca.horzcat(z,y))
+                            #Impose all ca constraints
+                            self.opti.subject_to(self.ca_constr[k][j][t-1][0])
+                            self.opti.subject_to(self.ca_constr[k][j][t-1][1])
                               
                             if len(self.l1_constr[k][m][t-1])==0:
                                 self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]]
@@ -406,10 +403,26 @@ class SMPC():
 
                                 self.lin_ineq_l1+=[self.l1_constr[k][m][t-1][0]]
                                 cost+=self.l1_lmbd*ca.sum1(ca.vec(self.gain_l1[k][m][t-1]))
-                        # else:
-                        #     soc_constr=ca.vertcat(y,y**2-z@z.T)
-                        #     soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM(*soc_constr.shape), True)
-                        #     self.opti.subject_to(soc_switch>=0)
+
+                            #obca related constraints 
+                            self.opti.subject_to(((A_m @ Rev ).T @ obca_lmbd[k][m][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][m][:,t-1]) <= 1 + self.slack)
+                            self.opti.subject_to(obca_lmbd[k][m][:,t-1] >= 0)
+                
+                        else:
+                            # collision avoidance constraint screening
+                            soc_constr=ca.vertcat(y,y**2-z@z.T)
+                            soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM(*soc_constr.shape), True)
+                            self.opti.subject_to(soc_switch>=0)
+
+                            # obca related constraint screening
+                            obca_constr = ca.vertcat(1 + self.slack - ((A_m @ Rev ).T @ obca_lmbd[k][m][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
+                            obca_switch=ca.if_else(self.constr_keep[k][j][t-1], obca_constr, ca.DM(*obca_constr.shape), True)
+                            self.opti.subject_to(obca_switch>=0)
+
+                            #TODO: L1 constraint screening
+                            l1_constr = ca.vertcat(self.gain_l1[k][m][t-1]-K[k][m][t,2*t:2*(t+1)],K[k][m][t,2*t:2*(t+1)]+self.gain_l1[k][m][t-1])
+                            l1_switch = ca.if_else(self.gain_keep[k][j][t-1], l1_constr, True)
+                            self.opti.subject_to(l1_switch>=0)
 
                     else:
                         # Use for SOCP solvers: SCS and Gurobi
@@ -427,6 +440,11 @@ class SMPC():
                         else:
                             soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM(*soc_constr.shape), True)
                             self.opti.subject_to(soc_switch>0)
+
+                            # obca related constraint screening
+                            obca_constr = ca.vertcat(1 + self.slack - ((A_m @ Rev ).T @ obca_lmbd[k][m][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
+                            obca_switch=ca.if_else(self.constr_keep[k][j][t-1], obca_constr, ca.DM(*obca_constr.shape), True)
+                            self.opti.subject_to(obca_switch>0)
 
         self.opti.minimize( cost ) 
 
