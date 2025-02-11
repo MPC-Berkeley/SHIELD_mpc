@@ -42,12 +42,8 @@ def Train_BC(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     with gzip.open(config['expert_data_dir'],'rb') as file:
         expert_data = pickle.load(file)
     replay_buffer = ReplayBuffer(config['max_replay_buffer_size'])
-    include_trajs=config['include_trajs']
     observation = np.squeeze(np.concatenate([obs for obs in expert_data["observation"]]),axis=1)
-    if include_trajs:
-        ego_planned_traj = np.concatenate([obs for obs in expert_data["ego_planned_trajs"]]).reshape(-1,2*smpc_config['N'])
-        observation = np.hstack((observation,ego_planned_traj))  
-    
+
     optimal_duals = np.concatenate([acs for acs in expert_data["optimal_duals"]])
     replay_buffer.obs = observation; replay_buffer.acs = optimal_duals; replay_buffer.terminals = np.zeros_like(observation); replay_buffer.next_obs = np.zeros_like(observation); replay_buffer.rews = np.zeros_like(observation) 
     
@@ -55,7 +51,7 @@ def Train_BC(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     for data in expert_data["dual_class"]:
         flattened_dual_class.extend(data)
     replay_buffer.dual_classes = np.array(flattened_dual_class)
-    replay_buffer.normalize(l1_num,l1_lmbd=smpc_config['l1_lmbd'])
+    replay_buffer.normalize(l1_num,l1_lmbd=smpc_config['l1_lmbd'],l1_pred_mode=config['l1_pred_mode'])
     replay_buffer.set_weights()
     #Set the observation statistics for the policy for unnormalization
     if isinstance(policy, list):
@@ -80,7 +76,8 @@ def main(smpc_config,config):
     # n_modes = [2]*2 + [1]*(smpc_config['num_tvs']-2) #2 vehicles with lane change modes
     n_modes = [1 for _ in range(smpc_config['num_tvs'])]
     mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(smpc_config['num_tvs'])])))
-    observation_dim = 4 + 1 + 4*smpc_config['num_tvs'] + smpc_config['N']*2 if config['include_trajs'] else 4 + 1 + 4*smpc_config['num_tvs']
+    # observation_dim = 4 + 1 + 4*smpc_config['num_tvs'] + smpc_config['N']*2 if config['include_trajs'] else 4 + 1 + 4*smpc_config['num_tvs']
+    observation_dim = smpc_config['num_tvs'] * (4*smpc_config['N'] + 2)
     ca_num = len(mode_map)*(smpc_config['N']-1)*smpc_config['num_tvs']
     l1_num = sum(n_modes)*(smpc_config['N']-1)*2
     num_layers = config['num_layers']
@@ -90,17 +87,18 @@ def main(smpc_config,config):
     l1_dual_dim = [smpc_config['N']-1, n_modes, smpc_config['num_tvs']]
     ca_dual_dim = [smpc_config['N']-1, len(mode_map), smpc_config['num_tvs']]
 
+    raidnet_config = {'num_tvs': smpc_config['num_tvs'], 'num_heads': config['num_heads'],'dropout_prob':config['dropout_prob']}
     #Initialize RAIDNET
     if config['joint_dual_pred']:
         print('Joint Dual Pred: True')
         pred_mode = ['both duals','tertiary','binary']
-        policy=RAID_NET(observation_dim, 2*observation_dim, l1_num+ca_num, smpc_config['N']-1, num_layers, hidden_dim, lambda_dim=l1_num,lambda_ubd = smpc_config['l1_lmbd'])
+        policy=RAID_NET(raidnet_config,observation_dim, 2*observation_dim, l1_num+ca_num, smpc_config['N']-1, num_layers, hidden_dim, lambda_dim=l1_num,lambda_ubd = smpc_config['l1_lmbd'])
         device=th.device("cuda:0" if th.cuda.is_available() else "cpu")
         policy.to(device)
     else:
         pred_mode = ['both duals','tertiary','binary']
-        l1_policy = RAID_NET(observation_dim, 2*observation_dim, l1_num, smpc_config['N']-1, num_layers//2, hidden_dim//2, include_traj_features=config['include_trajs'],lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','binary','binary'])
-        ca_policy = RAID_NET(observation_dim, 2*observation_dim, ca_num, smpc_config['N']-1, num_layers//2, hidden_dim//2, include_traj_features=config['include_trajs'],lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
+        l1_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, l1_num, smpc_config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'],  pred_mode=['l1','binary','binary'])
+        ca_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, ca_num, smpc_config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
         device=th.device("cuda:0" if th.cuda.is_available() else "cpu")
         l1_policy.to(device)
         ca_policy.to(device)

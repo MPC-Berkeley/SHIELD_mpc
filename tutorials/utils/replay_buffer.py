@@ -34,7 +34,7 @@ class ReplayBuffer(th.utils.data.Dataset):
 
         return self.obs[idx], self.acs[idx], self.dual_classes[idx]
     
-    def normalize(self,l1_dim,l1_lmbd,feature_mean=None,feature_cov=None,target_mean=None,target_cov=None):
+    def normalize(self,l1_dim,l1_lmbd,feature_mean=None,feature_cov=None,target_mean=None,target_cov=None,l1_pred_mode='binary'):
         self.n = self.obs.shape[1]
         self.d = self.acs.shape[1]
 
@@ -68,6 +68,11 @@ class ReplayBuffer(th.utils.data.Dataset):
         #l1 duals
         # self.acs[:,:l1_dim] = 1.0*np.logical_or((1-(self.acs[:,:l1_dim]<(l1_lmbd-1e-3)*np.ones_like(self.acs[:,:l1_dim]))), 
         #               (1-(self.acs[:,:l1_dim]>1e-3*np.ones_like(self.acs[:,:l1_dim]))))
+        if l1_pred_mode == 'binary':
+            l1_duals = self.acs[:,:l1_dim]
+            l1_class = np.where(l1_duals<1e-3,2*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where(l1_duals>l1_lmbd - 1e-3,3*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where((1e-3 <= l1_duals) & (l1_duals <= l1_lmbd - 1e-3),np.ones_like(l1_duals),np.zeros_like(l1_duals))
+            assert not 0 in l1_class
+            self.acs[:,:l1_dim] = (l1_class - np.ones_like(l1_class) > 1e-3)
 
     def set_weights(self):
         

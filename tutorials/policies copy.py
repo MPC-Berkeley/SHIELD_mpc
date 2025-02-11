@@ -113,12 +113,11 @@ class RAID_NET(nn.Module):
       # ittc = (1/dist).to(th.float32)
       # return self._graph_encoder(Q, ittc)
       Q = []
-      # print(obs.shape)
       for i in range(n_tv):
         tv_input_embed = self.input_embedding(obs[i*(4*(self.N+1) + 2):(i+1)*(4*(self.N+1) + 2)])#i-th TV's features
         Q.append(tv_input_embed)
       Q = th.vstack(Q)
-      # print(Q)
+
       return Q
 
 
@@ -153,52 +152,33 @@ class RAID_NET(nn.Module):
       # Q = Q_n[:,0,:,:]
       attn, _ =self.mh_attn(Q,Q,Q)
 
-      # attn = self.drop(attn)
       x=self.add_norm(Q+attn)
       x=self.add_norm(x+self.pred(x))
 
       ##### Recurrent units (Decoders) #####
       h_0 = th.zeros_like(x)
       h=h_0
-      if self.pred_mode[0]=="both duals":
-        l1_duals=[]; ca_duals = []
 
-        for _ in range(self.N):
-          attn, _=self.mh_attn_dc(x,x,h)
-          attn = self.drop_dec(attn)
-          attn=self.add_norm(x+attn)
-          h=self.add_norm(attn+self.pred_d(attn)) #shape: (n_batch, n_tv + 1, embed_dim
-          duals = self._clip(self.project(th.flatten(h,start_dim=1))) #shape: (n_batch, lambda_dim + mu_dim)
-          x_o, h_o = self.rnn_d(x, th.stack([th.flatten(h,start_dim=1)]))
-          # h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
-          # x, h = self.rnn_d(x, h)
-          h = h_o[0,:,:].view(batch_size, self.n_tv, -1)
-          x = x_o[:,:,:self.embed_dim]
+      duals = []
+      for i in range(self.n_tv):
+         
 
-          l1_duals.append(duals[:,:self.clip_lmbd_dim])
-          ca_duals.append(duals[:,self.clip_lmbd_dim:])
 
-        return th.hstack((th.hstack(l1_duals).flatten(start_dim=1),th.hstack(ca_duals).flatten(start_dim=1)))
-      else:
-        duals = []
-        for k in range(self.N):
-          attn, _=self.mh_attn_dc(x,x,h)
-          attn = self.drop_dec(attn)
-          attn=self.add_norm(x+attn)
-          h=self.add_norm(attn+self.pred_d(attn)) #shape: (n_batch, n_tv, embed_dim)
-          
-          dual = self._clip(self.project(th.flatten(h,start_dim=1))) #shape: (n_batch, dual_dim)
+      for k in range(self.N):
+        attn, _=self.mh_attn_dc(x,x,h)
+        attn = self.drop_dec(attn)
+        attn=self.add_norm(x+attn)
+        h=self.add_norm(attn+self.pred_d(attn)) #shape: (n_batch, n_tv, embed_dim)
+        
+        dual = self._clip(self.project(th.flatten(h,start_dim=1))) #shape: (n_batch, dual_dim)
 
-          if self.pred_mode[0] == 'l1' and self.pred_mode[1] == 'tertiary':
-             temp = dual.view(batch_size,int(self.output_dim/self.N),3)   
-             dual = self.log_softmax(temp)  #shape: (N_batch, l1_dim/N, 3)    
+        x_o, h_o = self.rnn_d(x.view(batch_size,1,-1), th.stack([th.flatten(h,start_dim=1)]))
+        # h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
+        # x, h = self.rnn_d(x, h)
 
-          x_o, h_o = self.rnn_d(x.view(batch_size,1,-1), th.stack([th.flatten(h,start_dim=1)]))
-          # h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
-          # x, h = self.rnn_d(x, h)
-
-          h = h_o[0,:,:].view(batch_size, self.n_tv, -1) #reshape h for next iteration of multi-head attention
-          # x = x_o[:,:,:self.embed_dim]
-          x = x_o.view(batch_size,self.n_tv,-1)
-          duals.append(dual[:,:self.clip_lmbd_dim])
-        return th.hstack(duals) if self.pred_mode[0] == 'l1' and self.pred_mode[1] == 'tertiary' else th.hstack(duals).flatten(start_dim=1)
+        h = h_o[0,:,:].view(batch_size, self.n_tv, -1) #reshape h for next iteration of multi-head attention
+        # x = x_o[:,:,:self.embed_dim]
+        x = x_o.view(batch_size,self.n_tv,-1)
+        duals.append(dual[:,:self.clip_lmbd_dim])
+      return th.hstack(duals) if self.pred_mode[0] == 'l1' and self.pred_mode[1] == 'tertiary' else th.hstack(duals).flatten(start_dim=1)
+      

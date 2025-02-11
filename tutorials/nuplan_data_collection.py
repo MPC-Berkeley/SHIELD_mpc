@@ -59,87 +59,89 @@ scenario_types=[
   'traversing_traffic_light_intersection',]
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
-    try:
-        print(f'Iter: {it}... Collecting data from log: ', log)
-        EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
-        # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
-        OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
-        DATASET_PARAMS = [
-            'scenario_builder=nuplan_mini',  # use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
-            f"scenario_filter.log_names=[{str(log)}]",
-            f'scenario_filter.scenario_types={scenario_types}', #non-stationary ego scenarios only
-            'scenario_filter.ego_displacement_minimum_m=10', #non-stationary threshold: ego moves at least this many meters in the scenario
-            'scenario_filter.limit_total_scenarios=2',  # use 2 total scenarios
-            'scenario_filter.remove_invalid_goals=true',  # use 1 scenario per log
-        ]
-
-        # Initialize configuration management system
-        hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
-        hydra.initialize(config_path=simulation_hydra_paths.config_path)
-
-        # Compose the configuration
-        cfg = hydra.compose(config_name=simulation_hydra_paths.config_name, overrides=[
-            f'group={SAVE_DIR}',
-            f'experiment_name=smpc_expert_trajectory',
-            f'job_name=data_collection', 
-            'experiment=${experiment_name}/${job_name}',
-            'worker=sequential',
-            f'ego_controller={EGO_CONTROLLER}',
-            f'observation={OBSERVATION}',
-            f'hydra.searchpath=[{simulation_hydra_paths.common_dir}, {simulation_hydra_paths.experiment_dir}]',
-            'output_dir=${group}/${experiment}',
-            *DATASET_PARAMS,
-        ])
-
-        '''
-        Initilize the planner
-        '''
-
-
-        # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
-        ev_noise_std=[0.01,0.1]
-        tv_noise_std=[0.1, 0.1]
-
-        planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std)
-        # planner = IDMPlanner(target_velocity = 12.,
-        # min_gap_to_lead_agent = 3.,
-        # headway_time= 3.,
-        # accel_max = 3.,
-        # decel_max = 4.,
-        # planned_trajectory_samples = 10,
-        # planned_trajectory_sample_interval = 0.1,
-        # occupancy_map_radius = 50,)
-
-        # Run the simulation loop (real-time visualization not yet supported, see next section for visualization)
-        main_simulation(cfg, planner)
-
-        if nuboard:
-            print('Initializing Nuboard'.center(50, '*'))
-            # #Nuboard
-            # Get nuBoard simulation file for visualization later on
-            simulation_file = [str(file) for file in Path(cfg.output_dir).iterdir() if file.is_file() and file.suffix == '.nuboard']
-
-            # Launch Nuboard
-            from tutorials.utils.tutorial_utils import construct_nuboard_hydra_paths
-
-            # Location of paths with all nuBoard configs
-            nuboard_hydra_paths = construct_nuboard_hydra_paths(BASE_CONFIG_PATH)
+    if it >=0:
+    # if it ==27:
+        try:
+            print(f'Iter: {it}... Collecting data from log: ', log)
+            EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
+            # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
+            OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
+            DATASET_PARAMS = [
+                'scenario_builder=nuplan_mini',  # use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
+                f"scenario_filter.log_names=[{str(log)}]",
+                f'scenario_filter.scenario_types={scenario_types}', #non-stationary ego scenarios only
+                'scenario_filter.ego_displacement_minimum_m=10', #non-stationary threshold: ego moves at least this many meters in the scenario
+                'scenario_filter.limit_total_scenarios=2',  # use 2 total scenarios
+                'scenario_filter.remove_invalid_goals=true',  # use 1 scenario per log
+            ]
 
             # Initialize configuration management system
             hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
-            hydra.initialize(config_path=nuboard_hydra_paths.config_path)
+            hydra.initialize(config_path=simulation_hydra_paths.config_path)
 
             # Compose the configuration
-            cfg = hydra.compose(config_name=nuboard_hydra_paths.config_name, overrides=[
-                'scenario_builder=nuplan_mini',  # set the database (same as simulation) used to fetch data for visualization
-                f'simulation_path={simulation_file}',  # nuboard file path, if left empty the user can open the file inside nuBoard
-                f'hydra.searchpath=[{nuboard_hydra_paths.common_dir}, {nuboard_hydra_paths.experiment_dir}]',
+            cfg = hydra.compose(config_name=simulation_hydra_paths.config_name, overrides=[
+                f'group={SAVE_DIR}',
+                f'experiment_name=smpc_expert_trajectory',
+                f'job_name=data_collection', 
+                'experiment=${experiment_name}/${job_name}',
+                'worker=sequential',
+                f'ego_controller={EGO_CONTROLLER}',
+                f'observation={OBSERVATION}',
+                f'hydra.searchpath=[{simulation_hydra_paths.common_dir}, {simulation_hydra_paths.experiment_dir}]',
+                'output_dir=${group}/${experiment}',
+                *DATASET_PARAMS,
             ])
 
-            from nuplan.planning.script.run_nuboard import main as main_nuboard
+            '''
+            Initilize the planner
+            '''
 
-            # Run nuBoard
-            main_nuboard(cfg)
-    except:
-        print(f'Error occurred while processing Nuboard for log: {log}')
-        continue
+
+            # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
+            ev_noise_std=[0.01,0.1]
+            tv_noise_std=[0.1, 0.1]
+
+            planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std)
+            # planner = IDMPlanner(target_velocity = 12.,
+            # min_gap_to_lead_agent = 3.,
+            # headway_time= 3.,
+            # accel_max = 3.,
+            # decel_max = 4.,
+            # planned_trajectory_samples = 10,
+            # planned_trajectory_sample_interval = 0.1,
+            # occupancy_map_radius = 50,)
+
+            # Run the simulation loop (real-time visualization not yet supported, see next section for visualization)
+            main_simulation(cfg, planner)
+
+            if nuboard:
+                print('Initializing Nuboard'.center(50, '*'))
+                # #Nuboard
+                # Get nuBoard simulation file for visualization later on
+                simulation_file = [str(file) for file in Path(cfg.output_dir).iterdir() if file.is_file() and file.suffix == '.nuboard']
+
+                # Launch Nuboard
+                from tutorials.utils.tutorial_utils import construct_nuboard_hydra_paths
+
+                # Location of paths with all nuBoard configs
+                nuboard_hydra_paths = construct_nuboard_hydra_paths(BASE_CONFIG_PATH)
+
+                # Initialize configuration management system
+                hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
+                hydra.initialize(config_path=nuboard_hydra_paths.config_path)
+
+                # Compose the configuration
+                cfg = hydra.compose(config_name=nuboard_hydra_paths.config_name, overrides=[
+                    'scenario_builder=nuplan_mini',  # set the database (same as simulation) used to fetch data for visualization
+                    f'simulation_path={simulation_file}',  # nuboard file path, if left empty the user can open the file inside nuBoard
+                    f'hydra.searchpath=[{nuboard_hydra_paths.common_dir}, {nuboard_hydra_paths.experiment_dir}]',
+                ])
+
+                from nuplan.planning.script.run_nuboard import main as main_nuboard
+
+                # Run nuBoard
+                main_nuboard(cfg)
+        except:
+            print(f'Error occurred while processing Nuboard for log: {log}')
+            continue

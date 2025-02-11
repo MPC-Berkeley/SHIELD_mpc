@@ -8,11 +8,13 @@ num_layers: 3
 hidden_dim: 64
 normalize: True
 optimizer: Adam
-include_trajs: True
 joint_dual_pred: False
-
+l1_pred_mode: binary #['binary', 'tertiary']
 pretrain: False
-expert_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N10.pkl.gz
+num_heads: 3
+dropout_prob: 0.3
+# expert_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N10_backup.pkl.gz
+expert_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N10_processed.pkl.gz
 
 max_replay_buffer_size: 100000
 model_save_period: 500
