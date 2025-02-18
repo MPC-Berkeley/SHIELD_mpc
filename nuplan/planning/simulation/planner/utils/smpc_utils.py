@@ -37,7 +37,7 @@ def make_jac_fun(pos_fun):
     pos_jac=ca.jacobian(pos_fun(s_sym), s_sym)
     return ca.Function("pos_jac",[s_sym], [pos_jac])      
 
-def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent]], x0, params, routes, droutes, simulation_t: int, u_opt = None, ego_traj = None,ego_p0=None,tv_paths_se2=None,dt=0.1,is_mm_preds=False):
+def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent]], x0, params, routes, droutes, simulation_t: int, u_opt = None, ego_traj = None,ego_p0=None,tv_paths_se2=None,dt=0.1,is_mm_preds=False,ego_sim_init_state=None):
     '''
     Getting EV predictions from previous MPC solution.
     This is used for linearizing the collision avoidance constraints
@@ -57,7 +57,7 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent]], x0, 
         for j, agent in enumerate(agents):
             if isinstance(agent,List):
                 agent = agent[0] #use first mode
-            o_glob[j][:,t] = np.array([agent.to_se2().x,agent.to_se2().y]) if isinstance(agent,IDMAgent) else np.array([agent.center.x,agent.center.y])  #x,y
+            o_glob[j][:,t] = np.array([agent.to_se2().x - ego_sim_init_state.center.point.x,agent.to_se2().y-ego_sim_init_state.center.point.y]) if isinstance(agent,IDMAgent) else np.array([agent.center.x-ego_sim_init_state.center.point.x,agent.center.y-ego_sim_init_state.center.point.y])  #x,y
             o[j][:,t] = np.array([agent.progress,agent.velocity]) if isinstance(agent,IDMAgent) else np.array([path_to_linestring(tv_paths_se2[agent.metadata.track_token]).project(Point(*agent.center.point.array)),agent.velocity.magnitude()]) #s,v
             tv_psi[j][:,t] = agent.to_se2().heading if isinstance(agent,IDMAgent) else agent.center.heading
             if t < params['N']:
@@ -76,8 +76,8 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent]], x0, 
     #Convert InterpolatedPath to casadi functions (routes and droutes)
     for path in agent_paths:
         s_arr = [point.progress for point in path.get_sampled_path()]
-        x_arr = [point.x for point in path.get_sampled_path()] #relative to ego initial position to scale the global coordinates
-        y_arr = [point.y for point in path.get_sampled_path()] #relative to ego initial position to scale the global coordinates
+        x_arr = [point.x - ego_sim_init_state.center.point.x for point in path.get_sampled_path()] #relative to ego initial position to scale the global coordinates
+        y_arr = [point.y - ego_sim_init_state.center.point.y for point in path.get_sampled_path()] #relative to ego initial position to scale the global coordinates
         psi_arr = [point.heading for point in path.get_sampled_path()]
         v_arr = [0 for _ in path.get_sampled_path()]
         routes.append(make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr))

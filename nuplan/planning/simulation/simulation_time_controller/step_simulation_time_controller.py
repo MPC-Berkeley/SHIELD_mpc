@@ -12,12 +12,13 @@ class StepSimulationTimeController(AbstractSimulationTimeController):
     Class handling simulation time and completion.
     """
 
-    def __init__(self, scenario: AbstractScenario):
+    def __init__(self, scenario: AbstractScenario,planner_N: int) -> None:
         """
         Initialize simulation control.
         """
         self.current_iteration_index = 0
         self.scenario = scenario
+        self.planner_N = planner_N
 
     def reset(self) -> None:
         """Inherited, see superclass."""
@@ -35,7 +36,8 @@ class StepSimulationTimeController(AbstractSimulationTimeController):
 
     def reached_end(self) -> bool:
         """Inherited, see superclass."""
-        return self.current_iteration_index >= self.number_of_iterations() - 1
+        # return self.current_iteration_index >= self.number_of_iterations() - 1
+        return self.current_iteration_index >= self.number_of_iterations() - 1 - self.planner_N
 
     def number_of_iterations(self) -> int:
         """Inherited, see superclass."""

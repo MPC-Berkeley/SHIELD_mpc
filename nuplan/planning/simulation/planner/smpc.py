@@ -26,7 +26,7 @@ class SMPC():
                 V_MAX        = 10.0, 
                 A_MIN        = -5.0,
                 A_MAX        =  2.0,
-                TIGHTENING   =  2.4, #2.6
+                TIGHTENING   =  2.0, #2.6, # of std that you want to be robust w.r.t. the TV uncertainty
                 EV_NOISE_STD    =  [0.001, 0.001],
                 TV_NOISE_STD    =[[0.01, 0.02]]*5,
                 Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
@@ -115,6 +115,7 @@ class SMPC():
         
         self.z_curr=self.opti.parameter(2)
         self.u_prev=self.opti.parameter(1)
+        self.s0 = self.opti.parameter(1)
         
         self.params+=[self.z_curr, self.u_prev]
         
@@ -133,7 +134,7 @@ class SMPC():
         self.Qs=[[[self.opti.parameter(2,2) for _ in range(self.N)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
         self.psi_tvs = [self.opti.parameter(1,self.N+1) for _ in range(self.N_TV)] # TV heading
         self.tv_params = [self.opti.parameter(2) for _ in range(self.N_TV)] # TV length and width
-        self.params+=[self.z_tv_curr, self.u_tvs, self.pos_tvs, self.dpos_tvs, self.Qs, self.psi_tvs, self.tv_params]
+        self.params+=[self.z_tv_curr, self.u_tvs, self.pos_tvs, self.dpos_tvs, self.Qs, self.psi_tvs, self.tv_params,self.s0]
 
         
         if not self.offline:
@@ -148,7 +149,7 @@ class SMPC():
         self.policy=self._return_policy_class()
         self._add_constraints_and_cost()
         
-        self._update_ev_initial_condition(np.array([20., 10.]), 0.)
+        self._update_ev_initial_condition(np.array([0., 2.]), 0.)
         self._update_ev_preds(np.ones((2,self.N+1)), 50*np.ones((2,self.N+1)), [np.ones((2,1))]*self.N)
 
         self._update_tv_initial_condition([np.array([0., 0.])]*self.N_TV)
@@ -156,7 +157,7 @@ class SMPC():
                               [[[np.ones((2,1))]*self.N]*self.N_modes[k] for k in range(self.N_TV)], [[[np.eye(2)]*self.N]*self.N_modes[k] for k in range(self.N_TV)])
         self._update_tv_psi([np.zeros((1,self.N+1))]*self.N_TV)
         self._update_tv_params([[4.47, 2]]*self.N_TV)
-        self._update_red_light(None)
+        self._update_red_light(None,None)
 
         if not self.offline: 
             self._update_gain_and_constr_keeps()            
@@ -313,7 +314,7 @@ class SMPC():
         redlight_obca_lmbd = self.obca_lmbd_redlight
         d_min_red = 0
         for t in range(1,self.N):
-            ego_psi = self.route(nom_s[t])[2]
+            ego_psi = self.route(nom_s[t] + self.s0)[2]
             Rev = ca.vertcat(
                 ca.horzcat(ca.cos(ego_psi), -ca.sin(ego_psi)),
                 ca.horzcat(ca.sin(ego_psi), ca.cos(ego_psi))
@@ -323,7 +324,7 @@ class SMPC():
             A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T
             tv_nom = self.redlight #(2x1)
             b_m = ca.vertcat(0.5/2, 0.5/2,2/2,2/2) + A_m @ tv_nom #Artibrary length = 0.1 m, width = 4 m to represent a stop line
-            pt = self.route(nom_s[t])[:2]
+            pt = self.route(nom_s[t] + self.s0)[:2]
             y = -d_min_red + (A_m @ pt - b_m).T @ redlight_obca_lmbd[:,t-1]
             self.opti.subject_to(0<=y)
             self.opti.subject_to(((A_m @ Rev ).T @ redlight_obca_lmbd[:,t-1]).T @((A_m @ Rev).T @ redlight_obca_lmbd[:,t-1]) <= 1)
@@ -333,13 +334,12 @@ class SMPC():
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
                 cost+=10*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
-            
                 '''
                 OBCA constraints
                 '''
                 for t in range(1, self.N):  # position at time-step 1 not a function of decision variables 
                     # Optimization-based collision avoidance constraints. Ego: Point-mass, Obstacle: Polytope
-                    ego_psi = self.route(nom_s[t])[2] #radians
+                    ego_psi = self.route(nom_s[t] + self.s0)[2] #radians
                     Rev = ca.vertcat(
                         ca.horzcat(ca.cos(ego_psi), -ca.sin(ego_psi)),
                         ca.horzcat(ca.sin(ego_psi), ca.cos(ego_psi))
@@ -356,7 +356,7 @@ class SMPC():
                     b_m = ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2) + A_m @ tv_nom
                     b_m_w = 0*ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2) + A_m @ tv_w
 
-                    pt = self.route(nom_s[t])[:2] # [x,y] coordinate of the ego vehicle at timestep t(2,1) #TODO: get all the routes to get ego vehicle's position
+                    pt = self.route(nom_s[t] + self.s0)[:2] # [x,y] coordinate of the ego vehicle at timestep t(2,1) #TODO: get all the routes to get ego vehicle's position
                     # pt = self.x_pos[:,t] + self.dpos[t-1]@(A[2*t,:]@self.z_curr+B[2*t,:]@h - self.z_lin[0,t])
                     pt_w = ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:] for l in range(self.N_TV)])
                     
@@ -487,7 +487,9 @@ class SMPC():
             M_opt      = sol.value(self.policy[1])
             K_opt      = [[sol.value(self.policy[2][k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
             nom_z_tv   = [[sol.value(self.nom_z_tv[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
+            s0         = sol.value(self.s0)
             nom_z      = sol.value(self.nom_z).reshape(-1,2).T
+            nom_z[0,:] += s0 
             # print(u_opt)
             if self.offline and not first_solve:
                 self.vars_ws , self.vars_epi_ws = sol.value(self.vars_pol), sol.value(self.vars_epi)
@@ -507,7 +509,9 @@ class SMPC():
               # Suboptimal solution (e.g. timed out)
                 u_control=self.opti.debug.value(self.policy[0][0])   
                 u_opt = self.opti.debug.value(self.policy[0]).reshape((1,-1))
+                s0 = self.opti.debug.value(self.s0)
                 nom_z = self.opti.debug.value(self.nom_z).reshape((-1,2)).T
+                nom_z[0,:] += s0
             else:
                 u_control  = self.u_backup
                 u_opt = np.array([self.u_backup]*(self.N-1)).reshape((1,-1))
@@ -517,8 +521,13 @@ class SMPC():
                     for offset in range(t):
                         temp += np.linalg.matrix_power(self.A,t-offset)@self.B*self.u_backup if t-offset > 0 else 0
                     accumulated_dynamics.append(temp)
+                s0 = self.opti.debug.value(self.s0)
                 nom_z = np.hstack([sum(x) for x in zip([np.linalg.matrix_power(self.A,t)@self.x0 for t in range(self.N+1)], accumulated_dynamics)]) #maximum braking
+                nom_z[0,:] += s0
                 # nom_z = np.hstack([self.A**t @ self.x0 if t>0 else self.x0 for t in range(self.N+1)]) # 0 acceleration and constant speed prediction.
+            t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
+            t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall'))
+            solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum
             # print(u_opt)
             is_opt = False
 
@@ -580,7 +589,7 @@ class SMPC():
                                 update_dict['droutes'], update_dict['Qs'])
         self._update_tv_psi(update_dict['tv_psi'])
         self._update_tv_params(update_dict['tv_params'])
-        self._update_red_light(update_dict['red_light'])
+        self._update_red_light(update_dict['red_light'],update_dict['ego_sim_initial_state'])
         if not self.offline:
             if 'l1_duals' in update_dict.keys():
                 if 'canon_prob' in update_dict.keys():
@@ -596,16 +605,17 @@ class SMPC():
         #     self.opti.set_initial(self.vars_pol,self.vars_ws)
         #     self.opti.set_initial(self.vars_epi,self.vars_epi_ws)
 
-    def _update_red_light(self, red_light_agent = None):
+    def _update_red_light(self, red_light_agent = None,ego_sim_init_state=None):
         if red_light_agent is None:
             self.opti.set_value(self.redlight, [0,0]) #default red light positon, really far away from ego
         else:
-            red_light = [red_light_agent.x,red_light_agent.y] #global x and y of red light agent
+            red_light = [red_light_agent.x-ego_sim_init_state.center.point.x,red_light_agent.y-ego_sim_init_state.center.point.y] #global x and y of red light agent
             self.opti.set_value(self.redlight, red_light)
 
     def _update_ev_initial_condition(self, x0, u_prev):
         self.x0 = x0
-        self.opti.set_value(self.z_curr, x0)
+        self.opti.set_value(self.s0, x0[0])    
+        self.opti.set_value(self.z_curr, np.array([0,x0[1]],dtype=np.float64))
         self.opti.set_value(self.u_prev, u_prev)
 
         self.u_backup=self.A_MIN

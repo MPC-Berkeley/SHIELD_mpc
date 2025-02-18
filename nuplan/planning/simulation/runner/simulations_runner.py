@@ -118,9 +118,12 @@ class SimulationRunner(AbstractRunner):
                 if isinstance(self.simulation.setup.observations,IDMAgents):
                     if self.simulation._time_controller.get_iteration().index == 0:
                         ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
-                        preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                        self.planner.ego_traj = ego_traj[:self.planner.config['N']+1]
+                        history_buffer = copy.deepcopy(self.simulation._history_buffer)
+                        preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], history_buffer, num_samples=self.planner.config['N'])
                     else:
-                        preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(self.simulation._history_buffer), self.simulation._history_buffer, num_samples=self.planner.config['N'])
+                        history_buffer = copy.deepcopy(self.simulation._history_buffer)
+                        preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(history_buffer), history_buffer, num_samples=self.planner.config['N'])
                     tv_paths_se2 = None
                 else:
                     preds = self.simulation.scenario._get_log_predictions(time_controller_copy.get_iteration(), num_samples=self.planner.config['N'])
@@ -128,7 +131,10 @@ class SimulationRunner(AbstractRunner):
                 # Plan path based on all planner's inputs
                 # #TODO: tv_paths_se2 is not used in the planner
                 # tv_paths_se2 = None
-                trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
+                try:
+                    trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
+                except:
+                    break
             else:
                 preds = []
                 tv_paths_se2 = None

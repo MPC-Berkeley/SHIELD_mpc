@@ -57,9 +57,11 @@ scenario_types=[
   'starting_unprotected_noncross_turn',
   'traversing_intersection',
   'traversing_traffic_light_intersection',]
+print('total log list length:',len(log_list))
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
-    if it >=0:
+    # if 60 > it >=52:
+    if 60 > it >= 0:
     # if it ==27:
         try:
             print(f'Iter: {it}... Collecting data from log: ', log)
@@ -102,7 +104,7 @@ for it, log in enumerate(log_list):
             ev_noise_std=[0.01,0.1]
             tv_noise_std=[0.1, 0.1]
 
-            planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std)
+            planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std, iter=it)
             # planner = IDMPlanner(target_velocity = 12.,
             # min_gap_to_lead_agent = 3.,
             # headway_time= 3.,

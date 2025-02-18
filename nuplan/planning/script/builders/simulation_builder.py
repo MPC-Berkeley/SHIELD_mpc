@@ -96,7 +96,7 @@ def build_simulations(
 
             # Simulation Manager
             simulation_time_controller: AbstractSimulationTimeController = instantiate(
-                cfg.simulation_time_controller, scenario=scenario
+                cfg.simulation_time_controller, scenario=scenario, planner_N=planner.config['N']
             )
 
             # Perception
