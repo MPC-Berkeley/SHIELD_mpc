@@ -4,11 +4,15 @@ from typing import List, Tuple, Dict
 import numpy as np
 from shapely.geometry import LineString, Point, Polygon
 import pdb 
+from itertools import product
 import datetime, cv2
 import pickle
 import gzip
 import copy
 import os
+import torch as th
+import matplotlib.patches as patches
+from tutorials.policies import RAID_NET
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.maps.abstract_map_objects import LaneGraphEdgeMapObject
 from nuplan.common.maps.maps_datatypes import SemanticMapLayer, TrafficLightStatusData, TrafficLightStatusType
@@ -208,7 +212,31 @@ class SMPCPlanner(AbstractIDMPlanner):
                 # Initialize the Multi-Modal Predictor
                 self.mm_predictor = MultiModalPreds(a_lat=self.config['a_lat'],dt=self.config['dt']) 
 
+            if self.config['eval_mode']:
+                with open('/home/mpc/nuplan-devkit/tutorials/training_config.yaml') as f:
+                    self.raidnet_config = yaml.load(f, Loader=yaml.SafeLoader)
+                N = self.config['N']
+                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(N)}_canon_form.pkl', 'rb') as f:
+                    canon_prob = pickle.load(f)
+                self.canon_prob = canon_prob
+                n_modes = [1 for _ in range(self.config['num_tvs'])]
+                mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(self.config['num_tvs'])])))
+                observation_dim = self.config['num_tvs'] * (4*self.config['N'] + 2)
+                self.ca_num = len(mode_map)*(self.config['N']-1)*self.config['num_tvs']
+                self.l1_num = sum(n_modes)*(self.config['N']-1)*2
+                num_layers = self.raidnet_config['num_layers']
+                hidden_dim = self.raidnet_config['hidden_dim']
+                device = th.device("cuda:0" if th.cuda.is_available() else "cpu") 
+
+                l1_dual_dim = [self.config['N']-1, n_modes, self.config['num_tvs']]
+                ca_dual_dim = [self.config['N']-1, len(mode_map), self.config['num_tvs']]
+                raidnet_config = {'num_tvs': self.config['num_tvs'], 'num_heads': self.raidnet_config['num_heads'],'dropout_prob':self.raidnet_config['dropout_prob']}
+                l1_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, self.l1_num, self.raidnet_config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=self.l1_num, lambda_ubd=self.config['l1_lmbd'],  pred_mode=['l1','binary','binary'])
+                ca_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, self.ca_num, self.raidnet_config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=self.ca_num, lambda_ubd=self.config['l1_lmbd'], pred_mode=['ca','binary','binary'])
+                self.RAID_NET = [l1_policy,ca_policy]
+
             # Initialize the SMPC
+            offline_mode = True if not self.config['eval_mode'] else False
             self.smpc = SMPC(ev=(A,B),
                     N            =  N,
                     V_MIN        = self.config['v_min'],       #Speed, acceleration constraints
@@ -220,14 +248,16 @@ class SMPCPlanner(AbstractIDMPlanner):
                     Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
                     R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
                     ev_length=ego_state.car_footprint.vehicle_parameters.length,
-                    offline_mode=True,
+                    offline_mode= offline_mode,
                     solver="ipopt",
                     open_loop = False,
                     eval_mode = False,
                     is_mm_preds=self.config['is_mm_preds'],
                     route = self.ego_route,
-                    preds=filter_preds(preds,self.config['num_tvs'],ego_state))
-            self._initialized = True     
+                    preds=filter_preds(preds,self.config['num_tvs'],ego_state),
+                    canon_prob_fn=canon_prob if self.config['eval_mode'] else None,)
+            self._initialized = True
+            
 
         # Update the SMPC parameters
         if not (self.config['eval_mode_category'] == 0):
@@ -236,6 +266,24 @@ class SMPCPlanner(AbstractIDMPlanner):
             mm_preds = self.mm_predictor.predict(filter_preds(preds,self.config['num_tvs'],ego_state),ego_state,is_mm_preds=self.config['is_mm_preds'])
             update_dict = self.get_update_dict(current_input, mm_preds,tv_paths_se2)
         update_dict.update({'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
+        
+        if self.config['eval_mode']:
+            #update canonical form matrices
+            # update_dict.update({'canon_prob':self.canon_prob})
+            update_dict.update({'canon_prob':1}) #canon_prob form is provided in the initialization of the SMPC Planner
+
+            #Query RAID-Net 
+            if False:
+                obs = self.get_observation(ego_state,update_dict['preds'][0])
+                l1_duals = self.RAID_NET[0](obs)
+                ca_duals = self.RAID_NET[1](obs)
+            else:
+                #test random 0-1 vector
+                l1_duals = np.random.randint(2,size=self.l1_num)
+                ca_duals = np.random.randint(2,size=self.ca_num)
+
+            #update l1 and ca duals
+            update_dict.update({'l1_duals':l1_duals, 'ca_duals':ca_duals})
         self.prev_update_dict = update_dict
         self.smpc.update(update_dict) 
         # Solve the SMPC
@@ -285,6 +333,14 @@ class SMPCPlanner(AbstractIDMPlanner):
             print(ca_duals_active,l1_dual_active)
             fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"])
             self.figs_w_preds.append(fig)
+            
+            #Save canonical form
+            if self.smpc.offline and self.t == 1: #run once
+                # canon_prob = self.smpc._get_canon_form_mats() #Output is in dict
+                canon_prob_fn = self.smpc._get_canon_form_fns()
+                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form.pkl', 'wb') as f:
+                    pickle.dump(canon_prob_fn, f)
+                print(f'Canonical form saved')
         else:
             print('No optimal solution found') 
             # pdb.set_trace()
@@ -432,7 +488,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             label='Ego Vehicle'
         )
         ax.add_patch(ego_rect)
-
+        self.visualize_road_boundaries(ax, ego_x, ego_y, self._map_api, search_radius=100)
         # ---- Add Traffic Light Lines Visualization ----
         try:
             traffic_light_data = current_input.traffic_light_data
@@ -475,34 +531,6 @@ class SMPCPlanner(AbstractIDMPlanner):
                             lane_plotted = True
         else:
             print("No _route_roadblocks attribute available to extract lane geometry.")
-
-        # ---- Add Filled Road Boundary Visualization using route roadblocks ----
-        if hasattr(self, '_all_roadblocks'):
-            boundary_plotted = False
-            ax = plt.gca()  # Get current axis
-            for roadblock in self._all_roadblocks:
-                # Check if the roadblock has a polygon attribute representing its boundary.
-                if hasattr(roadblock, 'polygon'):
-                    xs, ys = roadblock.polygon.exterior.xy
-                    polygon_points = list(zip(xs, ys))
-                    label = 'Road Boundary' if not boundary_plotted else None
-                    # Create a filled polygon patch with no edge accent by setting edgecolor to 'none'
-                    road_patch = patches.Polygon(
-                        polygon_points,
-                        closed=True,
-                        fill=True,
-                        facecolor='gray',
-                        edgecolor='none',
-                        alpha=0.3,
-                        label=label
-                    )
-                    ax.add_patch(road_patch)
-                    boundary_plotted = True
-                else:
-                    print("Roadblock does not have a polygon attribute.")
-        else:
-            print("No _all_roadblocks attribute available to extract road boundaries.")
-        # ---- Existing Visualization for Target Vehicles ----
         if ca_duals:
             for t_idx in range(self.smpc.N):
                 for j, agent in enumerate(preds[t_idx]):
@@ -547,7 +575,8 @@ class SMPCPlanner(AbstractIDMPlanner):
                     angle=heading*180/np.pi, fill=True, color='red', rotation_point='center'
                 )
                 ax.add_patch(rect)
-        
+
+
         # Plot the planned trajectory, if available
         if hasattr(self, 'ego_traj'):
             for i, state in enumerate(self.ego_traj):
@@ -555,10 +584,9 @@ class SMPCPlanner(AbstractIDMPlanner):
                     plt.plot(state.center.point.x, state.center.point.y, 'gs', markersize=1.5,label='Ego Planned Trajectory')
                 else:
                     plt.plot(state.center.point.x, state.center.point.y, 'gs', markersize=1.5)
-
         
         plt.axis('equal')
-        plt.legend()
+        plt.legend(loc='upper right')
         # Set axis limits around the ego vehicle
         plt.xlim([ego_x-30, ego_x+30])
         plt.ylim([ego_y-30, ego_y+30])
@@ -566,7 +594,27 @@ class SMPCPlanner(AbstractIDMPlanner):
             plt.show()
         plt.close(fig)
         return fig
-
+    
+    def visualize_road_boundaries(self, ax, ego_x, ego_y, map_api, search_radius=100):
+        # Create a point from the ego position.
+        ego_point = Point(ego_x, ego_y)
+        
+        # Retrieve lanes near the ego vehicle.
+        map_objects = map_api.get_proximal_map_objects(ego_point, search_radius, [SemanticMapLayer.LANE])
+        lanes = map_objects.get(SemanticMapLayer.LANE, [])
+        
+        # Loop through the lanes and add their polygon as a patch.
+        for lane in lanes:
+            if hasattr(lane, 'polygon') and lane.polygon:
+                xs, ys = lane.polygon.exterior.xy
+                road_patch = patches.Polygon(
+                    list(zip(xs, ys)),
+                    closed=True,
+                    facecolor='lightgray',  # Use light gray for the road.
+                    edgecolor='none',
+                    alpha=0.5  # Adjust transparency if desired.
+                )
+                ax.add_patch(road_patch)
 
     def _initialize_ego_path(self, ego_state: EgoState) -> None:
         """
@@ -722,7 +770,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             # Define the codec and create a VideoWriter object
             # pdb.set_trace()
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(self.config['video_save_dir']+self.scenario_id+'_'+str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+            out = cv2.VideoWriter(self.config['video_save_dir']+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
 
             for fig in self.figs_w_preds:
                 # Convert the figure to an image

@@ -36,5 +36,5 @@ def main(file_path):
     print(f'Processed data saved to {out_filename}')
 
 if __name__ == "__main__":
-    filepath = '/home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N10.pkl.gz'
+    filepath = '/home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N15.pkl.gz'
     main(filepath)
