@@ -64,7 +64,7 @@ for it, log in enumerate(log_list):
     if 60 > it >= 0:
     # if it ==27:
         try:
-            print(f'Iter: {it}... Collecting data from log: ', log)
+            print(f'[Iter:{it}] Collecting data from log: ', log)
             EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
             # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
             OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
@@ -103,7 +103,7 @@ for it, log in enumerate(log_list):
             # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
             ev_noise_std=[0.01,0.1]
             tv_noise_std=[0.1, 0.1]
-
+            print('Initializing the SMPC Planner...')
             planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std, iter=it)
             # planner = IDMPlanner(target_velocity = 12.,
             # min_gap_to_lead_agent = 3.,

@@ -22,12 +22,17 @@ def main(file_path):
         delta_traj = list(map(lambda x: np.transpose(x,(0,2,1)), delta_traj))
         delta_traj = list(map(lambda x: np.reshape(x,(agent_params[0].shape[0],-1)), delta_traj))
 
+        smpc_params = data['smpc_params'][i]
+
         obs = [np.concatenate((a,b),axis=1) for a, b in zip(agent_params, delta_traj)]
         #flatten obs to row first 
         obs = list(map(lambda x: np.reshape(x,(1,-1)), obs))
-        observations.append(obs)
 
-    out_data = {'observation': observations, 'dual_class': data['dual_class'], 'optimal_duals': data['optimal_duals']}
+        #concatenate smpc_params to obs
+        obs = list(map(lambda x,y: np.concatenate((x,np.expand_dims(y,axis=0)),axis=1), obs, smpc_params))
+        observations.append(obs)
+    smpc_params_dim = smpc_params[0].shape
+    out_data = {'observation': observations, 'dual_class': data['dual_class'], 'optimal_duals': data['optimal_duals'], 'smpc_params_dim': smpc_params_dim}
 
     #save out_data
     out_filename = file_path.split('.pkl.gz')[0] + '_processed.pkl.gz'

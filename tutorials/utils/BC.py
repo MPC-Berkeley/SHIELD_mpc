@@ -15,6 +15,10 @@ import numpy as np
 import torch as th
 from nuplan.planning.simulation.planner.utils.smpc_utils  import to_tensor_var, weighted_MSEloss, unflatten_duals, flatten
 from datetime import datetime
+from tutorials.policies import LeastSquares
+import casadi as ca
+import pickle
+import scipy.sparse as sp
 import os
 
 class BC():
@@ -89,10 +93,18 @@ class BC():
             self.bce_loss = th.nn.BCEWithLogitsLoss(pos_weight=4*th.ones(self.policy[1].lambda_dim, device=th.device('cuda'))) #lambda_dim of the policy == output_dim (ca_dual_dim)
             self.bce_loss_l1 = th.nn.BCEWithLogitsLoss(pos_weight=4*th.ones(self.policy[0].lambda_dim, device=th.device('cuda')))
             self.ce_loss = th.nn.CrossEntropyLoss(weight=th.tensor([1.,20.,20.], device=th.device('cuda')))
+
+            self.mse_loss = th.nn.MSELoss()
             # self.w_mse_loss = weighted_MSEloss(self.policy[0].lmbd_ubd)
             self.l1_dual_max = self.policy[0].lmbd_ubd
             self.l1_dual_ind = self.policy[0].lambda_dim
 
+        N = config['N']
+        with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(N)}_canon_form.pkl','rb') as f:
+            self.canon_prob_fn = pickle.load(f)
+        with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(N)}_canon_form_precomputed.pkl','rb') as f:
+            self.canon_prob_fn_precomputed = pickle.load(f)
+        self.least_squares = LeastSquares(self.canon_prob_fn,self.canon_prob_fn_precomputed,batch_size=batch_size, param_shape=self.demonstrations.smpc_params_dim,device=device)
 
     def set_demonstrations(self, dataset):
         self.demonstrations = dataset
@@ -142,11 +154,12 @@ class BC():
         for itr in range(n_epochs):
             logs = {}
             #Get Training batch
-            ob_batch, ac_batch, dual_class_batch = next(iter(self.train_loader)) #for weighted sampling
+            ob_batch, ac_batch, opt_duals = next(iter(self.train_loader)) #for weighted sampling
 
             #Policy Gradient Descent 
             #Compute the loss
-            expert_ac_batch = to_tensor_var([np.fromiter(flatten(unflatten_duals(ac_batch[k,:][None],self.l1_dual_dim, self.ca_dual_dim, data2tar=True)),float) for k in range(n_batches)], use_cuda=self.use_cuda)
+            expert_ac_batch = to_tensor_var(ac_batch, use_cuda=self.use_cuda)
+            # expert_ac_batch = to_tensor_var([np.fromiter(flatten(unflatten_duals(ac_batch[k,:][None],self.l1_dual_dim, self.ca_dual_dim, data2tar=True)),float) for k in range(n_batches)], use_cuda=self.use_cuda)
 
             # self.loss = []
             if pred_mode[0] == 'both duals' and self.joint_dual_pred:
@@ -171,7 +184,6 @@ class BC():
                 #     loss_value += loss.detach().cpu().numpy()    
                 # self.loss = self.w_mse_loss(self.policy(to_tensor_var(ob_batch, use_cuda=self.use_cuda))[:,:self.policy.lambda_dim],expert_ac_batch[:,:self.policy.lambda_dim]) \
                             # + self.bce_loss(self.policy(to_tensor_var(ob_batch, use_cuda=self.use_cuda))[:,self.policy.lambda_dim:],expert_ac_batch[:,self.policy.lambda_dim:])
-                pdb.set_trace()
                 self.loss = self.ce_loss(self.policy(to_tensor_var(ob_batch, use_cuda=self.use_cuda))[:,:self.policy.lambda_dim],expert_ac_batch[:,:self.policy.lambda_dim]) \
                             + self.bce_loss(self.policy(to_tensor_var(ob_batch, use_cuda=self.use_cuda))[:,self.policy.lambda_dim:],self.l1_dual_class_exp)
                 self.loss.backward()
@@ -221,6 +233,7 @@ class BC():
                         print("Correct CA: ",ca_correct.item(), " out of ", n_batches*(self.policy[1].output_dim),training_ca_acc*100,"% acc")
                         print("Ones in pred CA: ", sum_pred, " Ones in target CA:",sum_tar)
                         self.loss.append(self.bce_loss(policy_output,expert_ac_batch[:,self.policy[0].lambda_dim:]))
+                        self.loss[-1] += gap_radius_loss
                         # self.loss = self.bce_loss(self.policy(to_tensor_var(ob_batch, use_cuda=self.use_cuda)),expert_ac_batch[:,-self.policy.lambda_dim:])
                     else:
                         if self.policy[0].pred_mode[1] == 'tertiary':
@@ -235,6 +248,7 @@ class BC():
                             print("Correct L1: ",correct_l1.item(), " out of ", n_batches*(self.policy[0].output_dim), training_l1_acc*100,'% acc')
                             print(f'Non-zero class in pred L1: {sum_pred}, Non-zero class in target L1: {sum_tar}')
                             self.loss.append(self.ce_loss(th.exp(policy_output).movedim(2,1),self.l1_dual_class_exp.long()))    
+
                         elif self.policy[0].pred_mode[1] == 'binary':
                             '''
                             binary pred
@@ -247,6 +261,28 @@ class BC():
                             print("Correct L1: ",correct_l1.item(), " out of ", n_batches*(self.policy[0].output_dim), training_l1_acc*100,'% acc')
                             print(f'Non-zero class in pred L1: {sum_pred}, Non-zero class in target L1: {sum_tar}')
                             self.loss.append(self.bce_loss_l1(policy_output,expert_ac_batch[:,:self.policy[0].lambda_dim]))
+                            th.autograd.set_detect_anomaly(True)
+                            mu, nu, g1 = self.least_squares(self.policy[1](to_tensor_var(ob_batch, use_cuda=self.use_cuda)),self.policy[0](to_tensor_var(ob_batch, use_cuda=self.use_cuda)),ob_batch[:,-self.demonstrations.smpc_params_dim[0]:].detach().numpy())
+  
+                            #compute the gap radius loss
+                            ones_fg = th.ones(g1.shape)
+                            temp = (-th.bmm(self.least_squares.C.permute(0,2,1), mu.to('cpu'))
+                                    + self.least_squares.p
+                                    + th.bmm(self.least_squares.F.permute(0,2,1), nu.to('cpu'))
+                                    + th.bmm(self.least_squares.L.permute(0,2,1), (2 * g1.to('cpu') - self.policy[0].lmbd_ubd * ones_fg)))
+                            stacked_prod = th.cat([-self.least_squares.C_Qinv, self.least_squares.F_Qinv, 2*self.least_squares.L_Qinv],dim=1)      
+                            grad_d = stacked_prod @ temp
+                            grad_d += th.cat([-self.least_squares.c.unsqueeze(dim=-1), self.least_squares.f.unsqueeze(dim=-1), th.zeros(g1.shape)],dim=1)
+                            duals = th.cat((mu,nu,g1),dim=1)
+                            proj_duals = duals - grad_d.to('cuda')
+                            start_idx = mu.shape[1] + nu.shape[1]
+
+                            # proj_duals[:start_idx] = self.least_squares.relu(proj_duals[:start_idx])
+                            # proj_duals[start_idx:] = th.clip(proj_duals[start_idx:],0,self.least_squares.l1_lmbd)
+                            gap_radius_loss = self.mse_loss(duals,proj_duals)
+                            print('gap radius mean:',th.sqrt(gap_radius_loss))
+                            pdb.set_trace()
+                            self.loss[-1] += gap_radius_loss
                         else:
                             raise ValueError('Invalid pred_mode for policy[0]')
 
@@ -263,7 +299,7 @@ class BC():
                 if self.joint_dual_pred:
                     logs.update({'Epochs':itr, 'Training_Loss':self.loss.detach().cpu().numpy(), 'Training_EnvStepsSofar': n_batches * itr})
                 else:
-                    logs.update({'Epochs':itr, 'L1_training_loss':self.loss[0].detach().cpu().numpy(), 'ca_training_loss':self.loss[1].detach().cpu().numpy(), 'Training_EnvStepsSofar': n_batches * itr, 'training_ca_acc': training_ca_acc, 'training_l1_acc': training_l1_acc})
+                    logs.update({'Epochs':itr, 'L1_training_loss':self.loss[0].detach().cpu().numpy(), 'ca_training_loss':self.loss[1].detach().cpu().numpy(), 'Training_EnvStepsSofar': n_batches * itr, 'training_ca_acc': training_ca_acc, 'training_l1_acc': training_l1_acc, 'gap_radius_loss':gap_radius_loss.value.item()})
                     for key, value in logs.items():
                         print("{} : {}".format(key, value))
                         self.logger.log_scalar(value, key,itr)

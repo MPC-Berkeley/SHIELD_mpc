@@ -42,11 +42,29 @@ def Train_BC(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     with gzip.open(config['expert_data_dir'],'rb') as file:
         expert_data = pickle.load(file)
     replay_buffer = ReplayBuffer(config['max_replay_buffer_size'])
-    observation = np.squeeze(np.concatenate([obs for obs in expert_data["observation"]]),axis=1)
 
+    #remove empty list in expert_data
+    expert_data['observation'] = [obs for obs in expert_data['observation'] if len(obs)>0]
+    expert_data['optimal_duals'] = [acs for acs in expert_data['optimal_duals'] if len(acs)>0]
+    expert_data['dual_class'] = [acs for acs in expert_data['dual_class'] if len(acs)>0]
+
+    #For debugging issue. This issue happened due to some error in smpc_planner.py. I addressed this issue and the new dataset is being collected 
+    for j in range(len(expert_data['optimal_duals'])):
+        if (len(expert_data['optimal_duals'][j]) > len(expert_data['observation'][j])):
+            #delete the last element of optimal duals
+            expert_data['optimal_duals'][j] = expert_data['optimal_duals'][j][:-1]
+        elif (len(expert_data['optimal_duals'][j]) == len(expert_data['observation'][j])):
+            pass
+        else:
+            print('Length mismatch between observation and optimal duals')
+            pdb.set_trace()
+
+    observation = np.squeeze(np.concatenate([obs for obs in expert_data["observation"]]),axis=1)
     optimal_duals = np.concatenate([acs for acs in expert_data["optimal_duals"]])
-    replay_buffer.obs = observation; replay_buffer.acs = optimal_duals; replay_buffer.terminals = np.zeros_like(observation); replay_buffer.next_obs = np.zeros_like(observation); replay_buffer.rews = np.zeros_like(observation) 
-    
+
+    replay_buffer.obs = observation; replay_buffer.acs = optimal_duals; replay_buffer.opt_duals = optimal_duals; replay_buffer.terminals = np.zeros_like(observation); replay_buffer.next_obs = np.zeros_like(observation); replay_buffer.rews = np.zeros_like(observation) 
+    replay_buffer.smpc_params_dim = expert_data['smpc_params_dim']
+
     flattened_dual_class = []
     for data in expert_data["dual_class"]:
         flattened_dual_class.extend(data)

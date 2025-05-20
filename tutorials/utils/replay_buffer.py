@@ -15,6 +15,8 @@ class ReplayBuffer(th.utils.data.Dataset):
         # store (concatenated) component arrays from each rollout
         self.obs = None
         self.acs = None
+        self.opt_duals = None
+        self.smpc_params_dim = None
         self.rews = None
         self.next_obs = None
         self.terminals = None
@@ -32,7 +34,7 @@ class ReplayBuffer(th.utils.data.Dataset):
         if th.is_tensor(idx):
             idx=idx.tolist()
 
-        return self.obs[idx], self.acs[idx], self.dual_classes[idx]
+        return self.obs[idx], self.acs[idx], self.opt_duals[idx]
     
     def normalize(self,l1_dim,l1_lmbd,feature_mean=None,feature_cov=None,target_mean=None,target_cov=None,l1_pred_mode='binary'):
         self.n = self.obs.shape[1]
