@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.maps.abstract_map_objects import LaneGraphEdgeMapObject
@@ -64,7 +64,7 @@ class IDMPlanner(AbstractIDMPlanner):
         self._initialize_route_plan(initialization.route_roadblock_ids)
         self._initialized = False
 
-    def compute_planner_trajectory(self, current_input: PlannerInput,preds,tv_paths_se2) -> AbstractTrajectory:
+    def compute_planner_trajectory(self, current_input: PlannerInput, preds: Union[List,Tuple],tv_paths_se2=None) -> AbstractTrajectory:
         """Inherited, see superclass."""
         # Ego current state
         ego_state, observations = current_input.history.current_state

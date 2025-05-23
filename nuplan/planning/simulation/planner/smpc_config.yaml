@@ -1,14 +1,24 @@
-N: 15
+#SMPC parameters
+N: 14
 dt: 0.1
-num_tvs: 5
-a_max: 3.0
+is_mm_preds: True 
+num_tvs: 3
+num_modes: 2
+l1_lmbd: 0.01
+collision_avoidance_method: 'obca' #['obca','affine']
+# state and input constraints
+a_max: 2.0
 a_min: -5.0
-v_max: 15.
+v_max: 14.
 v_min: -1.
 a_lat: 3.2 #m/s^2 used for lane chance mode prediction of the TVs
+
+# Evaluation parameters
 eval_mode_category: 0 #0: closed-loop with IDMAgent observation, 1: open-loop (TVs do not react to EV) using logged trajectories 
-eval_mode: True 
-is_mm_preds: False 
-save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N15.pkl
-video_save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/video/
-l1_lmbd: 100
+eval_mode: False 
+prediction_method: wayformer #['idm', 'wayformer']
+
+# Directories
+save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14.pkl
+eval_save_dir: /home/mpc/nuplan-devkit/nuplan/evaluation/nuplan_expert_data_N14_eval.pkl
+video_save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/video/N14/

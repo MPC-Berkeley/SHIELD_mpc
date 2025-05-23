@@ -60,9 +60,7 @@ scenario_types=[
 print('total log list length:',len(log_list))
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
-    # if 60 > it >=52:
     if 60 > it >= 0:
-    # if it ==27:
         try:
             print(f'[Iter:{it}] Collecting data from log: ', log)
             EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
@@ -73,7 +71,7 @@ for it, log in enumerate(log_list):
                 f"scenario_filter.log_names=[{str(log)}]",
                 f'scenario_filter.scenario_types={scenario_types}', #non-stationary ego scenarios only
                 'scenario_filter.ego_displacement_minimum_m=10', #non-stationary threshold: ego moves at least this many meters in the scenario
-                'scenario_filter.limit_total_scenarios=2',  # use 2 total scenarios
+                'scenario_filter.limit_total_scenarios=10',  # use 2 total scenarios
                 'scenario_filter.remove_invalid_goals=true',  # use 1 scenario per log
             ]
 
@@ -101,8 +99,13 @@ for it, log in enumerate(log_list):
 
 
             # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
-            ev_noise_std=[0.01,0.1]
-            tv_noise_std=[0.1, 0.1]
+            #OBCA constraints
+            ev_noise_std=[0.1,0.1]
+            tv_noise_std=[0.3, 0.3]
+
+            # #Affine CA constraints
+            # ev_noise_std=[0.05,0.05]
+            # tv_noise_std=[2, 2]
             print('Initializing the SMPC Planner...')
             planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std, iter=it)
             # planner = IDMPlanner(target_velocity = 12.,

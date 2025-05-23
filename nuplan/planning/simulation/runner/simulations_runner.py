@@ -12,7 +12,17 @@ from nuplan.planning.simulation.observation.idm_agents import IDMAgents
 from nuplan.planning.simulation.simulation import Simulation
 from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner
 logger = logging.getLogger(__name__)
-
+from unitraj.datasets.wayformer_dataset import WayformerDataset
+from torch.utils.data import DataLoader
+from unitraj.datasets import common_utils
+from unitraj.models import build_model
+from unitraj.datasets import build_dataset
+from unitraj.models.wayformer.wayformer import Wayformer
+from omegaconf import OmegaConf
+import torch
+import pytorch_lightning as pl
+import numpy
+import pdb
 
 def for_each(fn: Callable[[Any], Any], items: List[Any]) -> None:
     """
@@ -48,6 +58,36 @@ class SimulationRunner(AbstractRunner):
         # Initialize Planner
         self.planner.initialize(self._simulation.initialize(sim_mode='closedloop'))
 
+        # Initialize WayformerDataset for Unitraj format (Wayformer)
+        cfg = OmegaConf.load('/home/mpc/UniTraj/unitraj/configs/config.yaml')
+        model_cfg = OmegaConf.load('/home/mpc/UniTraj/unitraj/configs/method/wayformer.yaml')
+        OmegaConf.set_struct(cfg, False)  # Open the struct
+        cfg = OmegaConf.merge(cfg, model_cfg)
+        cfg.method = model_cfg
+        cfg['eval'] = True
+
+        self.wayformer_dataset = build_dataset(cfg, val=True)
+
+        # Initialize Wayformer model
+        self.wayformer_model = build_model(cfg)
+
+        val_loader = DataLoader(
+            self.wayformer_dataset, batch_size=1, num_workers=cfg.load_num_workers, shuffle=False, drop_last=False,
+            collate_fn=self.wayformer_dataset.collate_fn)
+
+        trainer = pl.Trainer(
+            inference_mode=True,
+            logger=None,
+            devices=1,
+            accelerator="cpu" if cfg.debug else "gpu",
+            profiler="simple",
+        )
+        # pdb.set_trace()
+        # pred = trainer.predict(model=self.wayformer_model, dataloaders=val_loader, return_predictions=True, ckpt_path='/home/mpc/UniTraj/unitraj/unitraj_ckpt/test/epoch=933-val/brier_fde=0.60.ckpt')
+
+        # Load the model checkpoint
+        self.wayformer_model = Wayformer.load_from_checkpoint('/home/mpc/UniTraj/unitraj/unitraj_ckpt/test/epoch=933-val/brier_fde=0.60.ckpt',config=cfg)
+        self.wayformer_model.to('cpu')
         # Execute specific callback
         self._simulation.callback.on_initialization_end(self._simulation.setup, self.planner)
 
@@ -71,6 +111,227 @@ class SimulationRunner(AbstractRunner):
         :return: Get the scenario relative to the simulation.
         """
         return self.simulation.scenario
+
+    def get_wayformer_input(self, planner_input, scenario: AbstractScenario):
+        from scenarionet.converter.nuplan.utils import convert_nuplan_scenario
+        metadrive_scenario = convert_nuplan_scenario(scenario,version='v1.1',is4inference=True,planner_input=planner_input)
+        metadrive_scenario = metadrive_scenario.update_summaries(metadrive_scenario)
+        output = self.wayformer_dataset.preprocess(metadrive_scenario,is4inference=True)
+        output = self.wayformer_dataset.process(output)
+        output = self.wayformer_dataset.postprocess(output,is4inference=True)
+
+        return output
+    
+    def wayformer_inference(self,planner_input):
+        #preprocess, process and postprocess for Unitraj format
+        x = self.get_wayformer_input(planner_input,self.simulation.scenario)
+        batch_x = self.wayformer_dataset.collate_fn(x)
+        # Call the model for inference
+        self.wayformer_model.eval()
+        with torch.no_grad():
+            output, _ = self.wayformer_model.forward(batch_x,is4inference=True)
+        pred = output['predicted_trajectory']
+        prob = output['predicted_probability']
+        use_square_gmm = True
+        debug = False
+        rho_limit = 0.5
+        log_std_range = (-1.609, 0.3)
+        # pred: shape [B, c, T, 5] c trajectories for the ego agents with every point being the params of
+                                    # Bivariate Gaussian distribution.
+        # Bivariate Gaussian Distribution params: [mu_x, mu_y, sigma_x, sigma_y, rho] (rho is the correlation coefficient)                                      
+        #post-processing the parameters
+        #Assume square gaussian distribution
+        log_std1 = torch.clip(pred[:, :, :, 2], min=log_std_range[0], max=log_std_range[1])
+        log_std2 = torch.clip(pred[:, :, :, 3], min=log_std_range[0], max=log_std_range[1])
+        std1 = torch.exp(log_std1)
+        std2 = torch.exp(log_std2)
+        pred[:, :, :, 2] = std1
+        pred[:, :, :, 3] = std2
+        pred[:, :, :, 4] = torch.clip(pred[:, :, :, 4], min = -rho_limit, max = rho_limit)  #clip the rho values
+
+        if use_square_gmm:
+            pred[:, :, :, 3] = pred[:, :, :, 2]
+            pred[:, :, :, 4] = torch.zeros_like(pred[:, :, :, 4])  # Set rho to 0 for square Gaussian
+
+        # From center coordinate to traj coordinate
+        center_objects_world = batch_x['input_dict']['center_objects_world'] #(N_vh, 10)
+        #rotate about the z axis
+
+        pred[:, :, :, 0:2] = common_utils.rotate_points_along_z(
+            points=pred[:, :, :, 0:2].reshape(pred.shape[0], -1, 2),
+            angle=center_objects_world[:, 6]
+        ).reshape(pred.shape[0], pred.shape[1], pred.shape[2], 2)
+
+        # offset map center
+        pred[:,:,:,0:2] += center_objects_world[:, None, None, 0:2]
+
+        state = self.simulation.scenario.get_ego_state_at_iteration(0)
+        scenario_center = torch.tensor([state.waypoint.x, state.waypoint.y]).numpy()[None, None, None, :]
+        pred[:,:,:,0:2] += scenario_center
+        if debug:
+            self.plot_gaussian_modes_over_time(pred,planner_input)
+
+        pred_filtered, prob_filtered, tv_params, tv_track_tokens = self.filter_predictions(pred, prob, planner_input, x)
+        tv_psi = self.get_heading_wayformer(pred_filtered)
+
+        return pred_filtered.numpy(), prob_filtered.numpy(), tv_params, tv_psi.numpy(), tv_track_tokens
+
+    def filter_predictions(self, pred, prob, planner_input, wayformerinput):
+        """
+        Filter the predictions based on the probability and distance from the ego vehicle's current state
+        :param pred: predictions
+        :param prob: probabilities
+        :return: filtered predictions
+        """
+        ego_state, observation = planner_input.history.current_state
+        M = self.planner.config['num_modes'] #Top 3 likely modes
+        V = self.planner.config['num_tvs'] #Top 4 vehicles
+
+        N_veh, N_modes, T, D = pred.shape
+
+        pred_M_ind = torch.argsort(prob,dim=1, descending=True)[:,:M]  # Get the top M modes
+        index_exp = pred_M_ind.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, T, D)
+        pred_gathered = torch.gather(pred, dim=1, index=index_exp) 
+
+        # Get the ego vehicle's current state
+        ego_x, ego_y = ego_state.waypoint.x, ego_state.waypoint.y
+
+        # Get the distance from the ego vehicle's current state
+        distances = ((pred_gathered[:,:,0,0] - ego_x) ** 2 + (pred_gathered[:, :, 0, 1] - ego_y) ** 2).sqrt()
+        avg_distances_over_modes = distances.mean(dim=1)
+
+        # Find index of ego
+        ego_index = -1
+        for i in range(len(avg_distances_over_modes)):
+            if wayformerinput[i]['center_objects_id'] == 'ego':
+                ego_index = i
+                break
+
+        # Get the indices of the V + 1 (always includes the ego) vehicles closest to the ego vehicle out of N_veh vehicles
+        temp = torch.argsort(avg_distances_over_modes)
+        closest_vehicles_indices = temp[temp!=ego_index][:V]
+
+        pred_output = pred_gathered[closest_vehicles_indices]
+        prob_output = torch.gather(prob[closest_vehicles_indices], dim = 1, index = pred_M_ind[closest_vehicles_indices])
+        
+        #(length, width)
+        detection_track_tokens = [v.metadata.track_token for v in observation.tracked_objects.tracked_objects]
+        tv_params = []
+        tv_track_tokens = []
+        for i in range(V):
+            ind = closest_vehicles_indices[i]
+            try:
+                idx4tv_param = detection_track_tokens.index(wayformerinput[ind]['center_objects_id'])
+                length = observation.tracked_objects.tracked_objects[idx4tv_param].box.length
+                width = observation.tracked_objects.tracked_objects[idx4tv_param].box.width
+                # Get the length and width of the vehicle
+                tv_params.append((length, width))
+                tv_track_tokens.append(wayformerinput[ind]['center_objects_id'])
+            except:
+                # If the vehicle is not found in the tracked objects, use default values
+                tv_params.append((0, 0))
+                tv_track_tokens.append(wayformerinput[ind]['center_objects_id'])
+                logger.warning(f"Vehicle with token {wayformerinput[ind]['center_objects_id']} not found in tracked objects.")
+        return pred_output, prob_output, tv_params, tv_track_tokens
+    
+    def get_heading_wayformer(self, pred_filtered):
+        """
+        Get the heading of the vehicle from the planner input
+        :param planner_input: planner input
+        :return: heading of the vehicle
+        """
+        # Get the ego vehicle's current state
+        n_tv, M, T, _  = pred_filtered.shape
+        heading = torch.zeros((n_tv, M, T-1, 1))
+        # Get the heading of the vehicle
+        for i in range(n_tv):
+            for t in range(T-1):            
+                #instantaneous heading
+                xy_diff = pred_filtered[i, :, t+1, 0:2] - pred_filtered[i, :, t, 0:2]
+                torch.atan2(xy_diff[:,1], xy_diff[:,0], out=heading[i, :, t, 0])
+
+        return heading
+
+    def plot_gaussian_modes_over_time(self,gaussian_tensor, planner_input):
+        """
+        Plot bivariate Gaussian distributions as ellipses for each vehicle and mode across time.
+        
+        Args:
+            gaussian_tensor (np.ndarray): Shape (N_veh, N_modes, T, 5), where 5 = [mu_x, mu_y, sigma_x, sigma_y, rho]
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.patches import Ellipse
+        import matplotlib.cm as cm
+        N_veh, N_modes, T, _ = gaussian_tensor.shape
+        fig, ax = plt.subplots(figsize=(12, 8))
+
+        # Assign each vehicle a unique base color
+        base_colors = cm.get_cmap('tab20', N_veh)
+
+        all_x, all_y = [], []
+
+        #plot all vehicles as blue rectangles
+        _, observation = planner_input.history.current_state
+        for v in observation.tracked_objects.tracked_objects:
+            if v.metadata.category_name == 'vehicle':
+                xy = [v.center.x,v.center.y]
+                l = v.box.length
+
+                #plot a square
+                rect = plt.Rectangle((xy[0]-l/2, xy[1]-l/2), l, l, angle=0.0, color='black', alpha=1)
+                ax.add_patch(rect)
+        for v in range(N_veh):
+            base_color = base_colors(v)
+            
+            for m in range(N_modes):
+                alpha = (m + 1) / N_modes  # lighter for lower modes, darker for higher
+                for t in range(T):
+                    mu_x, mu_y, sigma_x, sigma_y, rho = gaussian_tensor[v, m, t]
+
+                    if sigma_x <= 0 or sigma_y <= 0 or not np.isfinite([mu_x, mu_y, sigma_x, sigma_y, rho]).all():
+                        continue  # Skip degenerate or invalid Gaussians
+
+                    # Clamp rho for numerical stability
+                    rho = np.clip(rho, -0.999, 0.999)
+
+                    # Build covariance matrix
+                    cov = np.array([
+                        [sigma_x**2, rho * sigma_x * sigma_y],
+                        [rho * sigma_x * sigma_y, sigma_y**2]
+                    ])
+
+                    try:
+                        lambda_, v_ = np.linalg.eig(cov)
+                        lambda_ = np.clip(lambda_, 1e-4, None)  # clip small/negative eigenvalues
+                        angle = np.degrees(np.arctan2(*v_[:, 0][::-1]))
+                        width, height = 2 * np.sqrt(lambda_)  # 1-sigma ellipse
+
+                        ellipse = Ellipse(
+                            xy=(mu_x, mu_y),
+                            width=width,
+                            height=height,
+                            angle=angle,
+                            edgecolor='none',
+                            facecolor=base_color,
+                            alpha=alpha * 0.6
+                        )
+                        ax.add_patch(ellipse)
+                        all_x.append(mu_x)
+                        all_y.append(mu_y)
+                    except np.linalg.LinAlgError:
+                        continue
+
+        if all_x and all_y:
+            ax.set_xlim(min(all_x) - 10, max(all_x) + 10)
+            ax.set_ylim(min(all_y) - 10, max(all_y) + 10)
+
+        ax.set_title("Bivariate Gaussian Ellipses for All Vehicles and Modes (6s Horizon)")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_aspect('equal')
+        plt.grid(True)
+        plt.show()
 
     def run(self) -> RunnerReport:
         """
@@ -112,31 +373,40 @@ class SimulationRunner(AbstractRunner):
             # Execute specific callback
             self._simulation.callback.on_planner_start(self.simulation.setup, self.planner)
 
-            if isinstance(self.planner, SMPCPlanner): 
+            # Get predictions for planner
+            pred, prob, tv_params, tv_psi, tv_track_tokens = self.wayformer_inference(planner_input)
+            if isinstance(self.planner, SMPCPlanner):             
                 #Get IDM predictions for planner
                 time_controller_copy = copy.deepcopy(self.simulation._time_controller)
-                if isinstance(self.simulation.setup.observations,IDMAgents):
+                if self.planner.config['prediction_method'] == 'idm':
+                    if isinstance(self.simulation.setup.observations,IDMAgents):
+                        if self.simulation._time_controller.get_iteration().index == 0:
+                            ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
+                            self.planner.ego_traj = ego_traj[:self.planner.config['N']+1]
+                            history_buffer = copy.deepcopy(self.simulation._history_buffer)
+                            preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], history_buffer, num_samples=self.planner.config['N'])
+                        else:
+                            history_buffer = copy.deepcopy(self.simulation._history_buffer)
+                            preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(history_buffer), history_buffer, num_samples=self.planner.config['N'])
+                        tv_paths_se2 = None
+
+                    else:
+                        preds = self.simulation.scenario._get_log_predictions(time_controller_copy.get_iteration(), num_samples=self.planner.config['N'])
+                        tv_paths_se2 = self.simulation._scenario._get_agent_paths_from_log()
+                else:
+                    #use Wayformer predictions
+                    tv_paths_se2 = None
+                    preds = (pred, prob, tv_params, tv_psi, tv_track_tokens)
                     if self.simulation._time_controller.get_iteration().index == 0:
                         ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
                         self.planner.ego_traj = ego_traj[:self.planner.config['N']+1]
-                        history_buffer = copy.deepcopy(self.simulation._history_buffer)
-                        preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], history_buffer, num_samples=self.planner.config['N'])
-                    else:
-                        history_buffer = copy.deepcopy(self.simulation._history_buffer)
-                        preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(history_buffer), history_buffer, num_samples=self.planner.config['N'])
-                    tv_paths_se2 = None
-                else:
-                    preds = self.simulation.scenario._get_log_predictions(time_controller_copy.get_iteration(), num_samples=self.planner.config['N'])
                     tv_paths_se2 = self.simulation._scenario._get_agent_paths_from_log()
-                # Plan path based on all planner's inputs
-                # #TODO: tv_paths_se2 is not used in the planner
-                # tv_paths_se2 = None
                 try:
                     trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
                 except:
                     break
             else:
-                preds = []
+                preds = [] #empty preds
                 tv_paths_se2 = None
                 trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
             

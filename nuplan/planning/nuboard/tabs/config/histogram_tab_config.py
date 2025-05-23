@@ -3,7 +3,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
-from bokeh.plotting import Figure
+from bokeh.plotting import figure as Figure
 
 from nuplan.planning.nuboard.style import PLOT_PALETTE
 
