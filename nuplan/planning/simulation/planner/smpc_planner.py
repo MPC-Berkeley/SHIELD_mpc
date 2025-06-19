@@ -15,6 +15,7 @@ import torch as th
 import matplotlib.patches as patches
 from tutorials.policies import RAID_NET
 from nuplan.common.actor_state.ego_state import EgoState
+from nuplan.common.maps.nuplan_map.lane_connector import NuPlanLaneConnector
 from nuplan.common.maps.abstract_map_objects import LaneGraphEdgeMapObject
 from nuplan.common.maps.maps_datatypes import SemanticMapLayer, TrafficLightStatusData, TrafficLightStatusType
 from nuplan.common.actor_state.state_representation import StateSE2, StateVector2D, TimePoint
@@ -67,11 +68,11 @@ class SMPCPlanner(AbstractIDMPlanner):
         :param occupancy_map_radius: [m] The range around the ego to add objects to be considered.
         """
         with open("/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml") as f:
-        # with open("/home/hansung/L4SMPC_nuplan/nuplan/planning/simulation/planner/smpc_config.yaml") as f:
+        # with open("/home/hansung/L4SMPC_nuplan/nuplan/planning/simulation/planner/smpc_config_affine.yaml") as f:
             self.config = yaml.load(f, Loader=yaml.FullLoader)
 
         super(SMPCPlanner, self).__init__(
-            target_velocity=20.0, # (Not used)
+            target_velocity=13.0, # (Not used)
             min_gap_to_lead_agent=2.0, #min_gap_to_lead_agent (Not used)
             headway_time=2.0, #headway time (Not used)
             accel_max=self.config['a_max'],
@@ -99,6 +100,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.ego_opt_sols_full_state = []
         self.pred_agent_params = []
         self.smpc_params = []
+        self.l1_active = []
         
         self._initialized = False
         self.t = 0
@@ -198,6 +200,7 @@ class SMPCPlanner(AbstractIDMPlanner):
 
     def compute_planner_trajectory(self, current_input: PlannerInput, preds = None, tv_paths_se2: Optional[Dict]=None, wayformer_output: Optional[Dict]=None) -> AbstractTrajectory:
         """Inherited, see superclass."""
+        print(f'[SMPCPlanner] compute_planner_trajectory: {self.t} iteration')
         # Ego current state
         ego_state, observations = current_input.history.current_state
         # print('compute_planner_trajectory:', ego_state.center.point.x, ego_state.center.point.y, ego_state.dynamic_car_state.center_velocity_2d.magnitude())
@@ -293,7 +296,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 preds_dict = {'preds': pred, 'prob': prob, 'tv_params': tv_params, 'tv_psi': tv_psi, 'tv_track_tokens': tv_track_tokens}
                 mm_preds = preds_dict
                 update_dict = self.get_update_dict(current_input, preds_dict, tv_paths_se2)
-        update_dict.update({'speed_limit':self._policy.target_velocity,'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
+        update_dict.update({'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1/2),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
 
         if self.config['eval_mode']:
             #update canonical form matrices
@@ -371,6 +374,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.ego_planned_trajs.append(self.s2xy(sol['nom_z'][0,1:]))
             self.ego_opt_sols_full_state.append(self.get_ego_full_state())
             self.smpc_params.append(self.smpc.opti.value(self.smpc.params))
+            self.l1_active.append(l1_dual_active)
             if not self.config['eval_mode']:
                 fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"])
             else:
@@ -390,13 +394,15 @@ class SMPCPlanner(AbstractIDMPlanner):
                 with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn_precomputed, f)
                 print(f'[Eval Mode] Canonical form saved')   
-            # pdb.set_trace()           
+            # pdb.set_trace()          
+            # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True) 
         else:
             print('No optimal solution found') 
-            fig = self.visualize_scene(current_input, pred, 0)
+            fig = self.visualize_scene(current_input, preds_dict, 0)
             self.figs_w_preds.append(fig)
-            # pdb.set_trace()
+            
             # self.visualize_scene(current_input, pred, 0,visualize=True)
+            # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True)
             # self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
         
         #Update u_prev
@@ -411,6 +417,21 @@ class SMPCPlanner(AbstractIDMPlanner):
     def set_scenario_id(self, sc_id):
         self.scenario_id = sc_id
 
+    def get_max_target_vehicle_speeds(self,planner_input):
+        # Get the target vehicle speeds from the planner input
+        ego_state, observations = planner_input.history.current_state
+        target_vehicle_speeds = []
+        radius = 50 #radius to consider the target vehicles
+        for tracked_object in observations.tracked_objects.tracked_objects:
+            #if the tracked object is within certain radius 
+            if np.sqrt( (tracked_object.box.center.x - ego_state.center.x)**2 + (tracked_object.box.center.y - ego_state.center.y)**2 ) < radius:
+                target_vehicle_speeds.append(tracked_object.velocity.magnitude())
+        if len(target_vehicle_speeds) == 0:
+            logger.warning("No target vehicles found in the observations.")
+            return 1e6 #large number is fine since we use the min
+        else:
+            return max(target_vehicle_speeds)
+        
     def agent_preds2array(self, preds):
         out = np.zeros((len(preds[0]),4,self.smpc.N)) #num_tv x 4 x N
         agent_params = np.zeros((len(preds[0]),2)) #agent l and w
@@ -503,13 +524,11 @@ class SMPCPlanner(AbstractIDMPlanner):
         intersecting_agents = occupancy_map.intersects(self._get_expanded_ego_path(ego_state, ego_idm_state))
         # Check if there are agents intersecting the ego's baseline
         if intersecting_agents.size > 0:
-
             # Extract closest object
             intersecting_agents.insert(self._ego_token, ego_state.car_footprint.geometry)
             nearest_id, nearest_agent_polygon, relative_distance = intersecting_agents.get_nearest_entry_to(
                 self._ego_token
             )
-
             # Red light at intersection
             if self._red_light_token in nearest_id:
                 print('RED LIGHT DETECTED'.center(50, '-'))
@@ -525,7 +544,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             xy_list.append(np.array(self.ego_route(s)[:2]) + np.array([self.x0.center.point.x,self.x0.center.point.y]) )
         return xy_list
 
-    def _sol2ego_state(self, sol,ego_state0):
+    def _sol2ego_state(self, sol, ego_state0):
         ego_idm_state = IDMAgentState(progress=sol[0,0], velocity=sol[1,0])
         vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
         
@@ -569,27 +588,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         )
         ax.add_patch(ego_rect)
         self.visualize_road_boundaries(ax, ego_x, ego_y, self._map_api, search_radius=100)
-        # ---- Add Traffic Light Lines Visualization ----
-        try:
-            traffic_light_data = current_input.traffic_light_data
-            tl_plotted = False
-            for tl in traffic_light_data:
-                # Adjust the attribute name as necessary—here we check for a 'polygon' attribute.
-                if hasattr(tl, 'polygon'):
-                    xs, ys = tl.polygon.exterior.xy
-                    label = 'Traffic Light' if not tl_plotted else None
-                    color = 'green' if tl.status == TrafficLightStatusType.GREEN else 'red'
-                    plt.plot(xs, ys, color=color, linestyle='-', linewidth=2, label=label)
-                    tl_plotted = True
-                # Alternatively, if there is a list of line segments:
-                elif hasattr(tl, 'lines'):
-                    for line in tl.lines:
-                        xs, ys = line.xy
-                        color = 'green' if tl.status == TrafficLightStatusType.GREEN else 'red'
-                        plt.plot(xs, ys, color=color, linestyle='-', linewidth=2, label='Traffic Light' if not tl_plotted else None)
-                        tl_plotted = True
-        except Exception as e:
-            print("Could not retrieve traffic light geometry:", e)
+
         # ---- Add Road Lanes Visualization using route roadblocks ----
         if hasattr(self, '_route_roadblocks'):
             ego_point = Point(ego_x, ego_y)
@@ -607,10 +606,25 @@ class SMPCPlanner(AbstractIDMPlanner):
                             ys = [pt.y for pt in pts]
                             # Only add the label once
                             label = 'Lane' if not lane_plotted else None
-                            plt.plot(xs, ys, color='blue', linestyle='--', linewidth=1, label=label)
+                            plt.plot(xs, ys, color='gray', linestyle='-', linewidth=1, label=label)
                             lane_plotted = True
         else:
             print("No _route_roadblocks attribute available to extract lane geometry.")
+
+        # ---- Add Traffic Light Lines Visualization ----
+        try:
+            traffic_light_data = current_input.traffic_light_data
+            tl_plotted = False
+            for tl in traffic_light_data:
+                for stop_line in self._map_api._map_objects[SemanticMapLayer.LANE_CONNECTOR][str(tl.lane_connector_id)].stop_lines:
+                    xs, ys = stop_line.polygon.exterior.xy
+                    # xs, ys = self._map_api._map_objects[SemanticMapLayer.LANE_CONNECTOR][str(tl.lane_connector_id)].baseline_path.linestring.xy
+                    color = 'green' if tl.status == TrafficLightStatusType.GREEN else 'red'
+                    plt.plot(xs, ys, color=color, linestyle='--', linewidth=2, label=label)
+                    tl_plotted = True
+        except Exception as e:
+            print("Could not retrieve traffic light geometry:", e)
+
         if ca_duals:
             for t_idx in range(self.smpc.N):
                 if self.config['prediction_method']=='idm':
@@ -624,26 +638,19 @@ class SMPCPlanner(AbstractIDMPlanner):
                             length, width = agent.box.length, agent.box.width
                             heading = agent.center.heading
                         if t_idx == 0:
-                            if j == 0:
-                                rect = plt.Rectangle(
-                                    (x - length/2, y - width/2), length, width,
-                                    angle=heading*180/np.pi, fill=True, color='blue', rotation_point='center'
-                                )
-                            else:
-                                rect = plt.Rectangle(
-                                    (x - length/2, y - width/2), length, width,
-                                    angle=heading*180/np.pi, fill=True, color='blue', rotation_point='center'
-                                )
+                            rect = plt.Rectangle(
+                                (x - length/2, y - width/2), length, width,
+                                angle=heading*180/np.pi, fill=True, color='blue', rotation_point='center'
+                            )
                             ax.add_patch(rect)
                         else:
                             active_ca_dual = (ca_duals[j][0][t_idx-1][0] > 1e-3)
                             color = 'red' if active_ca_dual else 'yellow'
-                            alpha = 1 if active_ca_dual else 0.3
-                            ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, color=color, alpha=alpha)
+                            ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, color=color)
                             ax.add_patch(ellipsoid)
                 else:
                     #Plot all vehicles in the observation track
-                    for j, vh in enumerate(observations.tracked_objects.tracked_objects):
+                    for i, vh in enumerate(observations.tracked_objects.tracked_objects):
                         x, y = vh.center.x, vh.center.y
                         length, width = vh.box.length, vh.box.width
                         heading = vh.center.heading
@@ -662,9 +669,8 @@ class SMPCPlanner(AbstractIDMPlanner):
                                 heading = preds['tv_psi'][j,n,t_idx,0]
 
                                 active_ca_dual = (ca_duals[j][0][t_idx-1][0] > 1e-3)
-                                color = 'yellow' if active_ca_dual else 'red'
-                                alpha = 1 if active_ca_dual else 0.3
-                                ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, color=color, alpha=alpha)
+                                color = 'red' if active_ca_dual else 'yellow'
+                                ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, color=color)
                                 ax.add_patch(ellipsoid)
         else:
             if self.config['prediction_method']=='idm':
@@ -679,7 +685,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         heading = agent.center.heading
                     rect = plt.Rectangle(
                         (x - length/2, y - width/2), length, width,
-                        angle=heading*180/np.pi, fill=True, color='red', rotation_point='center'
+                        angle=heading*180/np.pi, fill=True, color='blue', rotation_point='center'
                     )
                     ax.add_patch(rect)
             else:
@@ -689,9 +695,22 @@ class SMPCPlanner(AbstractIDMPlanner):
                     heading = vh.center.heading
                     rect = plt.Rectangle(
                         (x - length/2, y - width/2), length, width,
-                        angle=heading*180/np.pi, fill=True, color='red', rotation_point='center'
+                        angle=heading*180/np.pi, fill=True, color='blue', rotation_point='center'
                     )
                     ax.add_patch(rect)
+                for t_idx in range(self.smpc.N):
+                    for j in range(self.config['num_tvs']):
+                        if t_idx == 0:
+                            pass #vehicles already plotted
+                        else:
+                            for n in range(self.config['num_modes']):
+                                x,y = preds['preds'][j,n,t_idx,0], preds['preds'][j,n,t_idx,1]
+                                length, width = preds['tv_params'][j][0], preds['tv_params'][j][1]
+                                heading = preds['tv_psi'][j,n,t_idx,0]
+
+                                color = 'yellow'
+                                ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, color=color)
+                                ax.add_patch(ellipsoid)
 
         # Plot the planned trajectory, if available
         if hasattr(self, 'ego_traj'):
@@ -740,6 +759,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         route_plan, _ = self._breadth_first_search(ego_state)
         ego_speed = ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()
         speed_limit = route_plan[0].speed_limit_mps or self._policy.target_velocity
+        print(f"Route plan speed limit: {speed_limit} m/s, Ego speed: {ego_speed} m/s")
         self._policy.target_velocity = speed_limit if speed_limit > ego_speed else ego_speed
         discrete_path = []
         for edge in route_plan:
@@ -839,7 +859,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 # Add rectangle for detected object
                 det_box = patches.Rectangle((x - length/2, y - width/2), length, width, 
                                             angle=np.degrees(heading),
-                                            edgecolor='red', facecolor='blue', alpha=1)
+                                            edgecolor='blue', facecolor='blue', alpha=1)
                 ax.add_patch(det_box)
         
         ax.set_xlim(ego_x - 30, ego_x + 30)
@@ -850,106 +870,68 @@ class SMPCPlanner(AbstractIDMPlanner):
         plt.title("Ego and Observations Visualization")
         plt.show()
 
-    def _callback_end_simulation(self,logname: str = None) -> None:
+    def _callback_end_simulation(self, logname: str = None) -> None:
         """Callback to be executed at the end of the simulation."""
         #Delete SMPC instance for serialization
         #Store the observation, preds, dual_class, expert_action in a pickle form
         print('End of simulation. Saving data...')
-        if not self.config['eval_mode']:
-            save_dir = self.config['save_dir'].split('.pkl')[:-1] + '_' + self.config['prediction_method']+ '.pkl'
-            filepath = save_dir + '.gz'
-            if not os.path.exists(filepath): 
-                with gzip.open(filepath, 'wb') as f:
-                    # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            if not self.config['eval_mode']:
+                save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
+                filepath = save_dir + '.gz'
+                if not os.path.exists(filepath): 
+                    with gzip.open(filepath, 'wb') as f:
+                        # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        # if logname is not None:
+                        pickle.dump({'log_iter':[self.log_iter],
+                                    'logname': [logname], 
+                                    'scenario_id': [self.scenario_id], 
+                                    'ego_opt_sol':[self.ego_opt_sols_full_state], 
+                                    'ego_cl_traj': [self.cl_ego_traj], 
+                                    'ego_planned_trajs':[self.ego_planned_trajs],
+                                    'iteration_data': [self.iteration_data], 
+                                    'optimal_duals': [self.expert_action],
+                                    'dual_class':[self.dual_class],
+                                    'l1_active': [self.l1_active],
+                                    'preds':[self.preds],
+                                    'agent_params':[self.pred_agent_params],
+                                    'smpc_params':[self.smpc_params]}, 
+                                    f, protocol=pickle.HIGHEST_PROTOCOL)
+                        # else:
+                        #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                else:
+                    with gzip.open(filepath, 'rb') as f:
+                        data = pickle.load(f)
+                    data['optimal_duals'].append(self.expert_action)
+                    data['scenario_id'].append(self.scenario_id)
+                    # data['observation'].append(self.observation)
+                    data['iteration_data'].append(self.iteration_data)
+                    data['dual_class'].append(self.dual_class)
+                    data['ego_cl_traj'].append(self.cl_ego_traj)
+                    data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
+                    data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
+                    data['preds'].append(self.preds)
+                    data['l1_active'].append(self.l1_active)
+                    data['agent_params'].append(self.pred_agent_params)
+                    data['log_iter'].append(self.log_iter)
+                    data['smpc_params'].append(self.smpc_params)
                     # if logname is not None:
-                    pickle.dump({'log_iter':[self.log_iter],
-                                 'logname': [logname], 
-                                 'scenario_id': [self.scenario_id], 
-                                 'ego_opt_sol':[self.ego_opt_sols_full_state], 
-                                 'ego_cl_traj': [self.cl_ego_traj], 
-                                 'ego_planned_trajs':[self.ego_planned_trajs],
-                                 'iteration_data': [self.iteration_data], 
-                                 'optimal_duals': [self.expert_action],
-                                 'dual_class':[self.dual_class],
-                                 'preds':[self.preds],
-                                 'agent_params':[self.pred_agent_params],
-                                 'smpc_params':[self.smpc_params]}, 
-                                 f, protocol=pickle.HIGHEST_PROTOCOL)
-                    # else:
-                    #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
-            else:
-                with gzip.open(filepath, 'rb') as f:
-                    data = pickle.load(f)
-                data['optimal_duals'].append(self.expert_action)
-                data['scenario_id'].append(self.scenario_id)
-                # data['observation'].append(self.observation)
-                data['iteration_data'].append(self.iteration_data)
-                data['dual_class'].append(self.dual_class)
-                data['ego_cl_traj'].append(self.cl_ego_traj)
-                data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
-                data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
-                data['preds'].append(self.preds)
-                data['agent_params'].append(self.pred_agent_params)
-                data['log_iter'].append(self.log_iter)
-                data['smpc_params'].append(self.smpc_params)
-                # if logname is not None:
-                data['logname'].append(logname)
-                with gzip.open(filepath, 'wb') as f:
-                    pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                
-            # Save the list of figures as video
-            # Define the codec and create a VideoWriter object
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            vid_save_dir = self.config['video_save_dir'].split('/')[:-1] +'_' + self.config['prediction_method']+ '/'
-            out = cv2.VideoWriter(vid_save_dir+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
-
-            for fig in self.figs_w_preds:
-                # Convert the figure to an image
-                fig.canvas.draw()
-                img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-
-                # Write the image to the video file
-                out.write(img)
-
-            # Release the VideoWriter object
-            out.release()
-            print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.smpc.N}_{self.log_iter}.mp4")
-            # pdb.set_trace()
-        else:
-            #in evaluation mode
-            save_dir = self.config['save_dir'].split('.pkl')[:-1] + '_' + self.config['prediction_method']+ '.pkl'
-            filepath = save_dir + '.gz'
-            if not os.path.exists(filepath): 
-                with gzip.open(filepath, 'wb') as f:
-                    # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                    # if logname is not None:
-                    pickle.dump({'log_iter':[self.log_iter],'logname': [logname], 'scenario_id': [self.scenario_id], 'ego_opt_sol':[self.ego_opt_sols_full_state], 'ego_cl_traj': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data],'preds':[self.preds],'agent_params':[self.pred_agent_params]}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                    # else:
-                    #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
-            else:
-                with gzip.open(filepath, 'rb') as f:
-                    data = pickle.load(f)
-                data['scenario_id'].append(self.scenario_id)
-                # data['observation'].append(self.observation)
-                data['iteration_data'].append(self.iteration_data)
-                data['ego_cl_traj'].append(self.cl_ego_traj)
-                data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
-                data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
-                data['preds'].append(self.preds)
-                data['agent_params'].append(self.pred_agent_params)
-                data['log_iter'].append(self.log_iter)
-                # if logname is not None:
-                data['logname'].append(logname)
-                with gzip.open(filepath, 'wb') as f:
-                    pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                
+                    data['logname'].append(logname)
+                    with gzip.open(filepath, 'wb') as f:
+                        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        f.flush()
+                print('Data saved to', filepath)
                 # Save the list of figures as video
                 # Define the codec and create a VideoWriter object
-                # pdb.set_trace()
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                vid_save_dir = self.config['video_save_dir'].split('/')[:-1] +'_' + self.config['prediction_method']+ '/'
-                out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+                vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
+
+                # check if the directory exists, if not create it
+                if not os.path.exists(vid_save_dir):
+                    os.makedirs(vid_save_dir) 
+                    print(f"Created directory: {vid_save_dir}")
+
+                out = cv2.VideoWriter(vid_save_dir+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
 
                 for fig in self.figs_w_preds:
                     # Convert the figure to an image
@@ -958,12 +940,68 @@ class SMPCPlanner(AbstractIDMPlanner):
                     img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
 
                     # Write the image to the video file
-                    out.write(img)
+                    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    out.write(img_bgr)
 
                 # Release the VideoWriter object
                 out.release()
-                # pdb.set_trace()     
-        print('end of simulation')
+                print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.smpc.N}_{self.log_iter}.mp4")
+                # pdb.set_trace()
+            else:
+                #in evaluation mode
+                save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
+                filepath = save_dir + '.gz'
+                if not os.path.exists(filepath): 
+                    with gzip.open(filepath, 'wb') as f:
+                        # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        # if logname is not None:
+                        pickle.dump({'log_iter':[self.log_iter],'logname': [logname], 'scenario_id': [self.scenario_id], 'ego_opt_sol':[self.ego_opt_sols_full_state], 'ego_cl_traj': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data],'preds':[self.preds],'agent_params':[self.pred_agent_params]}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        # else:
+                        #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                else:
+                    with gzip.open(filepath, 'rb') as f:
+                        data = pickle.load(f)
+                    data['scenario_id'].append(self.scenario_id)
+                    # data['observation'].append(self.observation)
+                    data['iteration_data'].append(self.iteration_data)
+                    data['ego_cl_traj'].append(self.cl_ego_traj)
+                    data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
+                    data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
+                    data['preds'].append(self.preds)
+                    data['agent_params'].append(self.pred_agent_params)
+                    data['log_iter'].append(self.log_iter)
+                    # if logname is not None:
+                    data['logname'].append(logname)
+                    with gzip.open(filepath, 'wb') as f:
+                        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        f.flush()
+                    
+                    # Save the list of figures as video
+                    # Define the codebluec and create a VideoWriter object
+                    # pdb.set_trace()
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
+                    # check if the directory exists, if not create it
+                    if not os.path.exists(vid_save_dir):
+                        os.makedirs(vid_save_dir) 
+                        print(f"Created directory: {vid_save_dir}")
+                    out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+
+                    for fig in self.figs_w_preds:
+                        # Convert the figure to an image
+                        fig.canvas.draw()
+                        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+                        # Write the image to the video file
+                        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                        out.write(img_bgr)
+
+                    # Release the VideoWriter object
+                    out.release()
+                    # pdb.set_trace() 
+        except:
+            pdb.set_trace()    
         #Delete for memory management and lightweight serialization
         del self.smpc
         self.expert_action = []

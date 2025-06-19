@@ -190,17 +190,7 @@ def serialize_scenario(
     """
     simulation_history = SimulationHistory(scenario.map_api, scenario.get_mission_goal())
     ego_controller = PerfectTrackingController(scenario)
-    simulation_time_controller = StepSimulationTimeController(scenario)
-
-    # observations = IDMAgents(target_velocity=5.0,
-    #           min_gap_to_lead_agent=5.0,
-    #           headway_time=0.2,
-    #           accel_max=2.0,
-    #           decel_max=3.0,
-    #           open_loop_detections_types=['vehicle','ego'],
-    #           scenario=scenario,
-    #           planned_trajectory_samples=10,
-    #           planned_trajectory_sample_interval=0.5)
+    simulation_time_controller = StepSimulationTimeController(scenario,planner_N=14)
     observations = TracksObservation(scenario)
 
     # Dummy history buffer
@@ -466,28 +456,36 @@ def visualize_nuplan_scenarios(
         Dropdown handler that randomly chooses a scenario from the selected scenario type and renders it.
         :param change: Object containing scenario selection.
         """
+        # with out:
+        #     clear_output()
+
+        #     logger.info("Randomly rendering a scenario...")
+        #     scenario_type = str(change.new)
+        #     #interesting: 2021.06.23.17.31.36_veh-16_00016_00377
+        #     #Not bad similar: 2021.06.14.19.22.11_veh-38_01480_01860
+        #     # print(len(scenario_type_token_map[scenario_type]))
+        #     # while True:
+        #     #     log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
+        #     #     if '2021.06.09.12.39.51_veh-26_01943_02303' not in log_db_file and '2021.06.09.14.58.55_veh-35_01894_02311' not in log_db_file and '2021.08.09.17.55.59_veh-28_00021_00307' not in log_db_file and '2021.08.24.13.12.55_veh-45_00386_00472' not in log_db_file and '2021.06.14.16.48.02_veh-12_04978_05337' not in log_db_file and '2021.06.03.12.02.06_veh-35_00233_00609' not in log_db_file and '2021.06.28.15.02.02_veh-38_02398_02848' not in log_db_file and '2021.06.23.15.56.12_veh-16_00839_01285' not in log_db_file and '2021.07.24.20.37.45_veh-17_00015_00375' not in log_db_file and '2021.07.16.18.06.21_veh-38_04471_04922' not in log_db_file and '2021.07.16.20.45.29_veh-35_01095_01486' not in log_db_file and '2021.10.06.17.43.07_veh-28_00508_00877' not in log_db_file and '2021.05.12.23.36.44_veh-35_02035_02387' not in log_db_file and  '2021.06.09.14.58.55_veh-35_01095_01484' not in log_db_file and '2021.05.25.14.16.10_veh-35_01690_02183' not in log_db_file and '2021.06.08.14.35.24_veh-26_02555_03004' not in log_db_file and '2021.07.09.20.59.12_veh-38_01208_01692' not in log_db_file and '2021.06.09.12.39.51_veh-26_05620_06003' not in log_db_file and '2021.08.17.16.57.11_veh-08_01200_01636' not in log_db_file and '2021.05.12.22.28.35_veh-35_00620_01164' not in log_db_file and '2021.05.12.23.36.44_veh-35_01133_01535' not in log_db_file and '2021.07.24.23.50.16_veh-17_01696_02071' not in log_db_file and '2021.06.09.17.23.18_veh-38_00773_01140' not in log_db_file and '2021.10.11.02.57.41_veh-50_01522_02088' not in log_db_file and '2021.06.08.16.31.33_veh-38_01589_02072' not in log_db_file and '2021.06.23.16.54.19_veh-35_00808_01256' not in log_db_file and '2021.05.12.22.00.38_veh-35_01008_01518' not in log_db_file and '2021.05.12.23.36.44_veh-35_00152_00504' not in log_db_file and '2021.07.16.00.51.05_veh-17_01352_01901' not in log_db_file and '2021.06.14.18.42.45_veh-12_03445_03902' not in log_db_file and '2021.06.07.12.54.00_veh-35_01843_02314' not in log_db_file and '2021.06.28.16.29.11_veh-38_01415_01821' not in log_db_file and '2021.06.07.18.53.26_veh-26_00005_00427' not in log_db_file and '2021.07.09.17.06.37_veh-35_00258_00748' not in log_db_file and '2021.06.09.11.54.15_veh-12_04366_04810' not in log_db_file and '2021.06.08.12.54.54_veh-26_04262_04732' not in log_db_file and '2021.06.14.16.32.09_veh-35_05038_05402' not in log_db_file and '2021.06.14.19.22.11_veh-38_01480_01860' not in log_db_file and '2021.10.01.19.16.42_veh-28_03307_03808' not in log_db_file and '2021.06.28.16.29.11_veh-38_03263_03766' not in log_db_file and '2021.06.14.17.26.26_veh-38_04544_04920' not in log_db_file and '2021.06.14.18.33.41_veh-35_03901_04264' not in log_db_file and '2021.06.23.17.31.36_veh-16_00016_00377' not in log_db_file and '2021.10.11.08.31.07_veh-50_01750_01948' not in log_db_file and '2021.10.01.19.16.42_veh-28_02011_02410' not in log_db_file and '2021.07.16.18.06.21_veh-38_03231_03712' not in log_db_file and '2021.06.14.16.48.02_veh-12_04057_04438' not in log_db_file and '2021.08.17.17.17.01_veh-45_02314_02798' not in log_db_file and '2021.07.16.18.19.22_veh-35_00440_00858' not in log_db_file and '2021.06.09.14.03.17_veh-12_02584_02970' not in log_db_file and '2021.06.03.13.55.17_veh-35_00073_00426' not in log_db_file and '2021.06.09.17.37.09_veh-12_00404_00864' not in log_db_file and '2021.07.16.20.45.29_veh-35_00600_01084' not in log_db_file and '2021.06.09.17.23.18_veh-38_02526_03027' not in log_db_file and '2021.07.16.18.06.21_veh-38_04933_05307' not in log_db_file:
+        #     #         break            
+        #     # log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
+        #     log_db_file = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/2021.06.09.14.58.55_veh-35_01095_01484.db'
+        #     log_db_files = [x[0] for x in scenario_type_token_map[scenario_type]]
+        #     ind = log_db_files.index(log_db_file)
+        #     token = scenario_type_token_map[scenario_type][ind][1]
+
+        #     scenario = get_default_scenario_from_token(data_root, log_db_file, token, map_root, map_version)
+        #     print(f'Log DB FILE NAME: {log_db_file}')
+        #     visualize_scenario(scenario, bokeh_port=bokeh_port)
         with out:
             clear_output()
 
             logger.info("Randomly rendering a scenario...")
             scenario_type = str(change.new)
-            #interesting: 2021.06.23.17.31.36_veh-16_00016_00377
-            #Not bad similar: 2021.06.14.19.22.11_veh-38_01480_01860
-            # print(len(scenario_type_token_map[scenario_type]))
-            # while True:
-            #     log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
-            #     if '2021.06.09.12.39.51_veh-26_01943_02303' not in log_db_file and '2021.06.09.14.58.55_veh-35_01894_02311' not in log_db_file and '2021.08.09.17.55.59_veh-28_00021_00307' not in log_db_file and '2021.08.24.13.12.55_veh-45_00386_00472' not in log_db_file and '2021.06.14.16.48.02_veh-12_04978_05337' not in log_db_file and '2021.06.03.12.02.06_veh-35_00233_00609' not in log_db_file and '2021.06.28.15.02.02_veh-38_02398_02848' not in log_db_file and '2021.06.23.15.56.12_veh-16_00839_01285' not in log_db_file and '2021.07.24.20.37.45_veh-17_00015_00375' not in log_db_file and '2021.07.16.18.06.21_veh-38_04471_04922' not in log_db_file and '2021.07.16.20.45.29_veh-35_01095_01486' not in log_db_file and '2021.10.06.17.43.07_veh-28_00508_00877' not in log_db_file and '2021.05.12.23.36.44_veh-35_02035_02387' not in log_db_file and  '2021.06.09.14.58.55_veh-35_01095_01484' not in log_db_file and '2021.05.25.14.16.10_veh-35_01690_02183' not in log_db_file and '2021.06.08.14.35.24_veh-26_02555_03004' not in log_db_file and '2021.07.09.20.59.12_veh-38_01208_01692' not in log_db_file and '2021.06.09.12.39.51_veh-26_05620_06003' not in log_db_file and '2021.08.17.16.57.11_veh-08_01200_01636' not in log_db_file and '2021.05.12.22.28.35_veh-35_00620_01164' not in log_db_file and '2021.05.12.23.36.44_veh-35_01133_01535' not in log_db_file and '2021.07.24.23.50.16_veh-17_01696_02071' not in log_db_file and '2021.06.09.17.23.18_veh-38_00773_01140' not in log_db_file and '2021.10.11.02.57.41_veh-50_01522_02088' not in log_db_file and '2021.06.08.16.31.33_veh-38_01589_02072' not in log_db_file and '2021.06.23.16.54.19_veh-35_00808_01256' not in log_db_file and '2021.05.12.22.00.38_veh-35_01008_01518' not in log_db_file and '2021.05.12.23.36.44_veh-35_00152_00504' not in log_db_file and '2021.07.16.00.51.05_veh-17_01352_01901' not in log_db_file and '2021.06.14.18.42.45_veh-12_03445_03902' not in log_db_file and '2021.06.07.12.54.00_veh-35_01843_02314' not in log_db_file and '2021.06.28.16.29.11_veh-38_01415_01821' not in log_db_file and '2021.06.07.18.53.26_veh-26_00005_00427' not in log_db_file and '2021.07.09.17.06.37_veh-35_00258_00748' not in log_db_file and '2021.06.09.11.54.15_veh-12_04366_04810' not in log_db_file and '2021.06.08.12.54.54_veh-26_04262_04732' not in log_db_file and '2021.06.14.16.32.09_veh-35_05038_05402' not in log_db_file and '2021.06.14.19.22.11_veh-38_01480_01860' not in log_db_file and '2021.10.01.19.16.42_veh-28_03307_03808' not in log_db_file and '2021.06.28.16.29.11_veh-38_03263_03766' not in log_db_file and '2021.06.14.17.26.26_veh-38_04544_04920' not in log_db_file and '2021.06.14.18.33.41_veh-35_03901_04264' not in log_db_file and '2021.06.23.17.31.36_veh-16_00016_00377' not in log_db_file and '2021.10.11.08.31.07_veh-50_01750_01948' not in log_db_file and '2021.10.01.19.16.42_veh-28_02011_02410' not in log_db_file and '2021.07.16.18.06.21_veh-38_03231_03712' not in log_db_file and '2021.06.14.16.48.02_veh-12_04057_04438' not in log_db_file and '2021.08.17.17.17.01_veh-45_02314_02798' not in log_db_file and '2021.07.16.18.19.22_veh-35_00440_00858' not in log_db_file and '2021.06.09.14.03.17_veh-12_02584_02970' not in log_db_file and '2021.06.03.13.55.17_veh-35_00073_00426' not in log_db_file and '2021.06.09.17.37.09_veh-12_00404_00864' not in log_db_file and '2021.07.16.20.45.29_veh-35_00600_01084' not in log_db_file and '2021.06.09.17.23.18_veh-38_02526_03027' not in log_db_file and '2021.07.16.18.06.21_veh-38_04933_05307' not in log_db_file:
-            #         break            
-            # log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
-            log_db_file = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/2021.06.09.14.58.55_veh-35_01095_01484.db'
-            log_db_files = [x[0] for x in scenario_type_token_map[scenario_type]]
-            ind = log_db_files.index(log_db_file)
-            token = scenario_type_token_map[scenario_type][ind][1]
-
+            log_db_file, token = random.choice(scenario_type_token_map[scenario_type])
             scenario = get_default_scenario_from_token(data_root, log_db_file, token, map_root, map_version)
-            print(f'Log DB FILE NAME: {log_db_file}')
-            visualize_scenario(scenario, bokeh_port=bokeh_port)
 
+            visualize_scenario(scenario, bokeh_port=bokeh_port)
     display(drop_down)
     display(out)
     drop_down.observe(scenario_dropdown_handler, names='value')

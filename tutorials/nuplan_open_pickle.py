@@ -9,17 +9,20 @@ from nuplan.common.actor_state.agent import Agent
 import matplotlib.pyplot as plt
 from typing import List
 
-def load_simulation_log(file_path: str):
+def load_simulation_log(filepath: str):
     """Load simulation log from a pickle file."""
-    with gzip.open(file_path, 'rb') as f:
+    with gzip.open(filepath, 'rb') as f:
         data = pickle.load(f)
     data_temp = {}
     if isinstance(data['iteration_data'][0],List):
         for key in data.keys():
             temp = []
-            for i in range(len(data[key])):
-                temp.extend(data[key][i])
-            data_temp.update({key: temp})
+            if key != 'log_iter':
+                for i in range(len(data[key])):
+                    temp.extend(data[key][i])
+                data_temp.update({key: temp})
+            else:
+                data_temp.update({key: data[key]})
         return data_temp
     else:
         return data
@@ -110,8 +113,8 @@ def replay_simulation(data):
     pass
 
 def main(args):
-    print(args.file_path)
-    data = load_simulation_log(args.file_path)
+    print(args.filepath)
+    data = load_simulation_log(args.filepath)
     print(data.keys())
     pdb.set_trace()
     # print(data['optimal_duals'])
@@ -119,7 +122,7 @@ def main(args):
     # print(data['dual_class'])
     # print(data['preds'])
     # visualize_observation(data,0)
-    replay_simulation(data)
+    # replay_simulation(data)
     #Plot the histogram of dual class
     plt.hist(data['dual_class'], bins=3)
     plt.xlabel('Dual Class')
@@ -132,6 +135,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Load a simulation log from a pickle file.')
-    parser.add_argument('--file_path', type=str, help='Path to the pickle file.', required=True)
+    parser.add_argument('--filepath', type=str, help='Path to the pickle file.', required=True)
     args = parser.parse_args()
     main(args)

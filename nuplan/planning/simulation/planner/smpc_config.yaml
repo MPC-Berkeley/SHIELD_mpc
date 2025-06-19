@@ -4,12 +4,12 @@ dt: 0.1
 is_mm_preds: True 
 num_tvs: 3
 num_modes: 2
-l1_lmbd: 0.01
-collision_avoidance_method: 'obca' #['obca','affine']
+l1_lmbd: 100
+collision_avoidance_method: 'affine' #['obca','affine']
 # state and input constraints
-a_max: 2.0
+a_max: 1.5
 a_min: -5.0
-v_max: 14.
+v_max: 11.
 v_min: -1.
 a_lat: 3.2 #m/s^2 used for lane chance mode prediction of the TVs
 

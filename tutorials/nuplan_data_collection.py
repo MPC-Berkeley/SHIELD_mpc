@@ -10,8 +10,13 @@ import tempfile
 from nuplan.planning.script.run_simulation import run_simulation as main_simulation
 from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner, IDMPlanner
 import hydra
+import yaml
 
 from tutorials.utils.tutorial_utils import construct_simulation_hydra_paths
+
+#SMPC config
+with open('/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml', 'r') as f:
+    smpc_config = yaml.load(f, Loader=yaml.FullLoader)
 
 # Location of paths with all simulation configs
 BASE_CONFIG_PATH = os.path.join(os.getenv('NUPLAN_TUTORIAL_PATH', ''), '../nuplan/planning/script')
@@ -24,7 +29,7 @@ SAVE_DIR = tempfile.mkdtemp()
 #get file names from a directory
 directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/'
 #Data directory
-log_list = [f.split('.db')[0] for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
+log_list = [f.split('.db')[0] for f in sorted(os.listdir(directory_path)) if os.path.isfile(os.path.join(directory_path, f))]
 nuboard = False
 # log_list = ['2021.06.09.11.54.15_veh-12_04366_04810']
 # log_list = ['2021.06.09.12.39.51_veh-26_05620_06003'] #dual class 0
@@ -32,32 +37,47 @@ nuboard = False
 #2021.05.12.23.36.44_veh-35_01133_01535 #Infeasibility from start
 # log_list = ['2021.06.07.12.54.00_veh-35_01843_02314']
 # log_list = log_list[2:]
+# scenario_types=[
+#   'behind_long_vehicle',
+#   'crossed_by_vehicle',
+#   'following_lane_with_lead',
+#   'following_lane_with_slow_lead',
+#   'following_lane_without_lead',
+#   'high_lateral_acceleration',
+#   'high_magnitude_jerk',
+#   'high_magnitude_speed',
+#   'low_magnitude_speed',
+#   'medium_magnitude_speed',
+#   'near_high_speed_vehicle',
+#   'near_multiple_vehicles',
+#   'on_intersection',
+#   'on_traffic_light_intersection',
+#   'starting_high_speed_turn',
+#   'starting_protected_cross_turn',
+#   'starting_protected_noncross_turn',
+#   'starting_right_turn',
+#   'starting_left_turn',
+#   'changing_lane',
+#   'starting_u_turn',
+#   'starting_unprotected_cross_turn',
+#   'starting_unprotected_noncross_turn',
+#   'traversing_intersection',
+#   'traversing_traffic_light_intersection',]
 scenario_types=[
-  'behind_long_vehicle',
-  'crossed_by_vehicle',
-  'following_lane_with_lead',
-  'following_lane_with_slow_lead',
-  'following_lane_without_lead',
-  'high_lateral_acceleration',
-  'high_magnitude_jerk',
-  'high_magnitude_speed',
-  'low_magnitude_speed',
-  'medium_magnitude_speed',
-  'near_high_speed_vehicle',
-  'near_long_vehicle',
-  'near_multiple_vehicles',
-  'on_intersection',
-  'on_traffic_light_intersection',
-  'starting_high_speed_turn',
+#   'on_intersection',
+#   'on_traffic_light_intersection',
   'starting_protected_cross_turn',
   'starting_protected_noncross_turn',
-  'starting_right_turn',
-  'starting_u_turn',
+  'starting_left_turn',
+  'changing_lane',
   'starting_unprotected_cross_turn',
-  'starting_unprotected_noncross_turn',
-  'traversing_intersection',
-  'traversing_traffic_light_intersection',]
+#   'starting_unprotected_noncross_turn',
+  'starting_right_turn',
+#   'traversing_intersection',
+#   'traversing_traffic_light_intersection'
+    ]
 print('total log list length:',len(log_list))
+log_list = log_list
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
     if 60 > it >= 0:
@@ -69,9 +89,8 @@ for it, log in enumerate(log_list):
             DATASET_PARAMS = [
                 'scenario_builder=nuplan_mini',  # use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
                 f"scenario_filter.log_names=[{str(log)}]",
-                f'scenario_filter.scenario_types={scenario_types}', #non-stationary ego scenarios only
-                'scenario_filter.ego_displacement_minimum_m=10', #non-stationary threshold: ego moves at least this many meters in the scenario
-                'scenario_filter.limit_total_scenarios=10',  # use 2 total scenarios
+                f'scenario_filter.scenario_types={scenario_types}', 
+                'scenario_filter.limit_total_scenarios=2',  # use n total scenarios
                 'scenario_filter.remove_invalid_goals=true',  # use 1 scenario per log
             ]
 
@@ -96,26 +115,19 @@ for it, log in enumerate(log_list):
             '''
             Initilize the planner
             '''
-
-
             # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
-            #OBCA constraints
-            ev_noise_std=[0.1,0.1]
-            tv_noise_std=[0.3, 0.3]
 
-            # #Affine CA constraints
-            # ev_noise_std=[0.05,0.05]
-            # tv_noise_std=[2, 2]
+            if smpc_config['collision_avoidance_method'] == 'obca':
+                #OBCA constraints
+                ev_noise_std=[0.01,0.01]
+                tv_noise_std=[0.5, 0.5]
+            else:
+                #Affine CA constraints
+                ev_noise_std=[0.01,0.01]
+                tv_noise_std=[0.3, 0.3]
+
             print('Initializing the SMPC Planner...')
             planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std, iter=it)
-            # planner = IDMPlanner(target_velocity = 12.,
-            # min_gap_to_lead_agent = 3.,
-            # headway_time= 3.,
-            # accel_max = 3.,
-            # decel_max = 4.,
-            # planned_trajectory_samples = 10,
-            # planned_trajectory_sample_interval = 0.1,
-            # occupancy_map_radius = 50,)
 
             # Run the simulation loop (real-time visualization not yet supported, see next section for visualization)
             main_simulation(cfg, planner)
@@ -148,5 +160,5 @@ for it, log in enumerate(log_list):
                 # Run nuBoard
                 main_nuboard(cfg)
         except:
-            print(f'Error occurred while processing Nuboard for log: {log}')
+            print(f'Error occurred while running NuPlan for log: {log}')
             continue

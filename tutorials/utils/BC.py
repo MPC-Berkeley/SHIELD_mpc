@@ -165,7 +165,7 @@ class BC():
             if pred_mode[0] == 'both duals' and self.joint_dual_pred:
                 self.optimizer.zero_grad()
                 l1_duals = expert_ac_batch[:,:self.policy.lambda_dim]
-                l1_class = th.where(l1_duals<1e-3,2*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where(l1_duals>self.l1_dual_max - 1e-3,3*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where((1e-3 <= l1_duals) & (l1_duals <= self.l1_dual_max - 1e-3),th.ones_like(l1_duals),th.zeros_like(l1_duals))
+                l1_class = th.where(l1_duals<4,2*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where(l1_duals>self.l1_dual_max - 1e-3,3*th.ones_like(l1_duals),th.zeros_like(l1_duals)) + th.where((1e-3 <= l1_duals) & (l1_duals <= self.l1_dual_max - 1e-3),th.ones_like(l1_duals),th.zeros_like(l1_duals))
                 assert not 0 in l1_class
                 self.l1_dual_class_exp = to_tensor_var(l1_class.cpu() - th.ones_like(l1_class).cpu())#to follow the class convention: 0,1,2
                 ca_correct = th.sum(th.sigmoid(self.policy(to_tensor_var(ob_batch, use_cuda=self.use_cuda)))[:,-self.policy.lambda_dim:].round()==expert_ac_batch[:,-self.policy.lambda_dim:])
@@ -249,6 +249,25 @@ class BC():
                             print(f'Non-zero class in pred L1: {sum_pred}, Non-zero class in target L1: {sum_tar}')
                             self.loss.append(self.ce_loss(th.exp(policy_output).movedim(2,1),self.l1_dual_class_exp.long()))    
 
+                             #compute the gap radius loss
+                            ones_fg = th.ones(g1.shape)
+                            temp = (-th.bmm(self.least_squares.C.permute(0,2,1), mu.to('cpu'))
+                                    + self.least_squares.p
+                                    + th.bmm(self.least_squares.F.permute(0,2,1), nu.to('cpu'))
+                                    + th.bmm(self.least_squares.L.permute(0,2,1), (2 * g1.to('cpu') - self.policy[0].lmbd_ubd * ones_fg)))
+                            stacked_prod = th.cat([-self.least_squares.C_Qinv, self.least_squares.F_Qinv, 2*self.least_squares.L_Qinv],dim=1)      
+                            grad_d = stacked_prod @ temp
+                            grad_d += th.cat([-self.least_squares.c.unsqueeze(dim=-1), self.least_squares.f.unsqueeze(dim=-1), th.zeros(g1.shape)],dim=1)
+                            duals = th.cat((mu,nu,g1),dim=1)
+                            proj_duals = duals - grad_d.to('cuda')
+                            start_idx = mu.shape[1] + nu.shape[1]
+
+                            # proj_duals[:start_idx] = self.least_squares.relu(proj_duals[:start_idx])
+                            # proj_duals[start_idx:] = th.clip(proj_duals[start_idx:],0,self.least_squares.l1_lmbd)
+                            gap_radius_loss = self.mse_loss(duals,proj_duals)
+                            print('gap radius mean:',th.sqrt(gap_radius_loss))
+                            pdb.set_trace()
+                            self.loss[-1] += gap_radius_loss
                         elif self.policy[0].pred_mode[1] == 'binary':
                             '''
                             binary pred

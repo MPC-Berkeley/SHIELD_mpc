@@ -115,7 +115,7 @@ def main(smpc_config,config):
         policy.to(device)
     else:
         pred_mode = ['both duals','tertiary','binary']
-        l1_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, l1_num, config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'],  pred_mode=['l1','binary','binary'])
+        l1_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, l1_num, config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'],  pred_mode=['l1','tertiary','binary'])
         ca_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, ca_num, config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
         device=th.device("cuda:0" if th.cuda.is_available() else "cpu")
         l1_policy.to(device)

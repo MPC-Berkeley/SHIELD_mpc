@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import math
 from typing import Any, Callable, List
 import copy
 from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
@@ -126,6 +127,7 @@ class SimulationRunner(AbstractRunner):
         #preprocess, process and postprocess for Unitraj format
         x = self.get_wayformer_input(planner_input,self.simulation.scenario)
         batch_x = self.wayformer_dataset.collate_fn(x)
+
         # Call the model for inference
         self.wayformer_model.eval()
         with torch.no_grad():
@@ -171,9 +173,16 @@ class SimulationRunner(AbstractRunner):
         if debug:
             self.plot_gaussian_modes_over_time(pred,planner_input)
 
-        pred_filtered, prob_filtered, tv_params, tv_track_tokens = self.filter_predictions(pred, prob, planner_input, x)
-        tv_psi = self.get_heading_wayformer(pred_filtered)
-
+        pred_filtered, prob_filtered, tv_params, tv_track_tokens, idx = self.filter_predictions(pred, prob, planner_input, x)
+        center_objects_world_filtered = center_objects_world[idx,:]
+        tv_psi, anomaly_heading_idx = self.get_heading_wayformer(pred_filtered,center_objects_world_filtered[:,[6]].repeat(1,pred_filtered.shape[1]))
+        if anomaly_heading_idx:
+            #If anomaly heading detected then set the heading of the corresponding index to the initial heading
+            for (i,m,t) in anomaly_heading_idx:
+                tv_psi[i,m,t,0] = center_objects_world_filtered[i,6]
+                # logger.warning(f"Anomaly heading detected for vehicle index {i} at time {t}. Setting to initial heading.")
+        # if planner_input.iteration.index >= 26:
+        #     pdb.set_trace()
         return pred_filtered.numpy(), prob_filtered.numpy(), tv_params, tv_psi.numpy(), tv_track_tokens
 
     def filter_predictions(self, pred, prob, planner_input, wayformerinput):
@@ -195,6 +204,7 @@ class SimulationRunner(AbstractRunner):
 
         # Get the ego vehicle's current state
         ego_x, ego_y = ego_state.waypoint.x, ego_state.waypoint.y
+        ego_heading = ego_state.waypoint.heading
 
         # Get the distance from the ego vehicle's current state
         distances = ((pred_gathered[:,:,0,0] - ego_x) ** 2 + (pred_gathered[:, :, 0, 1] - ego_y) ** 2).sqrt()
@@ -208,8 +218,49 @@ class SimulationRunner(AbstractRunner):
                 break
 
         # Get the indices of the V + 1 (always includes the ego) vehicles closest to the ego vehicle out of N_veh vehicles
+        filtered_idx = []
         temp = torch.argsort(avg_distances_over_modes)
         closest_vehicles_indices = temp[temp!=ego_index][:V]
+        while closest_vehicles_indices.shape[0] < V:
+            logger.warning(f"Only {closest_vehicles_indices.shape[0]} vehicles found, expected {V}. Using all available vehicles.")
+            add_ind = V - closest_vehicles_indices.shape[0]
+            closest_vehicles_indices = torch.hstack([closest_vehicles_indices,closest_vehicles_indices[:add_ind]])
+
+        # # Compute relative positions and angles
+        # dx = pred_gathered[:, 0, 0, 0] - ego_x
+        # dy = pred_gathered[:, 0, 0, 1] - ego_y
+        # distances = torch.sqrt(dx**2 + dy**2)
+        # angles = torch.atan2(dy, dx)  # angle from ego to target
+
+        # # Normalize angles to [-pi, pi]
+        # angle_diff = (angles - ego_heading + math.pi) % (2 * math.pi) - math.pi
+
+        # # Vehicles within ±30 degrees (~0.5236 rad)
+        # fov_mask = (angle_diff.abs() <= math.radians(45))
+
+        # # Sort both FOV and non-FOV by distance
+        # sorted_fov = torch.argsort(distances[fov_mask])
+        # sorted_out_fov = torch.argsort(distances[~fov_mask])
+
+        # fov_indices = torch.arange(len(distances))[fov_mask][sorted_fov]
+        # out_fov_indices = torch.arange(len(distances))[~fov_mask][sorted_out_fov]
+
+        # # Combine
+        # num_fov_veh = len(fov_indices)
+        # prioritized_indices = torch.cat([fov_indices, out_fov_indices], dim=0)
+        # # V-1 from top of prioritized list (excluding ego)
+        # top_fov_vehicles = prioritized_indices[prioritized_indices != ego_index][:V-1]
+
+        # # One more from outside FOV starting after num_fov_veh (excluding ego)
+        # if ego_index in fov_indices:
+        #     non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh-1:]
+        # else:
+        #     non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh:]
+        # if len(non_fov_rest) > 0:
+        #     extra_vehicle = non_fov_rest[:1]  # Select just one
+        #     closest_vehicles_indices = torch.cat([top_fov_vehicles, extra_vehicle])
+        # else:
+        #     closest_vehicles_indices = top_fov_vehicles  # Fallback: use only top FOV
 
         pred_output = pred_gathered[closest_vehicles_indices]
         prob_output = torch.gather(prob[closest_vehicles_indices], dim = 1, index = pred_M_ind[closest_vehicles_indices])
@@ -232,9 +283,10 @@ class SimulationRunner(AbstractRunner):
                 tv_params.append((0, 0))
                 tv_track_tokens.append(wayformerinput[ind]['center_objects_id'])
                 logger.warning(f"Vehicle with token {wayformerinput[ind]['center_objects_id']} not found in tracked objects.")
-        return pred_output, prob_output, tv_params, tv_track_tokens
+            filtered_idx.append(ind.item())
+        return pred_output, prob_output, tv_params, tv_track_tokens, filtered_idx
     
-    def get_heading_wayformer(self, pred_filtered):
+    def get_heading_wayformer(self, pred_filtered, init_psi):
         """
         Get the heading of the vehicle from the planner input
         :param planner_input: planner input
@@ -243,14 +295,19 @@ class SimulationRunner(AbstractRunner):
         # Get the ego vehicle's current state
         n_tv, M, T, _  = pred_filtered.shape
         heading = torch.zeros((n_tv, M, T-1, 1))
+        heading[:,:,0,0] = init_psi
         # Get the heading of the vehicle
+        anomaly_heading_idx = []
+        threshold = 0.4 # Threshold for detecting anomalies in heading change (radians)
         for i in range(n_tv):
-            for t in range(T-1):            
+            for t in range(1,T-1):            
                 #instantaneous heading
                 xy_diff = pred_filtered[i, :, t+1, 0:2] - pred_filtered[i, :, t, 0:2]
                 torch.atan2(xy_diff[:,1], xy_diff[:,0], out=heading[i, :, t, 0])
-
-        return heading
+                for m in range(xy_diff.shape[0]):
+                    if xy_diff[m,1] == 0 or abs(heading[i, m, t, 0]-heading[i, m, t-1, 0])>threshold:
+                        anomaly_heading_idx.append((i,m,t))
+        return heading, anomaly_heading_idx
 
     def plot_gaussian_modes_over_time(self,gaussian_tensor, planner_input):
         """

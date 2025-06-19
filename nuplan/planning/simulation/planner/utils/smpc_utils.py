@@ -181,11 +181,9 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
         B = np.array([[0.5*params['dt']**2],[params['dt']]])
         
         vehicle_parameters = ego_state.car_footprint.vehicle_parameters
-        ev_dims= np.array([vehicle_parameters.front_length + vehicle_parameters.rear_length, vehicle_parameters.width]) #length, width
+        ev_dims= np.array([(vehicle_parameters.front_length + vehicle_parameters.rear_length)/2, vehicle_parameters.width/2]) #length, width
         Sev = np.diag(ev_dims**(-1.0))
         iSev  = np.linalg.inv(Sev)
-        iSev[-1,-1]+=0.3
-        Sev=np.linalg.inv(iSev)
         for t in range(params['N']):
             if u_opt is None:
                 # print('USING ZERO CONTROL')
@@ -212,20 +210,23 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
                         o[i][:,t+1] = A @ o[i][:,t] + B @ u_tvs[i][:,t]
                         o_glob[i][:,t+1] = routes[i+1](o[i][0,t+1])[:2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
                         psi = routes[i+1](o[i][0,t+1])[2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
+                        Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
                     else:
                         psi = tv_psi[i][0,t] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
+                        Rtv = np.array([[np.cos(psi), -np.sin(psi)],[np.sin(psi), np.cos(psi)]])
                     do_glob[i][t] = droutes[i+1](o[i][0,t+1])[:2] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
                     
                     # if tv_psi[i] is not None:
                     # Rtv = np.array([[np.cos(tv_psi[i][:,t+1]), np.sin(tv_psi[i][:,t+1])],[-np.sin(tv_psi[i][:,t+1]), np.cos(tv_psi[i][:,t+1])]]).squeeze().T
                     # else:
-                    Rtv = np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze()#.T
-                    Stv_ = np.diag([tv_lengths[i], tv_widths[i]])
+                    Stv_ = np.diag([tv_lengths[i]/2, tv_widths[i]/2])
                     Stv = np.linalg.inv(Stv_)
                     mat=Rev@iSev@Rtv.T@Stv@Stv@Rtv@iSev@Rev.T 
                     E, V =np.linalg.eigh(mat)
-                    S=np.diag((E**(-0.5)+1.0)**(-2))
-                    Qs[i][t]=Sev@Rev.T@V@S@V.T@Rev@Sev if t <=4 else (1/(5**2))*np.eye(2) 
+                    # S=np.diag((E**(-0.5)+1.0)**(-2))
+                    S=np.diag(1/E)
+                    Qs[i][t] = construct_Q_simple(tv_lengths[i], tv_widths[i], ego_radius=ev_dims[0], psi=psi)
+                    # Qs[i][t]=Sev@Rev.T@V@S@V.T@Rev@Sev #if t <=4 else (1/(5**2))*np.eye(2) 
         #For multi-modal predictions:
         if is_mm_preds:
             if config['prediction_method'] == 'idm':
@@ -308,13 +309,16 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
                                 except:
                                     pdb.set_trace()
 
-                            Rtv=np.array([[np.cos(psi), np.sin(psi)],[-np.sin(psi), np.cos(psi)]]).squeeze().T
-                            Stv_ = np.diag([tv_lengths[i], tv_widths[i]])
+                            Rtv=np.array([[np.cos(psi), -np.sin(psi)],[np.sin(psi), np.cos(psi)]])
+                            Stv_ = np.diag([tv_lengths[i]/2, tv_widths[i]/2])
                             Stv = np.linalg.inv(Stv_)
                             mat=Rev@iSev@Rtv.T@Stv@Stv@Rtv@iSev@Rev.T 
                             E, V =np.linalg.eigh(mat)
-                            S=np.diag((E**(-0.5)+1.0)**(-2))
-                            mm_Qs[i][n][t]=Sev@Rev.T@V@S@V.T@Rev@Sev if t <= 4 else (1/5**2)*np.eye(2)
+                            # S=np.diag((E**(-0.5)+1.0)**(-2))
+                            S=np.diag(E)
+                            mm_Qs[i][n][t] = construct_Q_simple(tv_lengths[i], tv_widths[i], ego_radius=ev_dims[0], psi=psi)
+
+                            # mm_Qs[i][n][t]=Sev@Rev.T@V@S@V.T@Rev@Sev
         else:
             mm_o_glob = [[o_glob[i]] for i in range(params['N_TV'])]
             mm_u_tvs = [[u_tvs[i]] for i in range(params['N_TV'])]
@@ -339,6 +343,30 @@ def s_arr_monotonic(s_arr):
             s_arr[p] = s_arr[p-1] + eps
             break
     return p
+
+def construct_Q_simple(tv_length, tv_width, ego_radius, psi):
+    """
+    Constructs Q matrix for an ellipse defined by TV shape + ego radius buffer.
+    Uses direct inverse-square scaling in rotated coordinates.
+    """
+    import numpy as np
+
+    # Step 1: Semi-axes (radii) with ego buffer
+    rx = tv_length / 2 + ego_radius
+    ry = tv_width / 2 + ego_radius
+
+    # Step 2: Inverse square matrix (axis-aligned)
+    D = np.diag([1 / rx**2, 1 / ry**2])  # Q in TV's body frame
+
+    # Step 3: Rotation matrix (TV heading)
+    R = np.array([
+        [np.cos(psi), -np.sin(psi)],
+        [np.sin(psi),  np.cos(psi)]
+    ])
+
+    # Step 4: Rotate into world frame
+    Q = R @ D @ R.T
+    return Q
 
 def check_agents_in_preds(preds: List[IDMAgent], indices) -> bool:
     '''

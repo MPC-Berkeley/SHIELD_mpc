@@ -19,6 +19,7 @@ class StepSimulationTimeController(AbstractSimulationTimeController):
         self.current_iteration_index = 0
         self.scenario = scenario
         self.planner_N = planner_N
+        print('[StepSimulationTimeController.py] Total Num of Iterations :', self.number_of_iterations())
 
     def reset(self) -> None:
         """Inherited, see superclass."""
@@ -36,6 +37,8 @@ class StepSimulationTimeController(AbstractSimulationTimeController):
 
     def reached_end(self) -> bool:
         """Inherited, see superclass."""
+        if self.current_iteration_index >= self.number_of_iterations()-1:
+            print('[StepSimulationTimeController.py] Reached the end of the scenario')
         return self.current_iteration_index >= self.number_of_iterations() - 1
         # return self.current_iteration_index >= self.number_of_iterations() - 1 - self.planner_N
 

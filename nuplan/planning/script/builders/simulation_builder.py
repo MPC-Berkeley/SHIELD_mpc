@@ -81,7 +81,7 @@ def build_simulations(
 
     # Build a metric metadata file
     for scenario in scenarios:
-
+        print(f'Scenario Type: {scenario.scenario_type}')
         # Build planners
         if pre_built_planners is None:
             if 'planner' not in cfg.keys():

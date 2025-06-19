@@ -16,6 +16,9 @@ from scipy.linalg import clarkson_woodruff_transform as sketch
 from scipy.sparse import block_diag, vstack
 from scipy.sparse.linalg import lsmr, svds, lsqr
 import scipy.sparse as sp
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from scipy.optimize import lsq_linear
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,7 @@ class SMPC():
         self.ev=ev
         self.N=N
         self.V_MIN=V_MIN
-        self.V_MAX=V_MAX
+        # self.V_MAX=V_MAX
         self.A_MAX=A_MAX
         self.A_MIN=A_MIN
         self.ev_length = ev_length
@@ -72,8 +75,12 @@ class SMPC():
 
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3)
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
-
-        self.tight=TIGHTENING
+        if self.config['collision_avoidance_method'] == 'obca':
+            self.tight=2.7
+        elif self.config['collision_avoidance_method'] == 'affine':
+            self.tight=2.7
+        else:
+            raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}")
         self.ev_n_std = EV_NOISE_STD
 
         self.tv_n_std = [TV_NOISE_STD for _ in range(self.N_TV)]
@@ -94,9 +101,10 @@ class SMPC():
         self.route = route
         
         p_opts = {'expand': False, 'print_time':0, 'verbose' :False, 'error_on_fail':0}
-        s_opts = {'print_level': 0,'tol':1e-3,'max_wall_time': 30.,'constr_viol_tol':1e-2} 
+        # s_opts = {'print_level': 0,'tol':5e-3,'max_wall_time': 120.,'constr_viol_tol':1e-4} 
+        s_opts = {'print_level': 0,'tol':1e-4,'max_wall_time': 120.,'constr_viol_tol':1e-4} 
         if eval_mode:
-            s_opts.update({'max_wall_time': 15.,'constr_viol_tol':1e-2})
+            s_opts.update({'max_wall_time': 15.,'constr_viol_tol':1e-3})
 
         s_opts_grb = {'OutputFlag': 0, 'PSDTol' : 1e-2,
                        'FeasibilityTol' : 1e-2, 
@@ -182,7 +190,10 @@ class SMPC():
         if self.config['collision_avoidance_method'] == 'obca':
             self.obca_lmbd = [[self.opti.variable(4, self.N-1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)] #Assuming rectangular obstacles
             self.obca_lmbd_redlight = self.opti.variable(4, self.N-1)
-        self.slack = self.opti.variable(1)
+        # if self.config['collision_avoidance_method'] == 'affine':
+        self.slack = [[[self.opti.variable(1) for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
+        # else:
+        #     self.slack = self.opti.variable(1)
         self.redlight = self.opti.parameter(2,1)
         # Uncomment next line for disturbance feedback when using Gurobi. 
         # Runs slow with Ipopt (default)
@@ -213,8 +224,9 @@ class SMPC():
             self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
         else:
             #Affine
+            self.slack_vec = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[self.slack[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
             self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
-
+        self.slack_vec = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[self.slack[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
         if self.offline:
             self.vars_epi = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(self.gain_l1[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
         else:
@@ -299,8 +311,6 @@ class SMPC():
         """        
         [A,B,E]=self._get_LTV_EV_dynamics()
         [T_tv,c_tv,E_tv]=self._get_ATV_TV_dynamics()
-        self.test3 = E_tv
-        self.test4 = Bdt**2
         [h,M,K]=self.policy
 
         self.nom_z_tv=[[T_tv[k][j]@self.z_tv_curr[k]+c_tv[k][j]  for j in range(self.N_modes[k])] for k in range(self.N_TV)]
@@ -320,10 +330,11 @@ class SMPC():
         if self.offline:
             self.lin_ineq_l1 = []
             self.ca_ineq = []
-            self.l1_constr=[[[ [] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-            self.ca_constr=[[[ [] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
-            self.test = [[[ [] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-            self.test2 = [[[ [] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
+            self.l1_constr=[[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
+            self.ca_constr=[[[ [] for _ in range(self.N-1)] for _ in range(len(self.mode_map))] for _ in range(self.N_TV)]
+            self.test = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
+            self.test2 = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
+            self.test3 = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
 
         # OBCA for redlight
         if self.config['collision_avoidance_method'] == 'obca':
@@ -331,8 +342,8 @@ class SMPC():
             d_min_red = 0
             
             obca_lmbd = self.obca_lmbd
-            # d_min = 0.5*(self.ev_length/2)
-            d_min = 0.5
+            d_min = 0.8*(self.ev_length/2)
+            # d_min = 0.8
             for t in range(1,self.N):
                 ego_psi = self.route(nom_s[t] + self.s0)[2]
                 Rev = ca.vertcat(
@@ -343,34 +354,30 @@ class SMPC():
                 R_mk = Rev
                 A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T
                 tv_nom = self.redlight #(2x1)
-                b_m = ca.vertcat(0.5/2, 0.5/2,2/2,2/2) + A_m @ tv_nom #Artibrary length = 0.1 m, width = 4 m to represent a stop line
+                b_m = ca.vertcat(0.5/2, 0.5/2,2/2,2/2) + A_m @ tv_nom #Artibrary length = 0.5 m, width = 4 m to represent a stop line
                 pt = self.route(nom_s[t] + self.s0)[:2]
                 y = -d_min_red + (A_m @ pt - b_m).T @ redlight_obca_lmbd[:,t-1]
                 self.opti.subject_to(0<=y)
-                self.opti.subject_to(((A_m @ Rev ).T @ redlight_obca_lmbd[:,t-1]).T @((A_m @ Rev).T @ redlight_obca_lmbd[:,t-1]) <= 1)
+                self.opti.subject_to((A_m.T @ redlight_obca_lmbd[:,t-1]).T @(A_m.T @ redlight_obca_lmbd[:,t-1]) <= 1)
                 self.opti.subject_to(redlight_obca_lmbd[:,t-1] >= 0)
         elif self.config['collision_avoidance_method'] == 'affine':
             for t in range(1,self.N):
-                self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-0.5))
+                self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-1))
         else:  
             raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}")
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
-                # cost += 0.3*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
+                cost += 0.03*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
                 for t in range(1, self.N):  # position at time-step 1 not a function of decision variables 
                     if self.config['collision_avoidance_method'] == 'obca':
                         '''
                         OBCA constraints
                         '''
                         # Optimization-based collision avoidance constraints. Ego: Point-mass, Obstacle: Polytope
-                        ego_psi = self.route(nom_s[t] + self.s0)[2] #radians
-                        Rev = ca.vertcat(
-                            ca.horzcat(ca.cos(ego_psi), -ca.sin(ego_psi)),
-                            ca.horzcat(ca.sin(ego_psi), ca.cos(ego_psi))
-                        )                    
+                                     
                         #first term is the ego vehicle's position noise, second term: is the TV's position
-                        tv_nom = self.pos_tvs[k][m][:,t]
+                        tv_nom = self.pos_tvs[k][m][:,t] #relative to the ego's initial position
                         tv_w = ca.horzcat(ca.DM(2,2*self.N),*[self.dpos_tvs[l][m][t-1]@E_tv[l][m][2*t,:] if l==k else ca.DM(2,2*self.N) for l in range(self.N_TV)]) #E_tv: (1x30)
 
                         # Rotation matrix of the target vehicle
@@ -379,33 +386,60 @@ class SMPC():
                             ca.horzcat(ca.sin(self.psi_tvs[k][m][t]), ca.cos(self.psi_tvs[k][m][t]))
                         )
 
-                        A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ Rtv.T #A_m: (4x2)
+                        A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ Rtv.T #A_m: (4x2), Rtv: (2x2), Rotating the polytope
                         b_m = ca.vertcat(self.tv_params[k][0]/2, self.tv_params[k][0]/2,self.tv_params[k][1]/2,self.tv_params[k][1]/2) + A_m @ tv_nom
                         b_m_w = A_m @ tv_w
 
-                        pt = self.route(nom_s[t] + self.s0)[:2] #[x,y] coordinate of the ego vehicle at timestep t(2,1) #TODO: get all the routes to get ego vehicle's position
+                        pt = self.route(nom_s[t] + self.s0)[:2] #[x,y] coordinate of the ego vehicle at timestep t(2,1)
                         # pt = self.x_pos[:,t] + self.dpos[t-1]@(A[2*t,:]@self.z_curr+B[2*t,:]@h - self.z_lin[0,t])
-                        pdb.set_trace()
-                        pt_w = ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:] for l in range(self.N_TV)])
-                        self.test2[k][m][t-1] += [B[2*t,:]@K[k][m]@E_tv[k][m][:2*self.N,:]]
-                        # pt_wt = ca.horzcat(self.dpos[t-1]@(E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]][:2*5,:2*5]@E_tv[l][self.mode_map[j][l]][:2*5,:2*5] for l in range(self.N_TV)]) 
 
+                        pt_w = ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:] for l in range(self.N_TV)])
                         # pt_C = ca.norm_2(self.dpos[t-1]@E[2*t,:])
 
                         pt_w_z = ca.horzcat(self.dpos[t-1]@(E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@ca.DM(*K[l][self.mode_map[j][l]].shape)@E_tv[l][self.mode_map[j][l]][:2*self.N,:] for l in range(self.N_TV)])
 
                         # Tightening
-                        # -self.tight*||Am@(ptw)||_2 >= d_min-[Am@pt-bm.T @ obca_lmbd[k][:,t-1]]
+                        # -self.tight*||Am@(ptw-bmw)@obca_lmbd[k][:,t-1]||_2 >= d_min-[Am@pt-bm.T @ obca_lmbd[k][:,t-1]]
                         # z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][:,t-1] #(180x1)
                         # A_m: (4x2), pt_w: (2x180), b_m_w: (4x30), obca_lmbd: (4x1)
+                        # z = 1/ca.sqrt(2)*self.tight*ca.norm_fro(A_m @ pt_w - b_m_w) #worst-case effect of noise on y
+                        z = (1/ca.sqrt(2))*ca.sqrt(ca.sumsqr(A_m @ pt_w - b_m_w))
+
+                        self.test[k][m][t-1] = z
                         # pdb.set_trace()
-                        z = self.tight*(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][m][:,t-1] #((N-1)*x1) -- z is quadratic in theta
+                        # z = self.tight *(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][m][:,t-1] #((N-1)*x1) -- z is quadratic in theta
                         y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][m][:,t-1] #+ 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal 
+                        self.test2[k][m][t-1] = y
                         
+            
+                        # Ego Frenet-to-Cartesian Jacobian
+                        psi_ego = self.route(nom_s[t] + self.s0)[2]
+                        J_ego = ca.vertcat(
+                            ca.horzcat(ca.cos(psi_ego), 0),
+                            ca.horzcat(ca.sin(psi_ego), 0)
+                        )
+                        Sigma_ev_sv = ca.diag(ca.DM(self.ev_n_std)**2)
+                        Sigma_ev_xy = J_ego @ Sigma_ev_sv @ J_ego.T
+
+                        # TV Frenet-to-Cartesian Jacobian
+                        psi_tv = self.psi_tvs[k][m][0, t]
+                        J_tv = ca.vertcat(
+                            ca.horzcat(ca.cos(psi_tv), 0),
+                            ca.horzcat(ca.sin(psi_tv), 0)
+                        )
+                        Sigma_tv_sv = ca.diag(ca.DM(self.tv_n_std[k])**2)
+                        Sigma_tv_xy = J_tv @ Sigma_tv_sv @ J_tv.T
+
+                        # Combined uncertainty in Cartesian
+                        Q_cov = Sigma_ev_xy + Sigma_tv_xy
+                        Q_m = A_m @ Q_cov @ A_m.T
+
+                        # z = self.tight * ca.sqrt(obca_lmbd[k][m][:,t-1].T @ Q_m @ obca_lmbd[k][m][:,t-1] + 1e-4)
+
                         #Linearize about obca_lmbd = 0.01*ca.DM(4,1)
                         # z_lin = self.tight*(A_m @ pt_w_z - b_m_w).T @ (0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) + self.tight*(A_m.T@(obca_lmbd[k][m][:,t-1] - 0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) ) + self.tight*(A_m @(pt_w - pt_w_z))
-                        z_lin = self.tight * (A_m @ pt_w_z - b_m_w).T @ (0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) + self.tight*((A_m @ (pt_w - pt_w_z)).T@(0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape))) # This is the linearized z term, which is a function of the previous lambda and the noise term.
-                        y_lin = -d_min + (A_m @ self.route(self.z_lin[0,t] + self.s0)[:2] - b_m).T @ (0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) + (A_m@ (pt - self.route(self.z_lin[0,t] + self.s0)[:2])).T @ (0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) + (A_m@self.route(self.z_lin[0,t] + self.s0)[:2] - b_m).T@(obca_lmbd[k][m][:,t-1] - 0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) #Nominal
+                        # z_lin = self.tight * (A_m @ pt_w_z - b_m_w).T @ (0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) + self.tight*((A_m @ (pt_w - pt_w_z)).T@(0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape))) # This is the linearized z term, which is a function of the previous lambda and the noise term.
+                        # y_lin = -d_min + (A_m @ self.route(self.z_lin[0,t] + self.s0)[:2] - b_m).T @ (0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) + (A_m@ (pt - self.route(self.z_lin[0,t] + self.s0)[:2])).T @ (0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) + (A_m@self.route(self.z_lin[0,t] + self.s0)[:2] - b_m).T@(obca_lmbd[k][m][:,t-1] - 0.01*ca.DM.ones(*obca_lmbd[k][m][:,t-1].shape)) #Nominal
 
                         #Use linearized z and y for the collision avoidance constraint
                         # z = z_lin
@@ -416,48 +450,62 @@ class SMPC():
                         # self.ca_ineq.append(ca.vertcat(z,y))
 
                         #slack cost
-                        cost += 1e5*self.slack**2
+                        # cost += 1e5*self.slack**2
 
                         #obca_lambd cost for PD hessian
-                        cost += 0.05*ca.vec(obca_lmbd[k][m][:,t-1]).T@ca.vec(obca_lmbd[k][m][:,t-1])
+                        # cost += 0.05*ca.vec(obca_lmbd[k][m][:,t-1]).T@ca.vec(obca_lmbd[k][m][:,t-1])
+
                     elif self.config['collision_avoidance_method'] == 'affine':
                         # Linearised obstacle avoidance constraints
                         # EV position projection onto obstacle ellipse
-                        oa_ref=self.pos_tvs[k][m][:,t]
-                        oa_ref+=(self.x_pos[:,t]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,t]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-self.pos_tvs[k][m][:,t]))**(0.5)
+                        # oa_ref=self.pos_tvs[k][m][:,t]
+                        diff = self.x_pos[:,t] - self.pos_tvs[k][m][:,t]
+                        mahalanobis_norm = np.sqrt(diff.T @ self.Qs[k][m][t-1] @ diff)
+                        oa_ref = self.pos_tvs[k][m][:,t] + diff / mahalanobis_norm
+                        # oa_ref+=(self.x_pos[:,t]-self.pos_tvs[k][m][:,t])/( (self.x_pos[:,t]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-self.pos_tvs[k][m][:,t]) )**(0.5)
+                        # delta = self.x_pos[:, t] - self.pos_tvs[k][m][:, t]
+                        # norm = ca.sqrt(ca.mtimes([delta.T, self.Qs[k][m][t-1], delta]))
+                        # oa_ref = self.pos_tvs[k][m][:, t] + delta / norm
+                        self.test[k][m][t-1] = diff.T @ self.Qs[k][m][t-1] @ diff
+                        self.test2[k][m][t-1] = (oa_ref- self.pos_tvs[k][m][:,t]).T @ self.Qs[k][m][t-1] @ (oa_ref - self.pos_tvs[k][m][:,t])
+                        self.test3[k][m][t-1] = (oa_ref - self.pos_tvs[k][m][:,t]).T @ self.Qs[k][m][t-1] @ (self.x_pos[:,t] - oa_ref)
+                        
                         # oa_ref+=(self.x_pos[:,0]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,0]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,0]-self.pos_tvs[k][m][:,t]))**(0.5)
                         # Coefficient of random variables in affine chance constraint
                         z=self.tight*((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:]-int(l==k)*self.dpos_tvs[k][m][t-1]@E_tv[k][m][2*t,:] for l in range(self.N_TV)]))).T
-                        # constant term in affine chance constraint
-                        y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h-self.z_lin[0,t]))
-                        cost += 1e5*self.slack**2
+                        z = ca.sqrt(ca.sumsqr(z))
+                        # z=self.tight*((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:] for l in range(self.N_TV)]))).T
+                        # pdb.set_trace()
+                        # constant term in affine chance constraint self.slack[k][m][t-1]+
+                        y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h-(self.z_lin[0,t] - self.s0)))
+                        # cost += 1e5*self.slack**2
+
                     else:
                         NotImplementedError("Collision avoidance method not implemented")
-
                     if self.solver=="ipopt":
                         # norm_2(z)<=y
                         if self.offline:
                             if self.config['collision_avoidance_method'] == 'obca':
-                                self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
+                                # self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
+                                self.ca_constr[k][j][t-1]+=[z<=y+self.slack[k][m][t-1],0<=y]
                                 #obca related constraints 
-                                self.opti.subject_to(((A_m @ Rtv ).T @ obca_lmbd[k][m][:,t-1]).T @((A_m @ Rtv).T @ obca_lmbd[k][m][:,t-1]) <= 1)
+                                self.opti.subject_to((A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]) <= 1)
                                 self.opti.subject_to(obca_lmbd[k][m][:,t-1] >= 0)
                             elif self.config['collision_avoidance_method'] == 'affine':
-                                #Old linearized affine chance constraint (No longer used)
-                                self.ca_constr[k][j][t-1]+=[z.T@z<=y**2, 0<=y+self.slack ]
-                                # if mu_ca_constr > 0, then mu_s in int(A\theta+R_t)
+                                # self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z+1e-4)<=y, 0<=y]
+                                self.ca_constr[k][j][t-1]+=[z<=y+self.slack[k][m][t-1],0<=y]
                             else:
                                 NotImplementedError("Collision avoidance method not implemented")
 
                             self.ca_ineq.append(ca.vertcat(z,y)) # #C -> 1
-
+                            
                             #Impose all ca constraints
                             self.opti.subject_to(self.ca_constr[k][j][t-1][0])
                             self.opti.subject_to(self.ca_constr[k][j][t-1][1])
-                              
+                            
                             if len(self.l1_constr[k][m][t-1])==0:
                                 #self.gain_l1 is the capital psi variable in canonical form
-                                self.test[k][m][t-1] +=[K[k][m][t,2*t:2*(t+1)]]
+                                # self.test[k][m][t-1] +=[K[k][m][t,2*t:2*(t+1)]]
                                 self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]]
                                 # tightening the l1 gain constraints (set self.gain_li[k][m][t-1] to be 1 dimensional variable)
                                 # self.l1_constr[k][m][t-1]+=[ca.max(K[k][m][t,2*t:2*(t+1)])<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=ca.min(K[k][m][t,2*t:2*(t+1)])]
@@ -467,13 +515,13 @@ class SMPC():
 
                                 self.lin_ineq_l1+=[K[k][m][t,2*t:2*(t+1)] - self.gain_l1[k][m][t-1]] #g1 constraint
                                 # self.lin_ineq_l1+=[-K[k][m][t,2*t:2*(t+1)] - self.gain_l1[k][m][t-1]] #g2 constraint
-                                cost += self.l1_lmbd*ca.sum1(ca.vec(self.gain_l1[k][m][t-1]))                                          
+                                cost += self.l1_lmbd*ca.sum1(ca.vec(self.gain_l1[k][m][t-1]))  
                         else:
                             # collision avoidance constraint screening
                             if self.config['collision_avoidance_method'] == 'obca':
                                 # obca related constraint screening
                                 obca_constr = ca.vertcat(*[y-ca.sqrt(z.T@z + 1e-4), y])
-                                obca_dual_constr = ca.vertcat(1 + self.slack - ((A_m @ Rev ).T @ obca_lmbd[k][m][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
+                                obca_dual_constr = ca.vertcat(1 + self.slack - (A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
                                 obca_switch=ca.if_else(self.constr_keep[k][j][t-1], obca_constr, ca.DM.ones(*obca_constr.shape))
                                 obca_switch_dual=ca.if_else(self.constr_keep[k][j][t-1], obca_dual_constr, ca.DM.ones(*obca_dual_constr.shape))
                                 self.opti.subject_to(obca_switch>=0)
@@ -485,7 +533,6 @@ class SMPC():
                                 self.opti.subject_to(soc_switch>=0)
                             else:
                                 NotImplementedError("Collision avoidance method not implemented")
-
                     else:
                         # Use for SOCP solvers: SCS and Gurobi
                         soc_constr=ca.soc(z,y)
@@ -504,10 +551,11 @@ class SMPC():
                             self.opti.subject_to(soc_switch>0)
 
                             # # obca related constraint screening
-                            # obca_constr = ca.vertcat(1 + self.slack - ((A_m @ Rev ).T @ obca_lmbd[k][m][:,t-1]).T @((A_m @ Rev).T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
+                            # obca_constr = ca.vertcat(1 + self.slack - (A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
                             # obca_switch=ca.if_else(self.constr_keep[k][j][t-1], obca_constr, ca.DM(*obca_constr.shape), True)
                             # self.opti.subject_to(obca_switch>0)
-
+        # if self.config['collision_avoidance_method'] == 'affine': 
+        cost += 1e4*self.slack_vec.T@self.slack_vec
         self.opti.minimize( cost ) 
 
         if self.offline:
@@ -517,7 +565,7 @@ class SMPC():
             self.lin_ineq_constr+=[-A[t*2+1,:]@self.z_curr-B[t*2+1,:]@h + self.V_MIN  for t in range(1,self.N+1)]
             self.lin_ineq_constr+=[h[t]-self.A_MAX  for t in range(self.N)]
             self.lin_ineq_constr+=[-h[t] + self.A_MIN for t in range(self.N)]
- 
+
             self.f_l_i_c = ca.Function("lin_ineq", [self.vars_pol,self.params, self.V_MAX], self.lin_ineq_constr)
 
             # F\theta < =f
@@ -526,15 +574,26 @@ class SMPC():
             # L\theta <= psi
             self.L = ca.jacobian(ca.vertcat(*self.f_l_i_l1(self.vars_pol,self.vars_epi)), self.vars_pol)
 
-            self.f_ca_i = ca.Function("ca_ineq", [self.vars_pol, self.params], self.ca_ineq)
+            # if self.config['collision_avoidance_method'] == 'obca':
+            #     self.f_ca_i = ca.Function("ca_ineq", [self.vars_pol, self.params], self.ca_ineq)
+            # else:
+            self.f_ca_i = ca.Function("ca_ineq", [self.vars_pol, self.params, self.slack_vec], self.ca_ineq)
+
             # C\theta + c \in K_1 x K_2 x .................
             # if self.config['collision_avoidance_method'] == 'obca':
-            self.C =  (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params))
-            self.c = self.f_ca_i(ca.DM(*self.vars_pol.shape), self.params)
-
-            self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params, self.slack], [cost])
-            self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params, 0), self.vars_pol)
-            self.d         = self.f_cost(ca.DM(*self.vars_pol.shape),ca.DM(*self.vars_epi.shape),self.params,0)
+            #     self.C =  (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params))
+            #     self.c = self.f_ca_i(ca.DM(*self.vars_pol.shape), self.params)
+            # else:
+            self.C =  (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params,self.slack_vec))
+            self.c = self.f_ca_i(ca.DM(*self.vars_pol.shape), self.params, ca.DM.zeros(*self.slack_vec.shape))
+            # if self.config['collision_avoidance_method'] == 'obca': 
+            #     self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params, self.slack], [cost])
+            #     self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params, 0), self.vars_pol)
+            #     self.d         = self.f_cost(ca.DM(*self.vars_pol.shape),ca.DM(*self.vars_epi.shape),self.params,0)
+            # else:
+            self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params, self.slack_vec], [cost])
+            self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params, ca.DM.zeros(*self.slack_vec.shape)), self.vars_pol)
+            self.d         = self.f_cost(ca.DM(*self.vars_pol.shape),ca.DM(*self.vars_epi.shape),self.params,ca.DM.zeros(*self.slack_vec.shape))
             # else:
             #     self.C =  (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params))
             #     self.c = self.f_ca_i(ca.DM(*self.vars_pol.shape), self.params)
@@ -580,7 +639,8 @@ class SMPC():
         # self.d = self.canon_prob_fn['f_cost'](ca.DM(*self.vars_pol4screening.shape),vars_epi,self.opti.value(self.params))
 
     def solve(self,first_solve=False):
-        try:       
+        try:      
+            # self.plot_obca_obstacles_and_ego_path(self.pos_tvs, self.psi_tvs, self.tv_params )
             st = time.time()
             sol = self.opti.solve()
             solve_time = time.time() - st
@@ -595,7 +655,6 @@ class SMPC():
             s0         = sol.value(self.s0)
             nom_z      = sol.value(self.nom_z).reshape(-1,2).T
             nom_z[0,:] += s0 
-            pdb.set_trace()
             if self.offline and not first_solve:
                 self.vars_ws , self.vars_epi_ws = sol.value(self.vars_pol), sol.value(self.vars_epi)
             if self.offline and self.solver=='ipopt':
@@ -604,6 +663,16 @@ class SMPC():
                 # l1_duals=[[[[np.linalg.norm(sol.value(self.opti.dual(self.l1_constr[k][j][t][0])),ord=np.inf)] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
                 ca_duals=[[[[sol.value(self.opti.dual(self.ca_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
             is_opt     = True
+            # Debug checking for non-zero gains K
+            # eps = 1e-3
+            # for k in range(self.N_TV):
+            #     for j in range(len(self.mode_map)):
+            #         m=self.mode_map[j][k]
+            #         for t in range(1,self.N):
+            #             if np.max(np.abs(self.opti.value(self.test[k][m][t-1][0]))) > eps:
+            #                 print('Non-zero gain found in test')
+            #                 pdb.set_trace()
+
             # eigs = np.linalg.eig(sol.value(self.Q).toarray())
             # largest_eig = np.max(eigs[0])
             # smllest_eig = np.min(eigs[0])
@@ -613,7 +682,16 @@ class SMPC():
             # pdb.set_trace()
         except:
             # self.opti.debug.show_infeasibilities()
+            # t=0
+            # i=0
+            # m=0
+            # plot_collision_linearization(
+            #             Q=self.opti.debug.value(self.Qs[i][m][t]),
+            #             c=self.opti.debug.value(self.pos_tvs[i][m][:, t]),
+            #             x=self.opti.debug.value(self.x_pos[:, t])
+            # )
             # pdb.set_trace()
+
             if self.offline:
                 self.vars_ws , self.vars_epi_ws = None, None  
             infeas_status = ['Infeasible_Problem_Detected'] if self.solver=="ipopt" else ["INF_OR_UNBD"]
@@ -639,7 +717,6 @@ class SMPC():
             t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
             t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall'))
             solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum
-            # print(u_opt)
             is_opt = False
         t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
         t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall'))
@@ -731,12 +808,14 @@ class SMPC():
         if speed_limit is None:
             self.opti.set_value(self.V_MAX, self.config['v_max'])
         else:
+            sl = min(speed_limit,self.config['v_max'])
+            print(f"[smpc.py] Speed Limit: {speed_limit}, SL: {sl}")
             self.opti.set_value(self.V_MAX, min(speed_limit,self.config['v_max']))
 
     def _update_red_light(self, red_light_agent = None,ego_sim_init_state=None):
         if self.config['collision_avoidance_method'] == 'obca':
             if red_light_agent is None:
-                self.opti.set_value(self.redlight, [0,0]) #default red light positon (x,y), really far away from ego
+                self.opti.set_value(self.redlight, [1000,1000]) #default red light positon (x,y), really far away from ego
             else:
                 red_light = [red_light_agent.x-ego_sim_init_state.center.point.x,red_light_agent.y-ego_sim_init_state.center.point.y] #global x and y of red light agent
                 self.opti.set_value(self.redlight, red_light)
@@ -749,6 +828,7 @@ class SMPC():
 
     def _update_ev_initial_condition(self, x0, u_prev):
         self.x0 = x0
+        print(f'[smpc.py] Initial Velocity: {x0[1]}')
         self.opti.set_value(self.s0, x0[0])    
         self.opti.set_value(self.z_curr, np.array([0,x0[1]],dtype=np.float64))
         self.opti.set_value(self.u_prev, u_prev)
@@ -1100,3 +1180,99 @@ class SMPC():
                 if np.linalg.norm(dual,ord=np.inf) + gap_radius < 1 and np.linalg.norm(dual,ord=np.inf) - gap_radius > 0:
                     keep = 0
             return keep #output 1 or 0
+
+    def plot_obca_obstacles_and_ego_path(self, pos_tvs, psi_tvs, tv_params, buffer_radius=1.5, t=0):
+        """
+        Plots OBCA rectangular obstacle polytopes and ego path with buffer.
+
+        :param pos_tvs: list of [2, N+1] TV position arrays (one per vehicle)
+        :param psi_tvs: list of [1, N+1] TV headings (radians)
+        :param tv_params: list of (length, width) tuples for TVs
+        :param buffer_radius: radius of ego buffer (approximate safety zone)
+        :param t: timestep to visualize
+        """
+        fig, ax = plt.subplots(figsize=(8, 8))
+
+        # Plot TV rectangles
+        for k in range(len(pos_tvs)):
+            for j in range(len(self.mode_map)):
+                m=self.mode_map[j][k]
+                center = self.opti.value(pos_tvs[k][m][:,t])
+                psi = self.opti.value(psi_tvs[k][m][0, t])
+                length, width = self.opti.value(tv_params[k])
+
+                # Compute rectangle corners
+                R = np.array([[np.cos(psi), -np.sin(psi)],
+                            [np.sin(psi),  np.cos(psi)]])
+                rect_pts = np.array([
+                    [ length/2,  width/2],
+                    [-length/2,  width/2],
+                    [-length/2, -width/2],
+                    [ length/2, -width/2],
+                ]).T
+                corners = R @ rect_pts + center.reshape(2, 1)
+
+                polygon = plt.Polygon(corners.T, closed=True, edgecolor='black', facecolor='red', alpha=0.5, label='TV' if k == 0 else "")
+                ax.add_patch(polygon)
+                ax.plot(center[0], center[1], 'ko')  # TV center
+
+        # # Plot ego path
+        # ax.plot(ego_path[0, :], ego_path[1, :], 'g.-', label='Ego Path')
+        # ax.plot(ego_path[0, t], ego_path[1, t], 'go', markersize=10, label='Ego @ t')
+
+        # Add ego buffer at each step
+        # for tt in range(ego_path.shape[1]):
+        #     circ = patches.Circle((ego_path[0, tt], ego_path[1, tt]), buffer_radius,
+        #                         edgecolor='green', facecolor='none', linestyle='--', alpha=0.4)
+        #     ax.add_patch(circ)
+
+        ax.set_aspect('equal')
+        ax.grid(True)
+        ax.legend()
+        ax.set_title(f"OBCA Constraints Visualization at t={t}")
+        plt.xlabel("x")
+        plt.ylabel("y")
+        plt.show()
+
+def plot_collision_linearization(Q, c, x):
+    # Compute linearization point on the ellipse boundary
+    diff = x - c
+    mahalanobis_norm = np.sqrt(diff.T @ Q @ diff)
+    oa_ref = c + diff / mahalanobis_norm
+
+    # Generate unit circle
+    theta = np.linspace(0, 2 * np.pi, 200)
+    circle = np.vstack((np.cos(theta), np.sin(theta)))
+
+    # Ellipse: (x - c)^T Q (x - c) = 1 ⇒ shape is inv(Q)
+    Qinv = np.linalg.inv(Q)
+    eigvals, eigvecs = np.linalg.eigh(Qinv)
+    axes = np.sqrt(eigvals)  # semi-axes lengths
+    ellipse = eigvecs @ np.diag(axes) @ circle + c[:, None]
+
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(ellipse[0], ellipse[1], 'b-', label='Ellipse')
+    plt.plot(c[0], c[1], 'bo', label='TV Center (c)')
+    plt.plot(oa_ref[0], oa_ref[1], 'go', label='oa_ref (linearization pt)')
+    plt.plot(x[0], x[1], 'ro', label='Ego Position')
+
+    # Draw normal vector
+    plt.quiver(c[0], c[1], oa_ref[0] - c[0], oa_ref[1] - c[1],
+               angles='xy', scale_units='xy', scale=1, color='g', width=0.005, label='Normal (oa_ref - c)')
+
+    # Draw deviation vector
+    plt.quiver(oa_ref[0], oa_ref[1], x[0] - oa_ref[0], x[1] - oa_ref[1],
+               angles='xy', scale_units='xy', scale=1, color='r', width=0.005, label='Deviation (x - oa_ref)')
+
+    plt.axis('equal')
+    plt.grid(True)
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.title('Collision Avoidance Linearization Visualization')
+    plt.legend()
+    plt.show()
+
+    # Print debug info
+    print("Check (oa_ref - c)^T Q (oa_ref - c) =", (oa_ref - c).T @ Q @ (oa_ref - c))
+
