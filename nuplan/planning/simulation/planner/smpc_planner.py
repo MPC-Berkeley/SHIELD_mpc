@@ -283,7 +283,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             if self.config['prediction_method']=='idm':
                 update_dict = self.get_update_dict(current_input, filter_preds(preds,self.config['num_tvs'],ego_state),tv_paths_se2)
             else: #wayformer
-                pred, prob, tv_params, tv_psi, tv_track_tokens = preds 
+                pred, prob, tv_params, tv_psi, tv_track_tokens, scenario_type = preds 
                 preds_dict = {'preds': pred, 'prob': prob, 'tv_params': tv_params, 'tv_psi': tv_psi, 'tv_track_tokens': tv_track_tokens}
                 preds = preds_dict
                 update_dict = self.get_update_dict(current_input, preds_dict, tv_paths_se2)
@@ -293,20 +293,22 @@ class SMPCPlanner(AbstractIDMPlanner):
                 update_dict = self.get_update_dict(current_input, mm_preds,tv_paths_se2)
             else:
                 #wayformer
-                pred, prob, tv_params, tv_psi, tv_track_tokens = preds 
+                pred, prob, tv_params, tv_psi, tv_track_tokens, scenario_type = preds 
                 preds_dict = {'preds': pred, 'prob': prob, 'tv_params': tv_params, 'tv_psi': tv_psi, 'tv_track_tokens': tv_track_tokens}
                 mm_preds = preds_dict
                 update_dict = self.get_update_dict(current_input, preds_dict, tv_paths_se2)
         leading_vehicle = self.leading_idm_agent(ego_state,observations,current_input)
-        if leading_vehicle is not None and list(leading_vehicle.keys())[0] not in preds_dict['tv_track_tokens']:
-            leading_vehicle = leading_vehicle[list(leading_vehicle.keys())[0]]
-            leading_vehicle_ind = detection_track_tokens.index(list(leading_vehicle.keys())[0]) #check if the leading agent is in the observations
-            leading_vehicle_obs = observations.tracked_objects.tracked_objects[leading_vehicle_ind]
-            #get veolicty
-            v = leading_vehicle_obs.velocity.magnitude() #magnitude of the velocity 
+        leading_vehicle_key =list(leading_vehicle.keys())[0]
+        if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
+            leading_agent = leading_vehicle[leading_vehicle_key]
+            leading_agent_ind = detection_track_tokens.index(leading_vehicle_key) #check if the leading agent is in the observations
+            leading_agent_obs = observations.tracked_objects.tracked_objects[leading_agent_ind]
+            #get velocity
+            v = leading_agent_obs.velocity.magnitude() #magnitude of the velocity 
             #terminal s of the leading agent (i.e. constant velocity)
-            leading_vehicle.progress += self.smpc.N * self.config['dt'] * v 
-        update_dict.update({'leading_vehicle':leading_vehicle,'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1/2),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
+            leading_agent.progress += self.smpc.N * self.config['dt'] * v 
+            update_dict.update({'leading_vehicle': leading_agent})
+        update_dict.update({'leading_vehicle':None,'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1/2),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
 
         if self.config['eval_mode']:
             #update canonical form matrices
@@ -326,6 +328,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             #update l1 and ca duals
             update_dict.update({'l1_duals':l1_duals, 'ca_duals':ca_duals})
         self.prev_update_dict = update_dict
+        pdb.set_trace()
         self.smpc.update(update_dict) 
         # Solve the SMPC
         sol = self.smpc.solve()
@@ -355,6 +358,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     dual_class = 2
                 self.dual_class.append(dual_class)
                 self.expert_action.append(expert_action)
+                self.scenario_type = scenario_type
                 print(l1_duals_vec)
                 print(dual_class)
                 print(ca_duals_active,l1_dual_active)
@@ -385,8 +389,8 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.ego_opt_sols_full_state.append(self.get_ego_full_state())
             self.smpc_params.append(self.smpc.opti.value(self.smpc.params))
             self.l1_active.append(l1_dual_active)
-            if leading_vehicle is not None:
-                pred.update({'leading_vehicle':leading_vehicle}) #update the leading agent in the prediction
+            if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
+                pred.update({'leading_vehicle':leading_agent}) #update the leading agent in the prediction
             pred.update({'leading_vehicle_active':sol['leading_vehicle_active']}) #update the leading agent active status in the prediction
 
             if not self.config['eval_mode']:
@@ -412,10 +416,11 @@ class SMPCPlanner(AbstractIDMPlanner):
             # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True) 
         else:
             print('No optimal solution found') 
-            if leading_vehicle is not None:
-                preds_dict.update({'leading_vehicle':leading_vehicle, 'leading_vehicle_active':False}) #update the leading agent in the prediction
+            if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
+                preds_dict.update({'leading_vehicle':leading_agent, 'leading_vehicle_active':False}) #update the leading agent in the prediction
             fig = self.visualize_scene(current_input, preds_dict, 0)
             self.figs_w_preds.append(fig)
+            self.scenario_type = scenario_type
             
             # self.visualize_scene(current_input, pred, 0,visualize=True)
             # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True)
@@ -950,6 +955,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                                         'dual_class':[self.dual_class],
                                         'l1_active': [self.l1_active],
                                         'preds':[self.preds],
+                                        'scenario_type': [self.scenario_type],
                                         'agent_params':[self.pred_agent_params],
                                         'smpc_params':[self.smpc_params]}, 
                                         f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -970,6 +976,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         data['l1_active'].append(self.l1_active)
                         data['agent_params'].append(self.pred_agent_params)
                         data['log_iter'].append(self.log_iter)
+                        data['scenario_type'].append(self.scenario_type)
                         data['smpc_params'].append(self.smpc_params)
                         # if logname is not None:
                         data['logname'].append(logname)
@@ -1011,7 +1018,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         with gzip.open(filepath, 'wb') as f:
                             # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
                             # if logname is not None:
-                            pickle.dump({'log_iter':[self.log_iter],'logname': [logname], 'scenario_id': [self.scenario_id], 'ego_opt_sol':[self.ego_opt_sols_full_state], 'ego_cl_traj': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data],'preds':[self.preds],'agent_params':[self.pred_agent_params]}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                            pickle.dump({'log_iter':[self.log_iter],'logname': [logname], 'scenario_type':[self.scenario_type],'scenario_id': [self.scenario_id], 'ego_opt_sol':[self.ego_opt_sols_full_state], 'ego_cl_traj': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data],'preds':[self.preds],'agent_params':[self.pred_agent_params]}, f, protocol=pickle.HIGHEST_PROTOCOL)
                             # else:
                             #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
                     else:
@@ -1025,6 +1032,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
                         data['preds'].append(self.preds)
                         data['agent_params'].append(self.pred_agent_params)
+                        data['scenario_type'].append(self.scenario_type)
                         data['log_iter'].append(self.log_iter)
                         # if logname is not None:
                         data['logname'].append(logname)

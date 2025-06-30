@@ -73,18 +73,23 @@ scenario_types=[
   'starting_left_turn',
   'changing_lane',
   'starting_unprotected_cross_turn',
-#   'starting_unprotected_noncross_turn',
+  'starting_u_turn',
+  'starting_unprotected_noncross_turn',
   'starting_right_turn',
-#   'traversing_intersection',
+  'crossed_by_vehicle',
+  'following_lane_with_lead',
+  'following_lane_with_slow_lead',
+  'near_multiple_vehicles',
+  'traversing_intersection',
 #   'traversing_traffic_light_intersection'
     ]
 print('total log list length:',len(log_list))
 log_list = log_list
-num_scenarios = 1 #float: fraction, int: number of scenarios to use from the log
+num_scenarios = 5 #float: fraction, int: number of scenarios to use from the log
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
     if 50 > it >= 0:
-        # try:
+        try:
             print(f'[Iter:{it}] Collecting data from log: ', log)
             EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
             # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
@@ -92,7 +97,7 @@ for it, log in enumerate(log_list):
             DATASET_PARAMS = [
                 'scenario_builder=nuplan_mini',  # [nuplan, nuplan_mini] use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
                 f"scenario_filter.log_names=[{str(log)}]",
-                # f'scenario_filter.scenario_types={scenario_types}', 
+                f'scenario_filter.scenario_types={scenario_types}', 
                 f'scenario_filter.limit_total_scenarios={num_scenarios}',  # use n total scenarios
                 'scenario_filter.remove_invalid_goals=true',  
             ]
@@ -162,6 +167,6 @@ for it, log in enumerate(log_list):
 
                 # Run nuBoard
                 main_nuboard(cfg)
-        # except:
-        #     print(f'Error occurred while running NuPlan for log: {log}')
-        #     continue
+        except:
+            print(f'Error occurred while running NuPlan for log: {log}')
+            continue

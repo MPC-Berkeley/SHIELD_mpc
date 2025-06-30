@@ -68,6 +68,7 @@ def build_simulations(
         distributed_mode=DistributedMode[cfg.distributed_mode],
     )
     scenarios = scenario_filter.get_scenarios()
+    print(f'Extracted {len(scenarios)} scenarios')
 
     metric_engines_map = {}
     if cfg.run_metric:

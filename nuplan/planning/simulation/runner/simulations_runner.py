@@ -453,7 +453,8 @@ class SimulationRunner(AbstractRunner):
                 else:
                     #use Wayformer predictions
                     tv_paths_se2 = None
-                    preds = (pred, prob, tv_params, tv_psi, tv_track_tokens)
+                    scenario_type = self.simulation.scenario.scenario_type
+                    preds = (pred, prob, tv_params, tv_psi, tv_track_tokens, scenario_type)
                     if self.simulation._time_controller.get_iteration().index == 0:
                         ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
                         self.planner.ego_traj = ego_traj[:self.planner.config['N']+1]
