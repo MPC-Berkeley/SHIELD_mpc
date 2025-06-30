@@ -13,7 +13,6 @@ from nuplan.planning.simulation.observation.idm_agents import IDMAgents
 from nuplan.planning.simulation.simulation import Simulation
 from nuplan.planning.simulation.planner.smpc_planner import SMPCPlanner
 logger = logging.getLogger(__name__)
-from unitraj.datasets.wayformer_dataset import WayformerDataset
 from torch.utils.data import DataLoader
 from unitraj.datasets import common_utils
 from unitraj.models import build_model
@@ -60,6 +59,7 @@ class SimulationRunner(AbstractRunner):
         self.planner.initialize(self._simulation.initialize(sim_mode='closedloop'))
 
         # Initialize WayformerDataset for Unitraj format (Wayformer)
+        #Make sure to update the config file below to match the dataset and the NuPlan scenario split
         cfg = OmegaConf.load('/home/mpc/UniTraj/unitraj/configs/config.yaml')
         model_cfg = OmegaConf.load('/home/mpc/UniTraj/unitraj/configs/method/wayformer.yaml')
         OmegaConf.set_struct(cfg, False)  # Open the struct
@@ -72,22 +72,22 @@ class SimulationRunner(AbstractRunner):
         # Initialize Wayformer model
         self.wayformer_model = build_model(cfg)
 
-        val_loader = DataLoader(
-            self.wayformer_dataset, batch_size=1, num_workers=cfg.load_num_workers, shuffle=False, drop_last=False,
-            collate_fn=self.wayformer_dataset.collate_fn)
+        # val_loader = DataLoader(
+        #     self.wayformer_dataset, batch_size=1, num_workers=cfg.load_num_workers, shuffle=False, drop_last=False,
+        #     collate_fn=self.wayformer_dataset.collate_fn)
 
-        trainer = pl.Trainer(
-            inference_mode=True,
-            logger=None,
-            devices=1,
-            accelerator="cpu" if cfg.debug else "gpu",
-            profiler="simple",
-        )
+        # trainer = pl.Trainer(
+        #     inference_mode=True,
+        #     logger=None,
+        #     devices=1,
+        #     accelerator="cpu" if cfg.debug else "gpu",
+        #     profiler="simple",
+        # )
         # pdb.set_trace()
         # pred = trainer.predict(model=self.wayformer_model, dataloaders=val_loader, return_predictions=True, ckpt_path='/home/mpc/UniTraj/unitraj/unitraj_ckpt/test/epoch=933-val/brier_fde=0.60.ckpt')
 
         # Load the model checkpoint
-        self.wayformer_model = Wayformer.load_from_checkpoint('/home/mpc/UniTraj/unitraj/unitraj_ckpt/test/epoch=933-val/brier_fde=0.60.ckpt',config=cfg)
+        self.wayformer_model = Wayformer.load_from_checkpoint('/home/mpc/UniTraj/unitraj/unitraj_ckpt/nuplan_mini/epoch=933-val/brier_fde=0.60.ckpt',config=cfg)
         self.wayformer_model.to('cpu')
         # Execute specific callback
         self._simulation.callback.on_initialization_end(self._simulation.setup, self.planner)

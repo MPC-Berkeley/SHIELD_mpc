@@ -28,6 +28,7 @@ SAVE_DIR = tempfile.mkdtemp()
 # Select simulation parameters
 #get file names from a directory
 directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/mini/'
+# directory_path = '/home/mpc/nuplan-devkit/nuplan/dataset/nuplan-v1.1/splits/trainval/'
 #Data directory
 log_list = [f.split('.db')[0] for f in sorted(os.listdir(directory_path)) if os.path.isfile(os.path.join(directory_path, f))]
 nuboard = False
@@ -37,32 +38,33 @@ nuboard = False
 #2021.05.12.23.36.44_veh-35_01133_01535 #Infeasibility from start
 # log_list = ['2021.06.07.12.54.00_veh-35_01843_02314']
 # log_list = log_list[2:]
-# scenario_types=[
-#   'behind_long_vehicle',
-#   'crossed_by_vehicle',
-#   'following_lane_with_lead',
-#   'following_lane_with_slow_lead',
-#   'following_lane_without_lead',
-#   'high_lateral_acceleration',
-#   'high_magnitude_jerk',
-#   'high_magnitude_speed',
-#   'low_magnitude_speed',
-#   'medium_magnitude_speed',
-#   'near_high_speed_vehicle',
-#   'near_multiple_vehicles',
-#   'on_intersection',
-#   'on_traffic_light_intersection',
-#   'starting_high_speed_turn',
-#   'starting_protected_cross_turn',
-#   'starting_protected_noncross_turn',
-#   'starting_right_turn',
-#   'starting_left_turn',
-#   'changing_lane',
-#   'starting_u_turn',
-#   'starting_unprotected_cross_turn',
-#   'starting_unprotected_noncross_turn',
-#   'traversing_intersection',
-#   'traversing_traffic_light_intersection',]
+scenario_types=[
+  'behind_long_vehicle',
+  'crossed_by_vehicle',
+  'following_lane_with_lead',
+  'following_lane_with_slow_lead',
+  'following_lane_without_lead',
+  'high_lateral_acceleration',
+  'high_magnitude_jerk',
+  'high_magnitude_speed',
+  'low_magnitude_speed',
+  'medium_magnitude_speed',
+  'near_high_speed_vehicle',
+  'near_multiple_vehicles',
+  'on_intersection',
+  'on_traffic_light_intersection',
+  'starting_high_speed_turn',
+  'starting_protected_cross_turn',
+  'starting_protected_noncross_turn',
+  'starting_right_turn',
+  'starting_left_turn',
+  'changing_lane',
+  'starting_u_turn',
+  'starting_unprotected_cross_turn',
+  'starting_unprotected_noncross_turn',
+  'traversing_intersection',
+  'traversing_traffic_light_intersection',]
+
 scenario_types=[
 #   'on_intersection',
 #   'on_traffic_light_intersection',
@@ -78,20 +80,21 @@ scenario_types=[
     ]
 print('total log list length:',len(log_list))
 log_list = log_list
+num_scenarios = 1 #float: fraction, int: number of scenarios to use from the log
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
-    if 60 > it >= 0:
-        try:
+    if 50 > it >= 0:
+        # try:
             print(f'[Iter:{it}] Collecting data from log: ', log)
             EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
             # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
             OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
             DATASET_PARAMS = [
-                'scenario_builder=nuplan_mini',  # use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
+                'scenario_builder=nuplan_mini',  # [nuplan, nuplan_mini] use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
                 f"scenario_filter.log_names=[{str(log)}]",
-                f'scenario_filter.scenario_types={scenario_types}', 
-                'scenario_filter.limit_total_scenarios=2',  # use n total scenarios
-                'scenario_filter.remove_invalid_goals=true',  # use 1 scenario per log
+                # f'scenario_filter.scenario_types={scenario_types}', 
+                f'scenario_filter.limit_total_scenarios={num_scenarios}',  # use n total scenarios
+                'scenario_filter.remove_invalid_goals=true',  
             ]
 
             # Initialize configuration management system
@@ -159,6 +162,6 @@ for it, log in enumerate(log_list):
 
                 # Run nuBoard
                 main_nuboard(cfg)
-        except:
-            print(f'Error occurred while running NuPlan for log: {log}')
-            continue
+        # except:
+        #     print(f'Error occurred while running NuPlan for log: {log}')
+        #     continue

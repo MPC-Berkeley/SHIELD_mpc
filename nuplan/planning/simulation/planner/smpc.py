@@ -78,7 +78,7 @@ class SMPC():
         if self.config['collision_avoidance_method'] == 'obca':
             self.tight=2.7
         elif self.config['collision_avoidance_method'] == 'affine':
-            self.tight=2.7
+            self.tight=2.5
         else:
             raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}")
         self.ev_n_std = EV_NOISE_STD
@@ -176,6 +176,7 @@ class SMPC():
         self._update_tv_params([[4.47, 2]]*self.N_TV)
         self._update_red_light(None,None)
         self._update_speed_limit(self.config['v_max'])
+        self._update_leading_vehicle_params(None)
 
         if not self.offline: 
             _,_,_,_ = self._test_update_gain_and_constr_keeps()  
@@ -195,6 +196,8 @@ class SMPC():
         # else:
         #     self.slack = self.opti.variable(1)
         self.redlight = self.opti.parameter(2,1)
+        self.lead_vehicle_s = self.opti.parameter(1)
+
         # Uncomment next line for disturbance feedback when using Gurobi. 
         # Runs slow with Ipopt (default)
         # M=[[[self.opti.variable(1, 2) for n in range(t)] for t in range(self.N)] for j in range(self.N_modes)]
@@ -324,6 +327,9 @@ class SMPC():
         self.nom_z = nom_z
         nom_s=ca.vec(nom_z.reshape((2,-1))[0,:])
         nom_z_diff=ca.vec(ca.diff(nom_z.reshape((2,-1)),1,1))
+        #collision avoidance with the lead vehicle
+        self.lead_vehicle_constr = nom_s[-1]<= self.lead_vehicle_s-self.s0
+        self.opti.subject_to(self.lead_vehicle_constr) #s_{N|t} <= s_{lead|t}
         # cost+=-2.7*self.Q_cost*ca.sum1(nom_s) +2.*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -2.5, 2)
         cost += -0.1*self.Q_cost*ca.sum1(nom_s) + 0.2*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -4, 3.5)
         cost += self.R_cost*0.02*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates
@@ -362,7 +368,7 @@ class SMPC():
                 self.opti.subject_to(redlight_obca_lmbd[:,t-1] >= 0)
         elif self.config['collision_avoidance_method'] == 'affine':
             for t in range(1,self.N):
-                self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-1))
+                self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-self.s0-0.5))
         else:  
             raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}")
         for k in range(self.N_TV):
@@ -662,6 +668,7 @@ class SMPC():
                 #TODO: if g1_inf norm prediction
                 # l1_duals=[[[[np.linalg.norm(sol.value(self.opti.dual(self.l1_constr[k][j][t][0])),ord=np.inf)] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
                 ca_duals=[[[[sol.value(self.opti.dual(self.ca_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
+            leading_vehicle_active = (sol.value(self.opti.dual(self.lead_vehicle_constr)) > 1e-3)
             is_opt     = True
             # Debug checking for non-zero gains K
             # eps = 1e-3
@@ -718,6 +725,7 @@ class SMPC():
             t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall'))
             solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum
             is_opt = False
+            leading_vehicle_active = False
         t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
         t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall'))
         # solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum
@@ -726,6 +734,7 @@ class SMPC():
         sol_dict['u_control']  = u_control  # control input to apply based on solution
         sol_dict['u_opt']      = u_opt      # optimal control sequence
         sol_dict['optimal']    = is_opt      # whether the solution is optimal or not
+        sol_dict['leading_vehicle_active'] = leading_vehicle_active
         if is_opt:
             sol_dict['h_opt']=h_opt
             sol_dict['M_opt']=M_opt
@@ -782,6 +791,7 @@ class SMPC():
         self._update_tv_params(update_dict['tv_params'])
         self._update_red_light(update_dict['red_light'],update_dict['ego_sim_initial_state'])
         self._update_speed_limit(update_dict['speed_limit'])
+        self._update_leading_vehicle_params(update_dict['leading_vehicle'])
         if not self.offline:
             if 'l1_duals' in update_dict.keys():
                 if 'canon_prob' in update_dict.keys():
@@ -803,7 +813,11 @@ class SMPC():
         #     # print('warm starting'.center(80,'#'))
         #     self.opti.set_initial(self.vars_pol,self.vars_ws)
         #     self.opti.set_initial(self.vars_epi,self.vars_epi_ws)
-
+    def _update_leading_vehicle_params(self, leading_vehicle=None):
+        if leading_vehicle is None:
+            self.opti.set_value(self.lead_vehicle_s, 1e6)
+        else:
+            self.opti.set_value(self.lead_vehicle_s, leading_vehicle.progress)
     def _update_speed_limit(self, speed_limit=None):
         if speed_limit is None:
             self.opti.set_value(self.V_MAX, self.config['v_max'])

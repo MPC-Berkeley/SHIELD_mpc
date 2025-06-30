@@ -203,6 +203,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         print(f'[SMPCPlanner] compute_planner_trajectory: {self.t} iteration')
         # Ego current state
         ego_state, observations = current_input.history.current_state
+        detection_track_tokens = [v.metadata.track_token for v in observations.tracked_objects.tracked_objects]
         # print('compute_planner_trajectory:', ego_state.center.point.x, ego_state.center.point.y, ego_state.dynamic_car_state.center_velocity_2d.magnitude())
         if not self._initialized:
             self.x0 = copy.deepcopy(ego_state)
@@ -296,7 +297,16 @@ class SMPCPlanner(AbstractIDMPlanner):
                 preds_dict = {'preds': pred, 'prob': prob, 'tv_params': tv_params, 'tv_psi': tv_psi, 'tv_track_tokens': tv_track_tokens}
                 mm_preds = preds_dict
                 update_dict = self.get_update_dict(current_input, preds_dict, tv_paths_se2)
-        update_dict.update({'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1/2),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
+        leading_vehicle = self.leading_idm_agent(ego_state,observations,current_input)
+        if leading_vehicle is not None and list(leading_vehicle.keys())[0] not in preds_dict['tv_track_tokens']:
+            leading_vehicle = leading_vehicle[list(leading_vehicle.keys())[0]]
+            leading_vehicle_ind = detection_track_tokens.index(list(leading_vehicle.keys())[0]) #check if the leading agent is in the observations
+            leading_vehicle_obs = observations.tracked_objects.tracked_objects[leading_vehicle_ind]
+            #get veolicty
+            v = leading_vehicle_obs.velocity.magnitude() #magnitude of the velocity 
+            #terminal s of the leading agent (i.e. constant velocity)
+            leading_vehicle.progress += self.smpc.N * self.config['dt'] * v 
+        update_dict.update({'leading_vehicle':leading_vehicle,'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1/2),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
 
         if self.config['eval_mode']:
             #update canonical form matrices
@@ -375,6 +385,10 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.ego_opt_sols_full_state.append(self.get_ego_full_state())
             self.smpc_params.append(self.smpc.opti.value(self.smpc.params))
             self.l1_active.append(l1_dual_active)
+            if leading_vehicle is not None:
+                pred.update({'leading_vehicle':leading_vehicle}) #update the leading agent in the prediction
+            pred.update({'leading_vehicle_active':sol['leading_vehicle_active']}) #update the leading agent active status in the prediction
+
             if not self.config['eval_mode']:
                 fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"])
             else:
@@ -398,6 +412,8 @@ class SMPCPlanner(AbstractIDMPlanner):
             # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True) 
         else:
             print('No optimal solution found') 
+            if leading_vehicle is not None:
+                preds_dict.update({'leading_vehicle':leading_vehicle, 'leading_vehicle_active':False}) #update the leading agent in the prediction
             fig = self.visualize_scene(current_input, preds_dict, 0)
             self.figs_w_preds.append(fig)
             
@@ -535,6 +551,27 @@ class SMPCPlanner(AbstractIDMPlanner):
                 return self._ego_path.get_state_at_progress(ego_progress+relative_distance)
         return None
     
+    def leading_idm_agent(self,ego_state,observations,current_input):
+        # Create occupancy map
+        occupancy_map, unique_observations = self._construct_occupancy_map(ego_state, observations)
+        ego_progress = self._ego_path_linestring.project(Point(*ego_state.center.point.array))
+        ego_idm_state = IDMAgentState(progress=ego_progress, velocity=ego_state.dynamic_car_state.center_velocity_2d.x)
+        # Traffic light handling
+        traffic_light_data = current_input.traffic_light_data
+        self._annotate_occupancy_map(traffic_light_data, occupancy_map)
+        intersecting_agents = occupancy_map.intersects(self._get_expanded_ego_path(ego_state, ego_idm_state))
+        # Check if there are agents intersecting the ego's baseline
+        if intersecting_agents.size > 0:
+            # Extract closest object
+            intersecting_agents.insert(self._ego_token, ego_state.car_footprint.geometry)
+            nearest_id, nearest_agent_polygon, relative_distance = intersecting_agents.get_nearest_entry_to(
+                self._ego_token
+            )
+
+            return {nearest_id: self._get_leading_idm_agent(ego_state, unique_observations[nearest_id], relative_distance)}
+        
+        return None
+    
     def s2xy(self,s_arr):
         '''
         Convert s to x,y
@@ -588,6 +625,23 @@ class SMPCPlanner(AbstractIDMPlanner):
         )
         ax.add_patch(ego_rect)
         self.visualize_road_boundaries(ax, ego_x, ego_y, self._map_api, search_radius=100)
+        if 'leading_vehicle' in preds:
+            ego_state0, _ = current_input.history.current_state
+            vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
+            # Initialize planned trajectory with current state
+            current_time_point = ego_state0.time_point
+            projected_ego_state = self._idm_state_to_ego_state(preds['leading_vehicle'], current_time_point, vehicle_parameters)
+            lead_vehicle_active = preds['leading_vehicle_active']
+            # Draw ellipsoid for the leading agent
+            leading_vehicle_ellipsoid = patches.Ellipse(
+                (projected_ego_state.center.point.x, projected_ego_state.center.point.y),
+                projected_ego_state.box.length,
+                projected_ego_state.box.width,
+                angle=projected_ego_state.center.heading*180/np.pi,
+                fill=True,
+                color='red' if lead_vehicle_active else 'yellow')
+            
+
 
         # ---- Add Road Lanes Visualization using route roadblocks ----
         if hasattr(self, '_route_roadblocks'):
@@ -874,118 +928,66 @@ class SMPCPlanner(AbstractIDMPlanner):
         """Callback to be executed at the end of the simulation."""
         #Delete SMPC instance for serialization
         #Store the observation, preds, dual_class, expert_action in a pickle form
-        print('End of simulation. Saving data...')
-        try:
-            if not self.config['eval_mode']:
-                save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
-                filepath = save_dir + '.gz'
-                if not os.path.exists(filepath): 
-                    with gzip.open(filepath, 'wb') as f:
-                        # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print('End of simulation')
+        if self.t >= 5:
+            try:
+                print('Saving data...')
+                if not self.config['eval_mode']:
+                    save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
+                    filepath = save_dir + '.gz'
+                    if not os.path.exists(filepath): 
+                        with gzip.open(filepath, 'wb') as f:
+                            # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                            # if logname is not None:
+                            pickle.dump({'log_iter':[self.log_iter],
+                                        'logname': [logname], 
+                                        'scenario_id': [self.scenario_id], 
+                                        'ego_opt_sol':[self.ego_opt_sols_full_state], 
+                                        'ego_cl_traj': [self.cl_ego_traj], 
+                                        'ego_planned_trajs':[self.ego_planned_trajs],
+                                        'iteration_data': [self.iteration_data], 
+                                        'optimal_duals': [self.expert_action],
+                                        'dual_class':[self.dual_class],
+                                        'l1_active': [self.l1_active],
+                                        'preds':[self.preds],
+                                        'agent_params':[self.pred_agent_params],
+                                        'smpc_params':[self.smpc_params]}, 
+                                        f, protocol=pickle.HIGHEST_PROTOCOL)
+                            # else:
+                            #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    else:
+                        with gzip.open(filepath, 'rb') as f:
+                            data = pickle.load(f)
+                        data['optimal_duals'].append(self.expert_action)
+                        data['scenario_id'].append(self.scenario_id)
+                        # data['observation'].append(self.observation)
+                        data['iteration_data'].append(self.iteration_data)
+                        data['dual_class'].append(self.dual_class)
+                        data['ego_cl_traj'].append(self.cl_ego_traj)
+                        data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
+                        data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
+                        data['preds'].append(self.preds)
+                        data['l1_active'].append(self.l1_active)
+                        data['agent_params'].append(self.pred_agent_params)
+                        data['log_iter'].append(self.log_iter)
+                        data['smpc_params'].append(self.smpc_params)
                         # if logname is not None:
-                        pickle.dump({'log_iter':[self.log_iter],
-                                    'logname': [logname], 
-                                    'scenario_id': [self.scenario_id], 
-                                    'ego_opt_sol':[self.ego_opt_sols_full_state], 
-                                    'ego_cl_traj': [self.cl_ego_traj], 
-                                    'ego_planned_trajs':[self.ego_planned_trajs],
-                                    'iteration_data': [self.iteration_data], 
-                                    'optimal_duals': [self.expert_action],
-                                    'dual_class':[self.dual_class],
-                                    'l1_active': [self.l1_active],
-                                    'preds':[self.preds],
-                                    'agent_params':[self.pred_agent_params],
-                                    'smpc_params':[self.smpc_params]}, 
-                                    f, protocol=pickle.HIGHEST_PROTOCOL)
-                        # else:
-                        #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                else:
-                    with gzip.open(filepath, 'rb') as f:
-                        data = pickle.load(f)
-                    data['optimal_duals'].append(self.expert_action)
-                    data['scenario_id'].append(self.scenario_id)
-                    # data['observation'].append(self.observation)
-                    data['iteration_data'].append(self.iteration_data)
-                    data['dual_class'].append(self.dual_class)
-                    data['ego_cl_traj'].append(self.cl_ego_traj)
-                    data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
-                    data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
-                    data['preds'].append(self.preds)
-                    data['l1_active'].append(self.l1_active)
-                    data['agent_params'].append(self.pred_agent_params)
-                    data['log_iter'].append(self.log_iter)
-                    data['smpc_params'].append(self.smpc_params)
-                    # if logname is not None:
-                    data['logname'].append(logname)
-                    with gzip.open(filepath, 'wb') as f:
-                        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                        f.flush()
-                print('Data saved to', filepath)
-                # Save the list of figures as video
-                # Define the codec and create a VideoWriter object
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
-
-                # check if the directory exists, if not create it
-                if not os.path.exists(vid_save_dir):
-                    os.makedirs(vid_save_dir) 
-                    print(f"Created directory: {vid_save_dir}")
-
-                out = cv2.VideoWriter(vid_save_dir+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
-
-                for fig in self.figs_w_preds:
-                    # Convert the figure to an image
-                    fig.canvas.draw()
-                    img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                    img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-
-                    # Write the image to the video file
-                    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                    out.write(img_bgr)
-
-                # Release the VideoWriter object
-                out.release()
-                print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.smpc.N}_{self.log_iter}.mp4")
-                # pdb.set_trace()
-            else:
-                #in evaluation mode
-                save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
-                filepath = save_dir + '.gz'
-                if not os.path.exists(filepath): 
-                    with gzip.open(filepath, 'wb') as f:
-                        # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                        # if logname is not None:
-                        pickle.dump({'log_iter':[self.log_iter],'logname': [logname], 'scenario_id': [self.scenario_id], 'ego_opt_sol':[self.ego_opt_sols_full_state], 'ego_cl_traj': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data],'preds':[self.preds],'agent_params':[self.pred_agent_params]}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                        # else:
-                        #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                else:
-                    with gzip.open(filepath, 'rb') as f:
-                        data = pickle.load(f)
-                    data['scenario_id'].append(self.scenario_id)
-                    # data['observation'].append(self.observation)
-                    data['iteration_data'].append(self.iteration_data)
-                    data['ego_cl_traj'].append(self.cl_ego_traj)
-                    data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
-                    data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
-                    data['preds'].append(self.preds)
-                    data['agent_params'].append(self.pred_agent_params)
-                    data['log_iter'].append(self.log_iter)
-                    # if logname is not None:
-                    data['logname'].append(logname)
-                    with gzip.open(filepath, 'wb') as f:
-                        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                        f.flush()
-                    
+                        data['logname'].append(logname)
+                        with gzip.open(filepath, 'wb') as f:
+                            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                            f.flush()
+                    print('Data saved to', filepath)
                     # Save the list of figures as video
-                    # Define the codebluec and create a VideoWriter object
-                    # pdb.set_trace()
+                    # Define the codec and create a VideoWriter object
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                     vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
+
                     # check if the directory exists, if not create it
                     if not os.path.exists(vid_save_dir):
                         os.makedirs(vid_save_dir) 
                         print(f"Created directory: {vid_save_dir}")
-                    out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+
+                    out = cv2.VideoWriter(vid_save_dir+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
 
                     for fig in self.figs_w_preds:
                         # Convert the figure to an image
@@ -999,9 +1001,66 @@ class SMPCPlanner(AbstractIDMPlanner):
 
                     # Release the VideoWriter object
                     out.release()
-                    # pdb.set_trace() 
-        except:
-            pdb.set_trace()    
+                    print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.smpc.N}_{self.log_iter}.mp4")
+                    # pdb.set_trace()
+                else:
+                    #in evaluation mode
+                    save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
+                    filepath = save_dir + '.gz'
+                    if not os.path.exists(filepath): 
+                        with gzip.open(filepath, 'wb') as f:
+                            # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                            # if logname is not None:
+                            pickle.dump({'log_iter':[self.log_iter],'logname': [logname], 'scenario_id': [self.scenario_id], 'ego_opt_sol':[self.ego_opt_sols_full_state], 'ego_cl_traj': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data],'preds':[self.preds],'agent_params':[self.pred_agent_params]}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                            # else:
+                            #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    else:
+                        with gzip.open(filepath, 'rb') as f:
+                            data = pickle.load(f)
+                        data['scenario_id'].append(self.scenario_id)
+                        # data['observation'].append(self.observation)
+                        data['iteration_data'].append(self.iteration_data)
+                        data['ego_cl_traj'].append(self.cl_ego_traj)
+                        data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
+                        data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
+                        data['preds'].append(self.preds)
+                        data['agent_params'].append(self.pred_agent_params)
+                        data['log_iter'].append(self.log_iter)
+                        # if logname is not None:
+                        data['logname'].append(logname)
+                        with gzip.open(filepath, 'wb') as f:
+                            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                            f.flush()
+                        
+                        # Save the list of figures as video
+                        # Define the codebluec and create a VideoWriter object
+                        # pdb.set_trace()
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
+                        # check if the directory exists, if not create it
+                        if not os.path.exists(vid_save_dir):
+                            os.makedirs(vid_save_dir) 
+                            print(f"Created directory: {vid_save_dir}")
+                        out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+
+                        for fig in self.figs_w_preds:
+                            # Convert the figure to an image
+                            fig.canvas.draw()
+                            img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                            img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+                            # Write the image to the video file
+                            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                            out.write(img_bgr)
+
+                        # Release the VideoWriter object
+                        out.release()
+                        # pdb.set_trace() 
+            except:
+                pdb.set_trace()    
+        else:
+            pass
+        
         #Delete for memory management and lightweight serialization
         del self.smpc
         self.expert_action = []
