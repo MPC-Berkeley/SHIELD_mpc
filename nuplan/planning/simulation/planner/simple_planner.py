@@ -70,7 +70,7 @@ class SimplePlanner(AbstractPlanner):
                 self.acceleration,
             ),
             tire_steering_angle=self.steering_angle,
-            is_in_auto_mode=True,
+            t=True,
             time_point=ego_state.time_point,
         )
         trajectory: List[EgoState] = [state]

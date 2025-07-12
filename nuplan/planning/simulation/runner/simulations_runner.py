@@ -226,41 +226,41 @@ class SimulationRunner(AbstractRunner):
             add_ind = V - closest_vehicles_indices.shape[0]
             closest_vehicles_indices = torch.hstack([closest_vehicles_indices,closest_vehicles_indices[:add_ind]])
 
-        # # Compute relative positions and angles
-        # dx = pred_gathered[:, 0, 0, 0] - ego_x
-        # dy = pred_gathered[:, 0, 0, 1] - ego_y
-        # distances = torch.sqrt(dx**2 + dy**2)
-        # angles = torch.atan2(dy, dx)  # angle from ego to target
+        # Compute relative positions and angles
+        dx = pred_gathered[:, 0, 0, 0] - ego_x
+        dy = pred_gathered[:, 0, 0, 1] - ego_y
+        distances = torch.sqrt(dx**2 + dy**2)
+        angles = torch.atan2(dy, dx)  # angle from ego to target
 
-        # # Normalize angles to [-pi, pi]
-        # angle_diff = (angles - ego_heading + math.pi) % (2 * math.pi) - math.pi
+        # Normalize angles to [-pi, pi]
+        angle_diff = (angles - ego_heading + math.pi) % (2 * math.pi) - math.pi
 
-        # # Vehicles within ±30 degrees (~0.5236 rad)
-        # fov_mask = (angle_diff.abs() <= math.radians(45))
+        # Vehicles within ±80 degrees (~0.5236 rad)
+        fov_mask = (angle_diff.abs() <= math.radians(80))
 
-        # # Sort both FOV and non-FOV by distance
-        # sorted_fov = torch.argsort(distances[fov_mask])
-        # sorted_out_fov = torch.argsort(distances[~fov_mask])
+        # Sort both FOV and non-FOV by distance
+        sorted_fov = torch.argsort(distances[fov_mask])
+        sorted_out_fov = torch.argsort(distances[~fov_mask])
 
-        # fov_indices = torch.arange(len(distances))[fov_mask][sorted_fov]
-        # out_fov_indices = torch.arange(len(distances))[~fov_mask][sorted_out_fov]
+        fov_indices = torch.arange(len(distances))[fov_mask][sorted_fov]
+        out_fov_indices = torch.arange(len(distances))[~fov_mask][sorted_out_fov]
 
-        # # Combine
-        # num_fov_veh = len(fov_indices)
-        # prioritized_indices = torch.cat([fov_indices, out_fov_indices], dim=0)
-        # # V-1 from top of prioritized list (excluding ego)
-        # top_fov_vehicles = prioritized_indices[prioritized_indices != ego_index][:V-1]
+        # Combine
+        num_fov_veh = len(fov_indices)
+        prioritized_indices = torch.cat([fov_indices, out_fov_indices], dim=0)
+        # V-1 from top of prioritized list (excluding ego)
+        top_fov_vehicles = prioritized_indices[prioritized_indices != ego_index][:V-1]
 
-        # # One more from outside FOV starting after num_fov_veh (excluding ego)
-        # if ego_index in fov_indices:
-        #     non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh-1:]
-        # else:
-        #     non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh:]
-        # if len(non_fov_rest) > 0:
-        #     extra_vehicle = non_fov_rest[:1]  # Select just one
-        #     closest_vehicles_indices = torch.cat([top_fov_vehicles, extra_vehicle])
-        # else:
-        #     closest_vehicles_indices = top_fov_vehicles  # Fallback: use only top FOV
+        # One more from outside FOV starting after num_fov_veh (excluding ego)
+        if ego_index in fov_indices:
+            non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh-1:]
+        else:
+            non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh:]
+        if len(non_fov_rest) > 0:
+            extra_vehicle = non_fov_rest[:1]  # Select just one
+            closest_vehicles_indices = torch.cat([top_fov_vehicles, extra_vehicle])
+        else:
+            closest_vehicles_indices = top_fov_vehicles  # Fallback: use only top FOV
 
         pred_output = pred_gathered[closest_vehicles_indices]
         prob_output = torch.gather(prob[closest_vehicles_indices], dim = 1, index = pred_M_ind[closest_vehicles_indices])
@@ -269,6 +269,10 @@ class SimulationRunner(AbstractRunner):
         detection_track_tokens = [v.metadata.track_token for v in observation.tracked_objects.tracked_objects]
         tv_params = []
         tv_track_tokens = []
+        if closest_vehicles_indices.shape[0] < V:
+            logger.warning(f"Only {closest_vehicles_indices.shape[0]} vehicles found, expected {V}. Creating dummy vehicles.")
+            #Fill with a dummy vehicle
+            closest_vehicles_indices = torch.cat([closest_vehicles_indices, torch.tensor([closest_vehicles_indices[-1]] * (V - closest_vehicles_indices.shape[0]))])
         for i in range(V):
             ind = closest_vehicles_indices[i]
             try:

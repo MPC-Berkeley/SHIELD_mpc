@@ -9,13 +9,13 @@ hidden_dim: 64
 normalize: True
 optimizer: Adam
 joint_dual_pred: False
-l1_pred_mode: binary #['binary', 'tertiary']
+l1_pred_mode: tertiary #['binary', 'tertiary']
 pretrain: False
 num_heads: 2
 N: 14
 dropout_prob: 0.3
 # expert_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N10_backup.pkl.gz
-expert_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N15_processed.pkl.gz
+expert_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_obca_copy_processed.pkl.gz
 
 max_replay_buffer_size: 100000
 model_save_period: 500

@@ -81,7 +81,7 @@ def build_simulations(
     logger.info('Building simulations from %d scenarios...', len(scenarios))
 
     # Build a metric metadata file
-    for scenario in scenarios:
+    for it, scenario in enumerate(scenarios):
         print(f'Scenario Type: {scenario.scenario_type}')
         # Build planners
         if pre_built_planners is None:
@@ -92,6 +92,7 @@ def build_simulations(
         else:
             planners = pre_built_planners
         for planner in planners:
+            planner.scenario_num = it #assign scenario num to the planner
             # Ego Controller
             ego_controller: AbstractEgoController = instantiate(cfg.ego_controller, scenario=scenario)
 

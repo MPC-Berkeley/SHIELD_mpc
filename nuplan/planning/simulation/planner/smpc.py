@@ -16,6 +16,8 @@ from scipy.linalg import clarkson_woodruff_transform as sketch
 from scipy.sparse import block_diag, vstack
 from scipy.sparse.linalg import lsmr, svds, lsqr
 import scipy.sparse as sp
+import torch
+from nuplan.planning.simulation.planner.dualGD import DualApproxGD
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -76,7 +78,7 @@ class SMPC():
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3)
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
         if self.config['collision_avoidance_method'] == 'obca':
-            self.tight=2.7
+            self.tight=2.5
         elif self.config['collision_avoidance_method'] == 'affine':
             self.tight=2.5
         else:
@@ -164,6 +166,7 @@ class SMPC():
         self.params = ca.vertcat(*_flatten2ca(self.params))  
         
         self.policy=self._return_policy_class()
+        # pdb.set_trace()
         self._add_constraints_and_cost()
         
         self._update_ev_initial_condition(np.array([0., 2.]), 0.)
@@ -207,7 +210,7 @@ class SMPC():
             K=[[[ ca.DM(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
         else:
             if not self.offline:
-                K4screening=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
+                K4screening=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
                 K=[[[ca.if_else(self.gain_keep[k][j][t], K4screening[k][j][t], ca.MX.zeros(1, 2), True) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
                 # K=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
                 # h=[[self.opti.variable(1) for t in range(self.N-1)] for j in range(m.prod(self.N_modes))]
@@ -227,7 +230,6 @@ class SMPC():
             self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
         else:
             #Affine
-            self.slack_vec = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[self.slack[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
             self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
         self.slack_vec = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[self.slack[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
         if self.offline:
@@ -320,7 +322,9 @@ class SMPC():
         
         
         cost = 0
-        self.opti.subject_to(self.opti.bounded(self.V_MIN, A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h, self.V_MAX))
+        # self.opti.subject_to(self.opti.bounded(self.V_MIN, A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h, self.V_MAX))
+        self.opti.subject_to(self.V_MIN<=A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h)
+        self.opti.subject_to(A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h <= self.V_MAX + self.slack[0][0][0])
         self.opti.subject_to(self.opti.bounded(self.A_MIN, h, self.A_MAX))
         
         nom_z=A@self.z_curr+B@h
@@ -328,10 +332,10 @@ class SMPC():
         nom_s=ca.vec(nom_z.reshape((2,-1))[0,:])
         nom_z_diff=ca.vec(ca.diff(nom_z.reshape((2,-1)),1,1))
         #collision avoidance with the lead vehicle
-        self.lead_vehicle_constr = nom_s[-1]<= self.lead_vehicle_s-self.s0
+        self.lead_vehicle_constr = nom_s[-1]<= self.lead_vehicle_s-self.s0 - self.ev_length*2 - 1 +self.slack[0][0][0] #s_{N|t} <= s_{lead|t} - 2*ev_length - 1 + slack
         self.opti.subject_to(self.lead_vehicle_constr) #s_{N|t} <= s_{lead|t}
         # cost+=-2.7*self.Q_cost*ca.sum1(nom_s) +2.*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -2.5, 2)
-        cost += -0.1*self.Q_cost*ca.sum1(nom_s) + 0.2*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -4, 3.5)
+        cost += -0.05*self.Q_cost*ca.sum1(nom_s) + 0.2*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -4, 3.5)
         cost += self.R_cost*0.02*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates
         if self.offline:
             self.lin_ineq_l1 = []
@@ -374,7 +378,7 @@ class SMPC():
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
-                cost += 0.03*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
+                cost += 0.04*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
                 for t in range(1, self.N):  # position at time-step 1 not a function of decision variables 
                     if self.config['collision_avoidance_method'] == 'obca':
                         '''
@@ -409,14 +413,10 @@ class SMPC():
                         # z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][:,t-1] #(180x1)
                         # A_m: (4x2), pt_w: (2x180), b_m_w: (4x30), obca_lmbd: (4x1)
                         # z = 1/ca.sqrt(2)*self.tight*ca.norm_fro(A_m @ pt_w - b_m_w) #worst-case effect of noise on y
-                        z = (1/ca.sqrt(2))*ca.sqrt(ca.sumsqr(A_m @ pt_w - b_m_w))
-
-                        self.test[k][m][t-1] = z
+                        z_norm = self.tight*(1/ca.sqrt(2))*ca.sqrt(ca.sumsqr(A_m @ pt_w - b_m_w)) #decoupling obca_lmbd by upperbounding sup_{lmbd} lmbd.T@(A_m @ pt_w - b_m_w) with 1/sqrt(2). ||z||_2 <= 1/sqrt(2)||Am@pw-bmw||_2
                         # pdb.set_trace()
                         # z = self.tight *(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][m][:,t-1] #((N-1)*x1) -- z is quadratic in theta
-                        y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][m][:,t-1] #+ 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal 
-                        self.test2[k][m][t-1] = y
-                        
+                        y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][m][:,t-1] #+ 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal                         
             
                         # Ego Frenet-to-Cartesian Jacobian
                         psi_ego = self.route(nom_s[t] + self.s0)[2]
@@ -472,14 +472,14 @@ class SMPC():
                         # delta = self.x_pos[:, t] - self.pos_tvs[k][m][:, t]
                         # norm = ca.sqrt(ca.mtimes([delta.T, self.Qs[k][m][t-1], delta]))
                         # oa_ref = self.pos_tvs[k][m][:, t] + delta / norm
-                        self.test[k][m][t-1] = diff.T @ self.Qs[k][m][t-1] @ diff
-                        self.test2[k][m][t-1] = (oa_ref- self.pos_tvs[k][m][:,t]).T @ self.Qs[k][m][t-1] @ (oa_ref - self.pos_tvs[k][m][:,t])
-                        self.test3[k][m][t-1] = (oa_ref - self.pos_tvs[k][m][:,t]).T @ self.Qs[k][m][t-1] @ (self.x_pos[:,t] - oa_ref)
+                        # self.test[k][m][t-1] = diff.T @ self.Qs[k][m][t-1] @ diff
+                        # self.test2[k][m][t-1] = (oa_ref- self.pos_tvs[k][m][:,t]).T @ self.Qs[k][m][t-1] @ (oa_ref - self.pos_tvs[k][m][:,t])
+                        # self.test3[k][m][t-1] = (oa_ref - self.pos_tvs[k][m][:,t]).T @ self.Qs[k][m][t-1] @ (self.x_pos[:,t] - oa_ref)
                         
                         # oa_ref+=(self.x_pos[:,0]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,0]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,0]-self.pos_tvs[k][m][:,t]))**(0.5)
                         # Coefficient of random variables in affine chance constraint
-                        z=self.tight*((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:]-int(l==k)*self.dpos_tvs[k][m][t-1]@E_tv[k][m][2*t,:] for l in range(self.N_TV)]))).T
-                        z = ca.sqrt(ca.sumsqr(z))
+                        z=((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:]-int(l==k)*self.dpos_tvs[k][m][t-1]@E_tv[k][m][2*t,:] for l in range(self.N_TV)]))).T
+                        z_norm = self.tight*ca.sqrt(ca.sumsqr(z))
                         # z=self.tight*((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:] for l in range(self.N_TV)]))).T
                         # pdb.set_trace()
                         # constant term in affine chance constraint self.slack[k][m][t-1]+
@@ -493,18 +493,17 @@ class SMPC():
                         if self.offline:
                             if self.config['collision_avoidance_method'] == 'obca':
                                 # self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
-                                self.ca_constr[k][j][t-1]+=[z<=y+self.slack[k][m][t-1],0<=y]
+                                self.ca_constr[k][j][t-1]+=[z_norm<=y+self.slack[k][m][t-1],0<=y]
                                 #obca related constraints 
                                 self.opti.subject_to((A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]) <= 1)
                                 self.opti.subject_to(obca_lmbd[k][m][:,t-1] >= 0)
+                                self.ca_ineq.append(z_norm-y)
                             elif self.config['collision_avoidance_method'] == 'affine':
                                 # self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z+1e-4)<=y, 0<=y]
-                                self.ca_constr[k][j][t-1]+=[z<=y+self.slack[k][m][t-1],0<=y]
+                                self.ca_constr[k][j][t-1]+=[z_norm<=y+self.slack[k][m][t-1],0<=y+self.slack[k][m][t-1]]
+                                self.ca_ineq.append(ca.vertcat(z,y))
                             else:
                                 NotImplementedError("Collision avoidance method not implemented")
-
-                            self.ca_ineq.append(ca.vertcat(z,y)) # #C -> 1
-                            
                             #Impose all ca constraints
                             self.opti.subject_to(self.ca_constr[k][j][t-1][0])
                             self.opti.subject_to(self.ca_constr[k][j][t-1][1])
@@ -526,15 +525,15 @@ class SMPC():
                             # collision avoidance constraint screening
                             if self.config['collision_avoidance_method'] == 'obca':
                                 # obca related constraint screening
-                                obca_constr = ca.vertcat(*[y-ca.sqrt(z.T@z + 1e-4), y])
-                                obca_dual_constr = ca.vertcat(1 + self.slack - (A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
+                                obca_constr = ca.vertcat(*[y+self.slack[k][m][t-1] - z_norm,y])
+                                obca_dual_constr = ca.vertcat(1 - (A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
                                 obca_switch=ca.if_else(self.constr_keep[k][j][t-1], obca_constr, ca.DM.ones(*obca_constr.shape))
                                 obca_switch_dual=ca.if_else(self.constr_keep[k][j][t-1], obca_dual_constr, ca.DM.ones(*obca_dual_constr.shape))
                                 self.opti.subject_to(obca_switch>=0)
                                 self.opti.subject_to(obca_switch_dual>=0)
                             elif self.config['collision_avoidance_method'] == 'affine':
                                 # soc_constr=ca.vertcat(y,y**2-z@z.T)
-                                soc_constr=ca.vertcat(y**2-z.T@z, y)
+                                soc_constr=ca.vertcat(*[y+self.slack[k][m][t-1] - z_norm,y])
                                 soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM(*soc_constr.shape), True)
                                 self.opti.subject_to(soc_switch>=0)
                             else:
@@ -549,7 +548,7 @@ class SMPC():
                                 self.opti.subject_to(self.l1_constr[k][m][t-1][0])
                                 self.opti.subject_to(self.l1_constr[k][m][t-1][1])
 
-                                self.lin_ineq_l1+=[self.l1_constr[k][m][t-1][0]] #only the first constraint: g1
+                                self.lin_ineq_l1+=[K[k][m][t,2*t:2*(t+1)]-self.gain_l1[k][m][t-1]] #only the first constraint: g1
                                 cost += self.l1_lmbd*ca.sum1(ca.vec(self.gain_l1[k][m][t-1]))
                                 self.opti.subject_to(soc_constr>0)
                         else:
@@ -575,62 +574,48 @@ class SMPC():
             self.f_l_i_c = ca.Function("lin_ineq", [self.vars_pol,self.params, self.V_MAX], self.lin_ineq_constr)
 
             # F\theta < =f
-            self.F, self.f = ca.jacobian(ca.vertcat(*self.f_l_i_c(self.vars_pol,self.params,self.V_MAX)),self.vars_pol), ca.vertcat(*self.f_l_i_c(ca.DM(*self.vars_pol.shape),self.params, self.V_MAX))
-            self.f_l_i_l1 =ca.Function("l1_ineq", [self.vars_pol,self.vars_epi],self.lin_ineq_l1)
+            self.F, self.f = ca.jacobian(ca.vertcat(*self.f_l_i_c(self.vars_pol,self.params,self.V_MAX)),self.vars_pol), -ca.vertcat(*self.f_l_i_c(ca.DM(*self.vars_pol.shape),self.params, self.V_MAX))
+
             # L\theta <= psi
+            self.f_l_i_l1 =ca.Function("l1_ineq", [self.vars_pol,self.vars_epi],self.lin_ineq_l1)
             self.L = ca.jacobian(ca.vertcat(*self.f_l_i_l1(self.vars_pol,self.vars_epi)), self.vars_pol)
 
-            # if self.config['collision_avoidance_method'] == 'obca':
-            #     self.f_ca_i = ca.Function("ca_ineq", [self.vars_pol, self.params], self.ca_ineq)
-            # else:
-            self.f_ca_i = ca.Function("ca_ineq", [self.vars_pol, self.params, self.slack_vec], self.ca_ineq)
+            self.f_ca_i = ca.Function("ca_ineq", [self.vars_pol, self.params], self.ca_ineq)
 
             # C\theta + c \in K_1 x K_2 x .................
-            # if self.config['collision_avoidance_method'] == 'obca':
-            #     self.C =  (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params))
-            #     self.c = self.f_ca_i(ca.DM(*self.vars_pol.shape), self.params)
-            # else:
-            self.C =  (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params,self.slack_vec))
-            self.c = self.f_ca_i(ca.DM(*self.vars_pol.shape), self.params, ca.DM.zeros(*self.slack_vec.shape))
-            # if self.config['collision_avoidance_method'] == 'obca': 
-            #     self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params, self.slack], [cost])
-            #     self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params, 0), self.vars_pol)
-            #     self.d         = self.f_cost(ca.DM(*self.vars_pol.shape),ca.DM(*self.vars_epi.shape),self.params,0)
-            # else:
-            self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params, self.slack_vec], [cost])
-            self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params, ca.DM.zeros(*self.slack_vec.shape)), self.vars_pol)
-            self.d         = self.f_cost(ca.DM(*self.vars_pol.shape),ca.DM(*self.vars_epi.shape),self.params,ca.DM.zeros(*self.slack_vec.shape))
-            # else:
-            #     self.C =  (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params))
-            #     self.c = self.f_ca_i(ca.DM(*self.vars_pol.shape), self.params)
+            self.C =  (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params))
+            self.c = self.f_ca_i(ca.DM.zeros(*self.vars_pol.shape), self.params)
 
-            #     self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params], [cost])
-            #     self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params), self.vars_pol)
-            #     self.d         = self.f_cost(ca.DM(*self.vars_pol.shape),ca.DM(*self.vars_epi.shape),self.params)
-            
+            self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params, self.slack_vec], [cost])
+            #Here, ca.hessian outputs hessian, J_grad.
+            self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params, ca.DM.zeros(*self.slack_vec.shape)), self.vars_pol)
+            self.f_hessian = ca.Function("hessian", [self.vars_pol, self.vars_epi, self.params, self.slack_vec], [self.Q, self.p])
+            self.d         = self.f_cost(ca.DM.zeros(*self.vars_pol.shape),ca.DM.zeros(*self.vars_epi.shape),self.params,ca.DM.zeros(*self.slack_vec.shape))
+
         else:
             #Precompute functions for constraints and variable screening
-            vars_epi = ca.DM.zeros(2*(self.N-1)*self.prod(self.N_modes)*self.N_TV,1)            
-            self.F_fn = ca.Function('F_fn', [self.vars_pol4screening, self.params], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_c'](self.vars_pol4screening,self.params,self.V_MAX)),self.vars_pol4screening)])
+            vars_epi = ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1)    
+            self.F_fn = ca.Function('F_fn', [self.vars_pol4screening, self.params, self.V_MAX], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_c'](self.vars_pol4screening,self.params,self.V_MAX)),self.vars_pol4screening)])
             self.L_fn = ca.Function('L_fn', [self.vars_pol4screening], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_l1'](self.vars_pol4screening,vars_epi)), self.vars_pol4screening)])
-            self.C_fn = ca.Function('C_fn',[self.params],[ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape))])
-            C = self.C_fn(np.ones(self.params.shape))
+            self.C_fn = ca.Function('C_fn',[self.params, self.slack_vec],[ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape))])
+            C = self.C_fn(np.ones(self.params.shape),ca.DM.zeros(*self.slack_vec.shape))  # Evaluate C_fn to get the shape and non-zero indices
             self.C_shape = C.shape
             self.nonzero_inds = np.nonzero(np.ravel(C,order='F'))[0]
             # Get the row and column indices of the non-zero elements in the sparse matrix
             self.row_indices, self.col_indices = np.unravel_index(self.nonzero_inds, self.C_shape,order='F')
             nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds]
-            self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params],[nonzero_vec])
+            self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[nonzero_vec])
             self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))])
-            self.cost_hessian_fn = ca.Function('cost_hessian_fn', [self.vars_pol4screening, self.params], list(ca.hessian(self.canon_prob_fn['f_cost'](self.vars_pol4screening,vars_epi,self.params), self.vars_pol4screening)))
+            self.cost_hessian_fn = ca.Function('cost_hessian_fn', [self.vars_pol4screening, self.params, self.slack_vec], list(ca.hessian(self.canon_prob_fn['f_cost'](self.vars_pol4screening,vars_epi,self.params,self.slack_vec), self.vars_pol4screening)))
 
     def _set_canon_form_mats(self):
         #In online mode, vars_epi is not defined. So, set it to zero
-        self.F, self.f = self.F_fn(ca.DM(*self.vars_pol4screening.shape),self.opti.value(self.params)), ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM(*self.vars_pol4screening.shape),self.opti.value(self.params)))
+        self.F, self.f = self.F_fn(ca.DM(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)))
 
         self.L = self.L_fn(ca.DM(*self.vars_pol4screening.shape))
         # self.C = self.C_fn(self.opti.value(self.params))
-        C = self.C_fn_nonzero(self.opti.value(self.params))
+        C = self.C_fn_nonzero(self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape))  # Evaluate C_fn to get the non-zero elements
+
         #construct sparse C matrix
         st = time.time()
         self.C = sp.csr_matrix((np.array(C).reshape(-1), (self.row_indices, self.col_indices)), shape=self.C_shape)
@@ -640,8 +625,9 @@ class SMPC():
 
         #Here, ca.hessian outputs hessian, J_grad. 
         #J_grad = Q*theta + p. Thus, if we evaluate J_grad with theta = 0, we get p. Note that hessian is not dependent on theta
-        self.Q, self.p = self.cost_hessian_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params))
-        # vars_epi = ca.DM.zeros(2*(self.N-1)*self.prod(self.N_modes)*self.N_TV,1)
+        # self.Q, self.p = self.cost_hessian_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape))
+        self.Q, self.p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1)    ,self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape))
+        # vars_epi = ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1)    
         # self.d = self.canon_prob_fn['f_cost'](ca.DM(*self.vars_pol4screening.shape),vars_epi,self.opti.value(self.params))
 
     def solve(self,first_solve=False):
@@ -680,11 +666,11 @@ class SMPC():
             #                 print('Non-zero gain found in test')
             #                 pdb.set_trace()
 
-            # eigs = np.linalg.eig(sol.value(self.Q).toarray())
-            # largest_eig = np.max(eigs[0])
-            # smllest_eig = np.min(eigs[0])
-            # print(f'Largest Eigenvalue: {largest_eig}')
-            # print(f'Smallest Eigenvalue: {smllest_eig}')
+            eigs = np.linalg.eig(sol.value(self.Q).toarray())
+            largest_eig = np.max(eigs[0])
+            smllest_eig = np.min(eigs[0])
+            print(f'Largest Eigenvalue: {largest_eig}')
+            print(f'Smallest Eigenvalue: {smllest_eig}')
             # print(eigs[0])
             # pdb.set_trace()
         except:
@@ -711,6 +697,7 @@ class SMPC():
                 nom_z = self.opti.debug.value(self.nom_z).reshape((-1,2)).T
                 nom_z[0,:] += s0
             else:
+                pdb.set_trace()
                 u_control  = self.u_backup
                 u_opt = np.array([self.u_backup]*(self.N-1)).reshape((1,-1))
                 accumulated_dynamics = []
@@ -758,7 +745,8 @@ class SMPC():
             constr_keep=[[self.opti.value(self.constr_keep[k][j]) for j in range(len(self.mode_map))] for k in range(self.N_TV)]
             print(f'Gain Keep: {gain_keep}')
             print(f'Constr Keep: {constr_keep}')
-
+            sol_dict['gain_keep'] = gain_keep
+            sol_dict['constr_keep'] = constr_keep
         return sol_dict
 
     def check_update_dict(self,update_dict):
@@ -895,7 +883,7 @@ class SMPC():
         Returns dictionary containing canonical form of the problem (offline mode only)
         '''
         canon_prob_fn ={}
-        canon_prob_fn.update({'f_l_i_c':self.f_l_i_c, 'f_l_i_l1': self.f_l_i_l1, 'f_ca_i':self.f_ca_i, 'f_cost':self.f_cost})
+        canon_prob_fn.update({'f_l_i_c':self.f_l_i_c, 'f_l_i_l1': self.f_l_i_l1, 'f_ca_i':self.f_ca_i, 'f_hessian':self.f_hessian,'f_cost':self.f_cost})
         return canon_prob_fn
     
     def _get_canon_form_fns_precomputed(self):
@@ -925,18 +913,17 @@ class SMPC():
             # Selection matrix for the "non-zero" mu and g1 duals
             # S1 = np.diag(ca_duals) #if mu_tilde=1, then mu!=0. elif mu_tilde=0, then mu = 0
             mu_dim = 2*self.N * (self.N_TV+1) + 1
-            # S1= np.kron(np.diag(ca_duals),np.eye(mu_dim)) #70 x 70 vs 181*70 x 181*70
             self.S1 = sp.kron(sp.diags(ca_duals,format='csr'),sp.eye(mu_dim,format='csr')) #70 x 70 vs 181*70 x 181*70
             #TODO: if g1_inf norm prediction
-            S2 = np.kron(np.diag(1-l1_duals),np.eye(2)) #2: disturbance feedback gain w.r.t. each TV's position and velocity
-            
+            # S2 = np.kron(np.diag(l1_duals),np.eye(2)) #2: disturbance feedback gain w.r.t. each TV's position and velocity
+            S2 = np.diag(l1_duals)
             self.S2 = sp.csr_matrix(S2)
             # self.S2 = sp.diags(1-l1_duals,format='csr') #if g1_tilde=1, then g1=0 or g1=lmbd. elif g1_tilde=0, then 0 < g1 < lmbd
             self.rho1 = 0.1
             self.rho2 = 0.1
             #Recover feasible dual solutions
             st = time.time()
-            mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C, self.p, self.f, self.c, self.S1, self.S2, self.rho1, self.rho2)
+            mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C, self.p, self.f, self.c, self.S1, self.S2, self.rho1, self.rho2, self.S1.toarray().diagonal(),self.S2.toarray().diagonal(),mu_dim)
             solve_time = time.time() - st
             print(f'Dual Approximation Time: {solve_time}')
             st = time.time()
@@ -950,7 +937,7 @@ class SMPC():
         vars_seen=set()
         if l1_duals is not None:
             #unflatten duals
-            n_modes = [1 for _ in range(self.N_TV)]
+            n_modes = [self.N_modes[k] for k in range(self.N_TV)]
             mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(self.N_TV)])))
             l1_dual_dim = [self.N-1, n_modes, self.N_TV]
             ca_dual_dim = [self.N-1, len(mode_map), self.N_TV]
@@ -1030,7 +1017,7 @@ class SMPC():
         A_sketch = S.dot(A)
         return A_sketch
 
-    def solve_dual_approximation(self,Q, L, F, C, p, f, c, S1, S2, rho1, rho2):
+    def solve_dual_approximation(self,Q, L, F, C, p, f, c, S1, S2, rho1, rho2, ca_dual, l1_dual, mu_dim):
         """
         Solves regularized dual problem via least squares with constraint projection
         Returns feasible (mu, eta, g1) approximation
@@ -1040,91 +1027,94 @@ class SMPC():
         n_mu = C.shape[0]
         n_eta = F.shape[0]
         n_g1 = L.shape[0]
+
         # Construct least squares problem 
         self.c = sp.csr_matrix(c) 
         self.p = sp.csr_matrix(p)
-        self.L = sp.csr_matrix(L)
+        self.L = sp.csr_matrix((self.l1_lmbd)*L) #Scaling by lambda as we are normalizing the l1-gain dual: \tilde{g1} = g1/lambda
         self.F = sp.csr_matrix(F)
         self.Q_inv = sp.csr_matrix(np.linalg.inv(Q))
         self.S1_sq = S1.T @ S1
         self.S2_sq = S2.T @ S2
 
-        solve_time = time.time() - st
-        print(f'[Dual Approximation] Precompute Dimensions Time: {solve_time} s')
-        # A_grad_mu = sp.hstack([self.C @ self.Q_inv @ self.C.T + 2*rho1 * S1.T @ S1, -self.C @ self.Q_inv @ self.F.T, -2 * self.C @ self.Q_inv @ self.L.T])
-        # A_grad_eta = sp.hstack([-self.F @ self.Q_inv @ self.C.T, self.F @ self.Q_inv @ self.F.T, 2 * self.F @ self.Q_inv @ self.L.T])
-        # A_grad_g1 = sp.hstack([-2 * self.L @ self.Q_inv @ self.C.T, 2 * self.L @ self.Q_inv @ self.F.T, 4 * self.L @ self.Q_inv @ self.L.T + 2*rho2 * S2.T @ S2])
-        # A = sp.vstack([A_grad_mu, A_grad_eta, A_grad_g1])
-
-        # b_grad_mu = self.c + self.C @ self.Q_inv @(self.p - self.l1_lmbd*self.L.T @np.ones((n_g1,1)))
-        # b_grad_eta = -f.reshape(-1,1) - self.F @ self.Q_inv @(self.p- self.l1_lmbd*self.L.T @np.ones((n_g1,1)))
-        # b_grad_g1 = -2*self.L @ self.Q_inv @(self.p- self.l1_lmbd*self.L.T @np.ones((n_g1,1))) + self.l1_lmbd*rho2*S2.T @ np.ones((n_g1,1))
-        # b = sp.vstack([b_grad_mu, b_grad_eta, b_grad_g1]).toarray().ravel()
-        
         # Precompute common products:
         self.C_Qinv = self.C @ self.Q_inv
         self.F_Qinv = self.F @ self.Q_inv
         self.L_Qinv = self.L @ self.Q_inv
 
         # Precompute block products:
-        A11 = self.C_Qinv @ self.C.T + 2 * rho1 * self.S1_sq
-        A12 = -self.C_Qinv @ self.F.T
-        A13 = -2 * self.C_Qinv @ self.L.T
+        A11 = self.C_Qinv @ self.C.T #+ 2 * rho1 * self.S1_sq
+        A12 = (1)*-self.C_Qinv @ self.F.T
+        A13 = (1)*-2 * self.C_Qinv @ self.L.T
 
-        A21 = -self.F_Qinv @ self.C.T
+        A21 = (1)*-self.F_Qinv @ self.C.T
         A22 = self.F_Qinv @ self.F.T
         A23 = 2 * self.F_Qinv @ self.L.T
 
-        A31 = -2 * self.L_Qinv @ self.C.T
+        A31 = (1)*-2 * self.L_Qinv @ self.C.T
         A32 = 2 * self.L_Qinv @ self.F.T
-        A33 = 4 * self.L_Qinv @ self.L.T + 2 * rho2 * self.S2_sq
+        A33 = 4 * self.L_Qinv @ self.L.T #+ 2 * rho2 * self.S2_sq
+
         # Assemble the full A matrix using sp.bmat:
         row1 = sp.hstack([A11, A12, A13], format='csr')
         row2 = sp.hstack([A21, A22, A23], format='csr')
         row3 = sp.hstack([A31, A32, A33], format='csr')
-        A = sp.vstack([row1, row2, row3], format='csr')
+        A = sp.vstack([row1, row2, row3], format='csr') #+ 1e-3 * sp.eye(A11.shape[0] + A22.shape[0] + A33.shape[0], format='csr') #add small diagonal for numerical stability
+
         # For b, cache the constant ones vector:
         ones_ng1 = np.ones((n_g1, 1))
-        self.pmvec = (self.p - self.l1_lmbd * self.L.T @ ones_ng1)
-        # self.pmvec = (self.p - 1 * self.L.T @ ones_ng1)
-        b1 = self.c + self.C_Qinv @ self.pmvec
+        self.pmvec = (self.p - self.L.T @ ones_ng1)
+        b1 = (1)*-self.c + (1)*self.C_Qinv @ self.pmvec
         b2 = -f.reshape((-1, 1)) - self.F_Qinv @ self.pmvec
-        b3 = -2 * self.L_Qinv @ self.pmvec + self.l1_lmbd * rho2 * S2.T @ ones_ng1
-        # b3 = -2 * self.L_Qinv @ self.pmvec + 1 * rho2 * S2.T @ ones_ng1
-        # Assemble b in one call:
-        b = sp.vstack([b1, b2, b3]).toarray()
+        b3 = -2 * self.L_Qinv @ self.pmvec #+ self.l1_lmbd * rho2 * S2.T @ ones_ng1
 
-        solve_time = time.time() - st
-        print(f'[Dual Approximation] Least Squares Formulation Time: {solve_time} s')
+        # Assemble b in one call:
+        b = sp.vstack([b1, b2, b3]).toarray() #right-hand side vector b in Ax=b
+
         # Solve least squares with iterative method
         reduce_w_random_rows=False
         if reduce_w_random_rows:
             n_rows = 8000
             A = self.clarkson_woodruff_transform(A,s=n_rows)
             b = self.clarkson_woodruff_transform(b,s=n_rows)
+
+        #Column selection
+        reduced_ls = True
+        if reduced_ls:
+            keep = np.concatenate([ca_dual, np.ones(n_eta),l1_dual])
+            keep_arg = np.argwhere(keep>=1).flatten() #indices of non-zero entries in keep
+            A = A[:, keep_arg] #select columns corresponding to non-zero entries in keep
+        #Least squares parameters
+        ls_tol = 1e-5
+        if reduced_ls:
+            ls_init_guess = np.zeros(A.shape[1])
+            start_idx = sum(ca_dual>0) + n_eta #num of ca_duals that are kept plus n_eta as all of eta is kept always
+            ls_init_guess[start_idx:] = 0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
+        else:
+            ls_init_guess = np.zeros(A.shape[1])
+            ls_init_guess[n_mu+n_eta:]=0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
+        ls_max_iter = 1000
+        solve_time = time.time() - st
+        print(f'[Dual Approximation] Least Squares Formulation Time: {solve_time} s')
         st = time.time()
-        pdb.set_trace()
-        x = lsqr(A, b, atol=1e-6, btol=1e-6,iter_lim=1000)[0]
+        x = lsqr(A, b, atol=ls_tol, btol=ls_tol,iter_lim=ls_max_iter,x0=ls_init_guess)[0]
         solve_time = time.time() - st
         print(f'[Dual Approximation] Least Squares Solve Time: {solve_time} s')
+
+        #Reconstruct dual
+        if reduced_ls:
+            mask = (keep>=1).astype(bool)  
+            x_full = np.zeros(mask.shape, dtype=x.dtype)
+            x_full[mask] = x 
+            x = x_full
 
         # Split variables and project to constraints
         mu = np.maximum(x[:n_mu], 0)
         eta = np.maximum(x[n_mu:n_mu+n_eta], 0)
-        g1 = np.clip(x[n_mu+n_eta:], 0, self.l1_lmbd)
-        # g1 = np.clip(x[n_mu+n_eta:], -1, 1)  # Ensure ||g||_inf <= 1
+        # g1 = x[n_mu+n_eta:]/self.l1_lmbd 
+        # g1 = np.clip(x[n_mu+n_eta:], 0, self.l1_lmbd) #||g||_inf <= 1, g>= 0          
+        g1 = np.clip(x[n_mu+n_eta:], 0, 1) #||g||_inf <= 1, g>= 0
 
-        # # #Constrained least squares
-        # ub= np.concatenate([np.ones((n_mu+n_eta))*np.inf , self.l1_lmbd*np.ones(n_g1)])
-        # st = time.time()
-        # x_star = lsq_linear(A, b.ravel(), tol=1e-6,bounds=(np.zeros(n_mu+n_eta+n_g1),ub), method='trf')
-        # x = x_star.x
-        # solve_time = time.time() - st
-        # print(f'[Dual Approximation] Constrained Least Squares Solve Time: {solve_time} s')
-
-        # mu = x[:n_mu] # mu corresponds to the first n_mu entries in x
-        # eta = x[n_mu:n_mu+n_eta] # eta corresponds to the next n_eta entries in x
-        # g1 = x[n_mu+n_eta:] # g1 corresponds to the last n_g1 entries in x
         return mu, eta, g1
 
     def _compute_gap_radius(self, f_mu, f_nu, f_g):
@@ -1145,44 +1135,45 @@ class SMPC():
         print(f'Eigenvalues: {self.largest_eig, self.smallest_eig}')    
         print(f'Eigenvalue Computation Time: {solve_time} s')
         eta, sigma = self.largest_eig**(-1), self.smallest_eig**(-1)
-        
+
         # Precompute the right-hand side product. Note: reshape inputs as column vectors.
         st = time.time()
         ones_fg = np.ones((f_g.shape[0], 1))
-        temp = (-self.C.T @ f_mu.reshape((-1, 1))
+        temp = ((1)*-self.C.T @ f_mu.reshape((-1, 1))
                 + self.p
                 + self.F.T @ f_nu.reshape((-1, 1))
-                + self.L.T @ (2 * f_g.reshape((-1, 1)) - self.l1_lmbd * ones_fg))
+                + self.L.T @ (2 * f_g.reshape((-1, 1)) -  ones_fg))
         
         # Use your precomputed blocks to form the stacked multiplication:
-        stacked_prod = sp.vstack([-self.C_Qinv, self.F_Qinv, 2 * self.L_Qinv])
+        stacked_prod = sp.vstack([(1)*-self.C_Qinv, self.F_Qinv, 2 * self.L_Qinv])
         grad_d = stacked_prod @ temp
         
         # Add the constant offset
-        grad_d += sp.vstack([-self.c, self.f.reshape((-1, 1)), np.zeros(f_g.shape).reshape((-1, 1))])
+        grad_d += sp.vstack([(1)*self.c, self.f.reshape((-1, 1)), np.zeros(f_g.shape).reshape((-1, 1))])
 
         # Form the full dual vector and compute the projected version:
         duals = np.concatenate((f_mu, f_nu, f_g)).reshape((-1, 1))
         proj_dual = duals - grad_d
         start_idx = f_mu.shape[0] + f_nu.shape[0]
         proj_dual[:start_idx] = np.maximum(proj_dual[:start_idx], 0)
+        proj_dual[start_idx:] = np.clip(proj_dual[start_idx:], 0, 1)# Ensure ||g||_inf <= 1 and g>=0
         solve_time = time.time() - st
         print(f'Gradient Computation Time: {solve_time} s')
-        # For the last block (corresponding to f_g), clip between 0 and l1_lmbd.
-        proj_dual[start_idx:] = np.clip(proj_dual[start_idx:], 0, self.l1_lmbd)
-        # proj_dual[start_idx:] = np.clip(proj_dual[start_idx:], -1, 1)  # Ensure ||g||_inf <= 1
+
         # Compute gap
         st = time.time()
         gap = np.linalg.norm(duals - proj_dual) * (1 + sigma) / eta
-        # gap = np.linalg.norm(grad_d) * self.largest_eig
         solve_time = time.time() - st
         print(f'Norm time: {solve_time} s')
         print(gap)
+        print(np.linalg.norm(duals - proj_dual))
+        print(np.linalg.norm(duals[start_idx:]-proj_dual[start_idx:]))
+        pdb.set_trace()
         return gap
     
     def _safe_screen(self,dual, gap_radius, dual_type = "ca_dual"):
             keep = 1
-            TOL = 1e-2
+            TOL = 1e-1
             if dual_type == "ca_dual":
                 # Do ca_dual sensitivity-based screen (l2 norm of mu)
                 # if np.linalg.norm(dual,ord=2) <= min(TOL, gap_radius):
@@ -1190,7 +1181,7 @@ class SMPC():
                 if np.linalg.norm(dual, ord=2) + gap_radius < TOL:
                     keep = 0
             else:
-                # Do l1_dual strong duality screen (infinity norm of g1)
+                # Do l1_dual strong duality screen (infinity norm of g1) with lambda normalization to match the canoncial form
                 if np.linalg.norm(dual,ord=np.inf) + gap_radius < 1 and np.linalg.norm(dual,ord=np.inf) - gap_radius > 0:
                     keep = 0
             return keep #output 1 or 0

@@ -116,6 +116,13 @@ def main(args):
     print(args.filepath)
     data = load_simulation_log(args.filepath)
     print(data.keys())
+    y = np.vstack(data['optimal_duals'])
+    #PCA
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=2)
+    pca.fit(y[:10000,:])
+    y_pca = pca.transform(y[10000:,:])
+    y 
     pdb.set_trace()
     # print(data['optimal_duals'])
     # print(data['observation'])

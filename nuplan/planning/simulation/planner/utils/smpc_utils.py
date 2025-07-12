@@ -83,13 +83,19 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
                 for j in range(preds_list.shape[0]):
                     o_glob[j][:,t+1] = np.array([preds_list[j,0,t,0] - ego_sim_init_state.center.point.x, preds_list[j,0,t,1]-ego_sim_init_state.center.point.y])
                     query_pt = Point(preds_list[j,0,t,0], preds_list[j,0,t,1])
-                    o[j][:,t+1] = np.array([path_to_linestring(tv_paths_se2[params['tv_track_tokens'][j]]).project(query_pt),0])
+                    if len(tv_paths_se2[params['tv_track_tokens'][j]]) > 1:
+                        o[j][:,t+1] = np.array([path_to_linestring(tv_paths_se2[params['tv_track_tokens'][j]]).project(query_pt),0])
+                    else:
+                        o[j][:,t+1] = o[j][:,t]
                     tv_psi[j][:,t+1] = params['tv_psi'][j,0,t,0]
                     if t == 0:
                         ind = observation_tokens.index(params['tv_track_tokens'][j])                    
                         o_glob[j][:,t] = np.array([observations.tracked_objects.tracked_objects[ind].box.center.x - ego_sim_init_state.center.point.x, observations.tracked_objects.tracked_objects[ind].box.center.y - ego_sim_init_state.center.point.y])
                         query_pt = Point(observations.tracked_objects.tracked_objects[ind].box.center.x, observations.tracked_objects.tracked_objects[ind].box.center.y)
-                        o[j][:,t] = np.array([path_to_linestring(tv_paths_se2[params['tv_track_tokens'][j]]).project(query_pt),0])
+                        if len(tv_paths_se2[params['tv_track_tokens'][j]]) > 1:
+                            o[j][:,t] = np.array([path_to_linestring(tv_paths_se2[params['tv_track_tokens'][j]]).project(query_pt),0])
+                        else:
+                            o[j][:,t] = np.array([0,0])
                         tv_lengths.append(params['tv_params'][j][0])
                         tv_widths.append(params['tv_params'][j][1])
                         tv_psi[j][0,0] = observations.tracked_objects.tracked_objects[observation_tokens.index(params['tv_track_tokens'][j])].box.center.heading
@@ -274,7 +280,10 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
                             else:
                                 mm_o_glob[i][n][:,t+1]=np.array([preds_list[i,n,t,0] - ego_sim_init_state.center.point.x, preds_list[i,n,t,1]-ego_sim_init_state.center.point.y])
                                 query_pt = Point(preds_list[i,n,t,0], preds_list[i,n,t,1])
-                                mm_o[i][n][:,t+1] = np.array([path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(query_pt),0])
+                                if len(tv_paths_se2[params['tv_track_tokens'][i]]) > 1:
+                                    mm_o[i][n][:,t+1] = np.array([path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(query_pt),0])
+                                else:
+                                    mm_o[i][n][:,t+1] = mm_o[i][0][:,t]
                                 psi = params['tv_psi'][i,n,t,0] #call the tv route function (0=ego, 1=tv1, 2=tv2,...)
                                 mm_tv_psi[i][n][0,t+1] = psi
                             mm_u_tvs[i][n][0,t]=u_tvs[i][:,t]
@@ -286,10 +295,16 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
                                         mm_droutes[i][n][t]=droutes_mm[i](mm_o[i][n][0,t+1])[:2]            
                                     else:
                                         mm_o_glob[i][n][:,0] = np.array([observations.tracked_objects.tracked_objects[observation_tokens.index(params['tv_track_tokens'][i])].box.center.x - ego_sim_init_state.center.point.x ,observations.tracked_objects.tracked_objects[observation_tokens.index(params['tv_track_tokens'][i])].box.center.y - ego_sim_init_state.center.point.y])
-                                        mm_o[i][n][:,0] = np.array([path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(np.array([observations.tracked_objects.tracked_objects[observation_tokens.index(params['tv_track_tokens'][i])].box.center.x, observations.tracked_objects.tracked_objects[observation_tokens.index(params['tv_track_tokens'][i])].box.center.y]))),0])
+                                        if len(tv_paths_se2[params['tv_track_tokens'][i]]) > 1:
+                                            mm_o[i][n][:,0] = np.array([path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(np.array([observations.tracked_objects.tracked_objects[observation_tokens.index(params['tv_track_tokens'][i])].box.center.x, observations.tracked_objects.tracked_objects[observation_tokens.index(params['tv_track_tokens'][i])].box.center.y]))),0])
+                                        else:
+                                            mm_o[i][n][:,0] = mm_o[i][0][:,0]
                                         mm_tv_psi[i][n][0,0] = observations.tracked_objects.tracked_objects[observation_tokens.index(params['tv_track_tokens'][i])].box.center.heading  
                                         #generate route functions
-                                        s_arr = [mm_o[i][n][0,0]] + [path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) for k in range(1,params['N'])]
+                                        if len(tv_paths_se2[params['tv_track_tokens'][i]]) > 1:
+                                            s_arr = [mm_o[i][n][0,0]] + [path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) for k in range(1,params['N'])]
+                                        else:
+                                            s_arr = [mm_o[i][n][0,0]] + [mm_o[i][0][0,0]] * (params['N'] - 1)
                                         x_arr = [mm_o_glob[i][n][0,0]] + [preds_list[i,n,k,0] - ego_sim_init_state.center.point.x for k in range(1,params['N'])] #relative to ego initial position to scale the global coordinates
                                         y_arr = [mm_o_glob[i][n][1,0]] + [preds_list[i,n,k,1] - ego_sim_init_state.center.point.x for k in range(1,params['N'])] #relative to ego initial position to scale the global coordinates
                                         psi_arr = [mm_tv_psi[i][n][0,0]] + [params['tv_psi'][i,n,k,0] for k in range(1,params['N'])]
@@ -299,7 +314,10 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
                                             mm_droutes[i][n][t] = make_jac_fun(mm_routes[i][n])(mm_o[i][n][0,t+1])[:2]   
                                         except:
                                             eps = 0.1
-                                            s_arr = [mm_o[i][n][0,0]] + [path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) if path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) > path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k-1,0], preds_list[i,n,k-1,1])) else path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) + abs(path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) - path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k-1,0], preds_list[i,n,k-1,1]))) + eps for k in range(1,params['N'])]
+                                            if len(tv_paths_se2[params['tv_track_tokens'][i]]) > 1:
+                                                s_arr = [mm_o[i][n][0,0]] + [path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) if path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) > path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k-1,0], preds_list[i,n,k-1,1])) else path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) + abs(path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k,0], preds_list[i,n,k,1])) - path_to_linestring(tv_paths_se2[params['tv_track_tokens'][i]]).project(Point(preds_list[i,n,k-1,0], preds_list[i,n,k-1,1]))) + eps for k in range(1,params['N'])]
+                                            else:
+                                                s_arr = [mm_o[i][n][0,0]] + [mm_o[i][0][0,0]] * (params['N'] - 1)
                                             # if any s_arr are non-increasing, add eps to the non-increasing elements
                                             ind = 0
                                             while not (ind == (len(s_arr) - 1)):

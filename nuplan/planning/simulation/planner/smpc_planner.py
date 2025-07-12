@@ -104,6 +104,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         
         self._initialized = False
         self.t = 0
+        self.scenario_num = 0
         print('SMPC Planner Instantiated')
 
     def initialize(self, initialization: PlannerInitialization) -> None:
@@ -234,10 +235,10 @@ class SMPCPlanner(AbstractIDMPlanner):
                 with open('/home/mpc/nuplan-devkit/tutorials/training_config.yaml') as f:
                     self.raidnet_config = yaml.load(f, Loader=yaml.SafeLoader)
                 N = self.config['N']
-                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(N)}_canon_form.pkl', 'rb') as f:
+                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(N)}_canon_form_' + self.config['collision_avoidance_method'] + '.pkl', 'rb') as f:
                     canon_prob = pickle.load(f)
                 self.canon_prob = canon_prob
-                n_modes = [1 for _ in range(self.config['num_tvs'])]
+                n_modes = [self.config['num_modes'] for _ in range(self.config['num_tvs'])]
                 mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(self.config['num_tvs'])])))
                 observation_dim = self.config['num_tvs'] * (4*self.config['N'] + 2)
                 self.ca_num = len(mode_map)*(self.config['N']-1)*self.config['num_tvs']
@@ -276,6 +277,28 @@ class SMPCPlanner(AbstractIDMPlanner):
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state) if self.config['prediction_method']=='idm' else [[0 for _ in range(self.config['num_tvs'])]],   
                     canon_prob_fn=canon_prob if self.config['eval_mode'] else None,
                     config=self.config,)
+            debug = True
+            if debug:
+                self.smpc_offline = SMPC(ev=(A,B),
+                    N            =  N,
+                    V_MIN        = self.config['v_min'],       #Speed, acceleration constraints
+                    V_MAX        = self.config['v_max'], 
+                    A_MIN        = self.config['a_min'],
+                    A_MAX        =  self.config['a_max'],
+                    EV_NOISE_STD    =  self.ev_noise_std,
+                    TV_NOISE_STD    = self.tv_noise_std,
+                    Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
+                    R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
+                    ev_length=ego_state.car_footprint.vehicle_parameters.length,
+                    offline_mode= True,
+                    solver="ipopt",
+                    open_loop = False,
+                    eval_mode = False,
+                    is_mm_preds=self.config['is_mm_preds'],
+                    route = self.ego_route,
+                    preds=filter_preds(preds,self.config['num_tvs'],ego_state) if self.config['prediction_method']=='idm' else [[0 for _ in range(self.config['num_tvs'])]],   
+                    canon_prob_fn=canon_prob if self.config['eval_mode'] else None,
+                    config=self.config,)
             self._initialized = True
 
         # Update the SMPC parameters
@@ -297,8 +320,10 @@ class SMPCPlanner(AbstractIDMPlanner):
                 preds_dict = {'preds': pred, 'prob': prob, 'tv_params': tv_params, 'tv_psi': tv_psi, 'tv_track_tokens': tv_track_tokens}
                 mm_preds = preds_dict
                 update_dict = self.get_update_dict(current_input, preds_dict, tv_paths_se2)
+
         leading_vehicle = self.leading_idm_agent(ego_state,observations,current_input)
-        leading_vehicle_key =list(leading_vehicle.keys())[0]
+        if leading_vehicle is not None:
+            leading_vehicle_key =list(leading_vehicle.keys())[0]
         if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
             leading_agent = leading_vehicle[leading_vehicle_key]
             leading_agent_ind = detection_track_tokens.index(leading_vehicle_key) #check if the leading agent is in the observations
@@ -308,7 +333,9 @@ class SMPCPlanner(AbstractIDMPlanner):
             #terminal s of the leading agent (i.e. constant velocity)
             leading_agent.progress += self.smpc.N * self.config['dt'] * v 
             update_dict.update({'leading_vehicle': leading_agent})
-        update_dict.update({'leading_vehicle':None,'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1/2),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
+        else:
+            update_dict.update({'leading_vehicle': None})
+        update_dict.update({'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1/2),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
 
         if self.config['eval_mode']:
             #update canonical form matrices
@@ -322,15 +349,29 @@ class SMPCPlanner(AbstractIDMPlanner):
                 ca_duals = selupdate_dictsf.RAID_NET[1](obs)
             else:
                 #test random 0-1 vector
-                l1_duals = np.random.randint(2,size=int(self.l1_num))
+                l1_duals = np.random.randint(3,size=int(self.l1_num))
                 ca_duals = np.random.randint(2,size=self.ca_num)
 
             #update l1 and ca duals
             update_dict.update({'l1_duals':l1_duals, 'ca_duals':ca_duals})
         self.prev_update_dict = update_dict
-        pdb.set_trace()
+        # self.smpc.update(update_dict) 
+        if debug:
+            self.smpc_offline.update(update_dict) #update the offline smpc with the same update dict
+            # Solve the SMPC
+            sol_offline = self.smpc_offline.solve()
+            l1_duals_vec = np.fromiter(flatten(sol_offline['l1_duals']),float)
+            ca_duals_vec = np.fromiter(flatten(sol_offline['ca_duals']),float) 
+            l1_duals_class = (l1_duals_vec > 1e-3).astype(int)
+            l1_duals_class += (l1_duals_vec > (self.smpc_offline.l1_lmbd*0.99)).astype(int) 
+            ca_duals_class = (ca_duals_vec > 1e-3).astype(int)
+            update_dict.update({'l1_duals':l1_duals_class, 'ca_duals':ca_duals_class})
+            print(l1_duals_vec)
+            print(ca_duals_vec)
+            l1_dual_active = (1-int(np.all(l1_duals_vec<(self.smpc.l1_lmbd-1e-3)*np.ones(l1_duals_vec.shape[0])))) or (1-int(np.all(l1_duals_vec>1e-3*np.ones(l1_duals_vec.shape[0]))))
+            ca_duals_active = np.sum(ca_duals_vec>1e-3*np.ones(ca_duals_vec.shape[0]))/ca_duals_vec.shape[0]
+            print(ca_duals_active,l1_dual_active)
         self.smpc.update(update_dict) 
-        # Solve the SMPC
         sol = self.smpc.solve()
 
         self.optimal = sol['optimal']
@@ -359,6 +400,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 self.dual_class.append(dual_class)
                 self.expert_action.append(expert_action)
                 self.scenario_type = scenario_type
+                self.l1_active.append(l1_dual_active)
                 print(l1_duals_vec)
                 print(dual_class)
                 print(ca_duals_active,l1_dual_active)
@@ -388,7 +430,6 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.ego_planned_trajs.append(self.s2xy(sol['nom_z'][0,1:]))
             self.ego_opt_sols_full_state.append(self.get_ego_full_state())
             self.smpc_params.append(self.smpc.opti.value(self.smpc.params))
-            self.l1_active.append(l1_dual_active)
             if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
                 pred.update({'leading_vehicle':leading_agent}) #update the leading agent in the prediction
             pred.update({'leading_vehicle_active':sol['leading_vehicle_active']}) #update the leading agent active status in the prediction
@@ -402,17 +443,15 @@ class SMPCPlanner(AbstractIDMPlanner):
             #Save canonical form
             if self.smpc.offline and self.t == 1: #run once
                 # canon_prob = self.smpc._get_canon_form_mats() #Output is in dict
-                canon_prob_fn = self.smpc._get_canon_form_fns()
-                
-                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form.pkl', 'wb') as f:
+                canon_prob_fn = self.smpc._get_canon_form_fns() 
+                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_' + self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn, f)
                 print(f'[Offline Mode] Canonical form saved')
             elif not self.smpc.offline and self.t == 1: #run once
                 canon_prob_fn_precomputed = self.smpc._get_canon_form_fns_precomputed()
-                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed.pkl', 'wb') as f:
+                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed_' + self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn_precomputed, f)
                 print(f'[Eval Mode] Canonical form saved')   
-            # pdb.set_trace()          
             # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True) 
         else:
             print('No optimal solution found') 
@@ -429,6 +468,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         #Update u_prev
         self.u_prev = sol['u_control'] if self.optimal else 0 #scalar
         self.u_opt = sol['u_opt'] #size N-1
+        print(f'[smpc_planner.py] u_opt: {self.u_opt} m/s^2')
 
         #Convert smpc solution to NuPlan Trajectory
         self._sol2ego_state(sol['nom_z'],ego_state)
@@ -630,24 +670,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         )
         ax.add_patch(ego_rect)
         self.visualize_road_boundaries(ax, ego_x, ego_y, self._map_api, search_radius=100)
-        if 'leading_vehicle' in preds:
-            ego_state0, _ = current_input.history.current_state
-            vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
-            # Initialize planned trajectory with current state
-            current_time_point = ego_state0.time_point
-            projected_ego_state = self._idm_state_to_ego_state(preds['leading_vehicle'], current_time_point, vehicle_parameters)
-            lead_vehicle_active = preds['leading_vehicle_active']
-            # Draw ellipsoid for the leading agent
-            leading_vehicle_ellipsoid = patches.Ellipse(
-                (projected_ego_state.center.point.x, projected_ego_state.center.point.y),
-                projected_ego_state.box.length,
-                projected_ego_state.box.width,
-                angle=projected_ego_state.center.heading*180/np.pi,
-                fill=True,
-                color='red' if lead_vehicle_active else 'yellow')
             
-
-
         # ---- Add Road Lanes Visualization using route roadblocks ----
         if hasattr(self, '_route_roadblocks'):
             ego_point = Point(ego_x, ego_y)
@@ -778,7 +801,23 @@ class SMPCPlanner(AbstractIDMPlanner):
                     plt.plot(state.center.point.x, state.center.point.y, 'gs', markersize=1.5,label='Ego Planned Trajectory')
                 else:
                     plt.plot(state.center.point.x, state.center.point.y, 'gs', markersize=1.5)
-        
+
+        if 'leading_vehicle' in preds:
+            ego_state0, _ = current_input.history.current_state
+            vehicle_parameters = ego_state0.car_footprint.vehicle_parameters
+            # Initialize planned trajectory with current state
+            current_time_point = ego_state0.time_point
+            projected_ego_state = self._idm_state_to_ego_state(preds['leading_vehicle'], current_time_point, vehicle_parameters)
+            lead_vehicle_active = preds['leading_vehicle_active']
+            # Draw ellipsoid for the leading agent
+            leading_vehicle_ellipsoid = patches.Ellipse(
+                (projected_ego_state.center.point.x, projected_ego_state.center.point.y),
+                vehicle_parameters.length,
+                vehicle_parameters.width,
+                angle=projected_ego_state.center.heading*180/np.pi,
+                fill=True,
+                color='red' if lead_vehicle_active else 'yellow')
+
         plt.axis('equal')
         plt.legend(loc='upper right')
         # Set axis limits around the ego vehicle
@@ -994,7 +1033,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         os.makedirs(vid_save_dir) 
                         print(f"Created directory: {vid_save_dir}")
 
-                    out = cv2.VideoWriter(vid_save_dir+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+                    out = cv2.VideoWriter(vid_save_dir+self.scenario_id+ '_' + str(self.scenario_num) + '_' +self.scenario_type + '_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
 
                     for fig in self.figs_w_preds:
                         # Convert the figure to an image
@@ -1012,7 +1051,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     # pdb.set_trace()
                 else:
                     #in evaluation mode
-                    save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
+                    save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_eval'+ '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] + '_' + self.config['prediction_method'] +'.pkl'
                     filepath = save_dir + '.gz'
                     if not os.path.exists(filepath): 
                         with gzip.open(filepath, 'wb') as f:
@@ -1049,7 +1088,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         if not os.path.exists(vid_save_dir):
                             os.makedirs(vid_save_dir) 
                             print(f"Created directory: {vid_save_dir}")
-                        out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+                        out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
 
                         for fig in self.figs_w_preds:
                             # Convert the figure to an image

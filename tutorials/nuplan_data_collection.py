@@ -68,26 +68,35 @@ scenario_types=[
 scenario_types=[
 #   'on_intersection',
 #   'on_traffic_light_intersection',
+  'starting_unprotected_cross_turn',
+  'starting_unprotected_noncross_turn',
+  'starting_u_turn',
   'starting_protected_cross_turn',
   'starting_protected_noncross_turn',
-  'starting_left_turn',
   'changing_lane',
-  'starting_unprotected_cross_turn',
-  'starting_u_turn',
-  'starting_unprotected_noncross_turn',
+  'starting_left_turn',
   'starting_right_turn',
   'crossed_by_vehicle',
-  'following_lane_with_lead',
-  'following_lane_with_slow_lead',
+#   'following_lane_with_lead',
+#   'following_lane_with_slow_lead',
   'near_multiple_vehicles',
   'traversing_intersection',
+  'near_high_speed_vehicle',
+  'stopping_with_lead',
+  'high_magnitude_speed',
+#   'low_magnitude_speed',
+  'near_high_speed_vehicle',
+  'on_stopline_stop_sign',
+  'high_lateral_acceleration',
 #   'traversing_traffic_light_intersection'
     ]
 print('total log list length:',len(log_list))
 log_list = log_list
-num_scenarios = 5 #float: fraction, int: number of scenarios to use from the log
+num_scenarios = 10 #float: fraction, int: number of scenarios to use from the log
+num_scenarios_per_type = 1
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
+    # it += 40
     if 50 > it >= 0:
         try:
             print(f'[Iter:{it}] Collecting data from log: ', log)
@@ -98,6 +107,7 @@ for it, log in enumerate(log_list):
                 'scenario_builder=nuplan_mini',  # [nuplan, nuplan_mini] use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
                 f"scenario_filter.log_names=[{str(log)}]",
                 f'scenario_filter.scenario_types={scenario_types}', 
+                f'scenario_filter.num_scenarios_per_type={num_scenarios_per_type}',  # use n scenarios per type
                 f'scenario_filter.limit_total_scenarios={num_scenarios}',  # use n total scenarios
                 'scenario_filter.remove_invalid_goals=true',  
             ]
@@ -128,7 +138,7 @@ for it, log in enumerate(log_list):
             if smpc_config['collision_avoidance_method'] == 'obca':
                 #OBCA constraints
                 ev_noise_std=[0.01,0.01]
-                tv_noise_std=[0.5, 0.5]
+                tv_noise_std=[0.2, 0.2]
             else:
                 #Affine CA constraints
                 ev_noise_std=[0.01,0.01]

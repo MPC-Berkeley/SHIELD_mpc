@@ -92,7 +92,7 @@ def Train_BC(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
 
 def main(smpc_config,config):
     # n_modes = [2]*2 + [1]*(smpc_config['num_tvs']-2) #2 vehicles with lane change modes
-    n_modes = [1 for _ in range(smpc_config['num_tvs'])]
+    n_modes = [smpc_config['num_modes'] for _ in range(smpc_config['num_tvs'])]
     mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(smpc_config['num_tvs'])])))
     # observation_dim = 4 + 1 + 4*smpc_config['num_tvs'] + smpc_config['N']*2 if config['include_trajs'] else 4 + 1 + 4*smpc_config['num_tvs']
     observation_dim = smpc_config['num_tvs'] * (4*config['N'] + 2)
