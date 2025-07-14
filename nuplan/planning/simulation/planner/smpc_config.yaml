@@ -22,3 +22,4 @@ prediction_method: wayformer #['idm', 'wayformer']
 save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14.pkl
 eval_save_dir: /home/mpc/nuplan-devkit/nuplan/evaluation/nuplan_expert_data_N14_eval.pkl
 video_save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/video/N14/
+smpc_save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/smpc_class/

@@ -103,10 +103,9 @@ class SMPC():
         self.route = route
         
         p_opts = {'expand': False, 'print_time':0, 'verbose' :False, 'error_on_fail':0}
-        # s_opts = {'print_level': 0,'tol':5e-3,'max_wall_time': 120.,'constr_viol_tol':1e-4} 
         s_opts = {'print_level': 0,'tol':1e-4,'max_wall_time': 120.,'constr_viol_tol':1e-4} 
         if eval_mode:
-            s_opts.update({'max_wall_time': 15.,'constr_viol_tol':1e-3})
+            s_opts.update({'max_wall_time': 15.,'constr_viol_tol':1e-4})
 
         s_opts_grb = {'OutputFlag': 0, 'PSDTol' : 1e-2,
                        'FeasibilityTol' : 1e-2, 
@@ -123,7 +122,6 @@ class SMPC():
         else:
             self.opti=ca.Opti("conic")
             self.opti.solver("gurobi", p_opts_grb, s_opts_grb)
-
 
         def _flatten2ca(xs):
             if type(xs) == type([]):
@@ -166,7 +164,6 @@ class SMPC():
         self.params = ca.vertcat(*_flatten2ca(self.params))  
         
         self.policy=self._return_policy_class()
-        # pdb.set_trace()
         self._add_constraints_and_cost()
         
         self._update_ev_initial_condition(np.array([0., 2.]), 0.)
@@ -182,7 +179,7 @@ class SMPC():
         self._update_leading_vehicle_params(None)
 
         if not self.offline: 
-            _,_,_,_ = self._test_update_gain_and_constr_keeps()  
+            _,_,_,_ = self.update_gain_and_constr_keeps()  
         self.solve(first_solve=True)
 
     def _return_policy_class(self):
@@ -606,30 +603,31 @@ class SMPC():
             nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds]
             self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[nonzero_vec])
             self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))])
-            self.cost_hessian_fn = ca.Function('cost_hessian_fn', [self.vars_pol4screening, self.params, self.slack_vec], list(ca.hessian(self.canon_prob_fn['f_cost'](self.vars_pol4screening,vars_epi,self.params,self.slack_vec), self.vars_pol4screening)))
+            Q, _ = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape))
+            Q_inv = ca.inv(Q)
+            L =  self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape))
+            F, _ = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM(*self.vars_pol4screening.shape),self.params,self.V_MAX))
+            L_Q_inv = L@Q_inv
+            F_Q_inv =  F @ Q_inv
+
+            # Constuct functions for the least squares problem
+            self.L_Q_inv_fn = ca.Function('L_Q_inv_fn', [self.params], [L_Q_inv])
+            self.F_Q_inv_fn = ca.Function('F_Q_inv_fn', [self.params, self.V_MAX], [F_Q_inv])
+            self.Q_inv_fn = ca.Function('Q_inv_fn', [self.params], [Q_inv])
 
     def _set_canon_form_mats(self):
         #In online mode, vars_epi is not defined. So, set it to zero
         self.F, self.f = self.F_fn(ca.DM(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)))
-
         self.L = self.L_fn(ca.DM(*self.vars_pol4screening.shape))
-        # self.C = self.C_fn(self.opti.value(self.params))
         C = self.C_fn_nonzero(self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape))  # Evaluate C_fn to get the non-zero elements
-
         #construct sparse C matrix
-        st = time.time()
         self.C = sp.csr_matrix((np.array(C).reshape(-1), (self.row_indices, self.col_indices)), shape=self.C_shape)
-        print(f'Constructing C_sparse took {time.time()-st} seconds')
-        # self.C = np.ascontiguousarray(self.C_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params)),dtype=np.float64)
         self.c = self.c_fn(self.opti.value(self.params))
 
         #Here, ca.hessian outputs hessian, J_grad. 
         #J_grad = Q*theta + p. Thus, if we evaluate J_grad with theta = 0, we get p. Note that hessian is not dependent on theta
-        # self.Q, self.p = self.cost_hessian_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape))
-        self.Q, self.p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1)    ,self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape))
-        # vars_epi = ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1)    
-        # self.d = self.canon_prob_fn['f_cost'](ca.DM(*self.vars_pol4screening.shape),vars_epi,self.opti.value(self.params))
-
+        self.Q, self.p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1),self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape))
+    
     def solve(self,first_solve=False):
         try:      
             # self.plot_obca_obstacles_and_ego_path(self.pos_tvs, self.psi_tvs, self.tv_params )
@@ -671,8 +669,6 @@ class SMPC():
             smllest_eig = np.min(eigs[0])
             print(f'Largest Eigenvalue: {largest_eig}')
             print(f'Smallest Eigenvalue: {smllest_eig}')
-            # print(eigs[0])
-            # pdb.set_trace()
         except:
             # self.opti.debug.show_infeasibilities()
             # t=0
@@ -781,6 +777,7 @@ class SMPC():
         self._update_speed_limit(update_dict['speed_limit'])
         self._update_leading_vehicle_params(update_dict['leading_vehicle'])
         if not self.offline:
+            st_first = time.time()
             if 'l1_duals' in update_dict.keys():
                 if 'canon_prob' in update_dict.keys():
                     print('[smpc.py]: Calling set_canon_form_mats,,,')
@@ -790,17 +787,13 @@ class SMPC():
                     print(f'[smpc.py]: set_canon_form_mats took {solve_time} seconds')
                     print('[smpc.py]: Finished set_canon_form_mats,,,')
                 print('[smpc.py]: Calling update_gain_and_constr_keeps')
-                st = time.time()
-                _,_,_,_= self._test_update_gain_and_constr_keeps(*[update_dict[key] for key in ['l1_duals', 'ca_duals']])
+                _,_,_,_= self.update_gain_and_constr_keeps(*[update_dict[key] for key in ['l1_duals', 'ca_duals']])
                 solve_time = time.time()-st
-                print(f'[smpc.py]: update_gain_and_constr_keeps took {solve_time} seconds')
                 print('[smpc.py]: Finished update_gain_and_constr_keeps,,,')
             else:
-                self._test_update_gain_and_constr_keeps()
-        # elif self.offline and (self.vars_ws is not None) and (self.vars_epi_ws is not None):
-        #     # print('warm starting'.center(80,'#'))
-        #     self.opti.set_initial(self.vars_pol,self.vars_ws)
-        #     self.opti.set_initial(self.vars_epi,self.vars_epi_ws)
+                self.update_gain_and_constr_keeps()
+            print(f'[smpc.py]: Total safety screening took {time.time()-st_first} seconds')
+
     def _update_leading_vehicle_params(self, leading_vehicle=None):
         if leading_vehicle is None:
             self.opti.set_value(self.lead_vehicle_s, 1e6)
@@ -865,12 +858,6 @@ class SMPC():
         for k in range(self.N_TV):
             self.opti.set_value(self.tv_params[k], tv_params[k])
 
-    # def _set_canon_form_mats(self, canon_prob):
-    #     self.Q, self.p, self.d = canon_prob["Q"],canon_prob["p"], canon_prob["d"]
-    #     self.F, self.f = canon_prob["F"], canon_prob["f"]
-    #     self.L = canon_prob["L"]
-    #     self.C, self.c = canon_prob["C"], canon_prob["c"]
-
     def prod(self,val) :
         res = 1
         for ele in val:
@@ -892,7 +879,7 @@ class SMPC():
         '''
         canon_prob_fn ={}
         if not self.offline:
-            canon_prob_fn.update({'F_fn':self.F_fn, 'L_fn': self.L_fn, 'C_fn_nonzero':self.C_fn_nonzero, 'c_fn':self.c_fn, 'cost_hessian_fn':self.cost_hessian_fn,'row_indices':self.row_indices,'col_indices':self.col_indices,'C_shape':self.C_shape,'vars_pol4screening_shape':self.vars_pol4screening.shape})
+            canon_prob_fn.update({'F_fn':self.F_fn, 'L_fn': self.L_fn, 'C_fn_nonzero':self.C_fn_nonzero, 'c_fn':self.c_fn,'row_indices':self.row_indices,'col_indices':self.col_indices,'C_shape':self.C_shape,'vars_pol4screening_shape':self.vars_pol4screening.shape})
         return canon_prob_fn
     
     def _get_canon_form_mats(self):
@@ -906,30 +893,17 @@ class SMPC():
                         "C":[self.opti.value(ca.vertcat(C)) for C in self.C], "c":[self.opti.value(ca.vertcat(c)) for c in self.c]}) 
         return canon_prob
 
-    def _test_update_gain_and_constr_keeps(self, l1_duals=None, ca_duals=None):
+    def update_gain_and_constr_keeps(self, l1_duals=None, ca_duals=None):
         if l1_duals is None:
             mu, eta, g1, gap = None, None, None, None
         else:
             # Selection matrix for the "non-zero" mu and g1 duals
             # S1 = np.diag(ca_duals) #if mu_tilde=1, then mu!=0. elif mu_tilde=0, then mu = 0
             mu_dim = 2*self.N * (self.N_TV+1) + 1
-            self.S1 = sp.kron(sp.diags(ca_duals,format='csr'),sp.eye(mu_dim,format='csr')) #70 x 70 vs 181*70 x 181*70
-            #TODO: if g1_inf norm prediction
-            # S2 = np.kron(np.diag(l1_duals),np.eye(2)) #2: disturbance feedback gain w.r.t. each TV's position and velocity
-            S2 = np.diag(l1_duals)
-            self.S2 = sp.csr_matrix(S2)
-            # self.S2 = sp.diags(1-l1_duals,format='csr') #if g1_tilde=1, then g1=0 or g1=lmbd. elif g1_tilde=0, then 0 < g1 < lmbd
-            self.rho1 = 0.1
-            self.rho2 = 0.1
+
             #Recover feasible dual solutions
-            st = time.time()
-            mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C, self.p, self.f, self.c, self.S1, self.S2, self.rho1, self.rho2, self.S1.toarray().diagonal(),self.S2.toarray().diagonal(),mu_dim)
-            solve_time = time.time() - st
-            print(f'Dual Approximation Time: {solve_time}')
-            st = time.time()
+            mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C, self.p, self.f, self.c, np.repeat(ca_duals, mu_dim),l1_duals)
             gap = self._compute_gap_radius(mu, eta, g1)
-            solve_time = time.time() - st
-            print(f'Gap Radius Solve Time: {solve_time}')
         st = time.time()
         vars_kept=0 
         constr_kept=0
@@ -986,7 +960,7 @@ class SMPC():
             self.constr_kept = constr_kept
             print(f"vars:  {vars_kept} out of {g1.shape[0]}, constr: {constr_kept} out of {ca_duals.shape[0]}")     
         solve_time = time.time() - st
-        print('Opti Set Value Time: ', solve_time, ' s')
+        print('[smpc.py] Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
         return mu, eta, g1, gap
 
     def clarkson_woodruff_transform(self,A, s):
@@ -1017,60 +991,55 @@ class SMPC():
         A_sketch = S.dot(A)
         return A_sketch
 
-    def solve_dual_approximation(self,Q, L, F, C, p, f, c, S1, S2, rho1, rho2, ca_dual, l1_dual, mu_dim):
+    def solve_dual_approximation(self,Q, L, F, C, p, f, c, ca_dual, l1_dual):
         """
         Solves regularized dual problem via least squares with constraint projection
         Returns feasible (mu, eta, g1) approximation
         """
         # Precompute dimensions
-        st = time.time()
+        st_first = time.time()
         n_mu = C.shape[0]
         n_eta = F.shape[0]
         n_g1 = L.shape[0]
 
-        # Construct least squares problem 
+        # # Construct least squares problem 
+        self.L_Qinv = sp.csr_matrix(self.L_Q_inv_fn(self.opti.value(self.params)))
+        self.F_Qinv = sp.csr_matrix(self.F_Q_inv_fn(self.opti.value(self.params),self.opti.value(self.V_MAX)))
+        self.Q_inv = sp.csr_matrix(self.Q_inv_fn(self.opti.value(self.params)))
+        self.C_Qinv = C @ self.Q_inv
         self.c = sp.csr_matrix(c) 
         self.p = sp.csr_matrix(p)
-        self.L = sp.csr_matrix((self.l1_lmbd)*L) #Scaling by lambda as we are normalizing the l1-gain dual: \tilde{g1} = g1/lambda
+        self.f = sp.csr_matrix(f) #f is a vector, reshape to column vector
+        self.L = sp.csr_matrix(self.l1_lmbd*L) #Scaling by lambda as we are normalizing the l1-gain dual: \tilde{g1} = g1/lambda
         self.F = sp.csr_matrix(F)
-        self.Q_inv = sp.csr_matrix(np.linalg.inv(Q))
-        self.S1_sq = S1.T @ S1
-        self.S2_sq = S2.T @ S2
 
-        # Precompute common products:
-        self.C_Qinv = self.C @ self.Q_inv
-        self.F_Qinv = self.F @ self.Q_inv
-        self.L_Qinv = self.L @ self.Q_inv
+        # Construct A matrix
+        A11 = self.C@(self.Q_inv @ self.C.T)
+        A12 = -self.C_Qinv @ self.F.T
+        A13 = -2 * self.C_Qinv @ self.L.T
 
-        # Precompute block products:
-        A11 = self.C_Qinv @ self.C.T #+ 2 * rho1 * self.S1_sq
-        A12 = (1)*-self.C_Qinv @ self.F.T
-        A13 = (1)*-2 * self.C_Qinv @ self.L.T
-
-        A21 = (1)*-self.F_Qinv @ self.C.T
+        A21 = -self.F_Qinv @ self.C.T
         A22 = self.F_Qinv @ self.F.T
         A23 = 2 * self.F_Qinv @ self.L.T
 
-        A31 = (1)*-2 * self.L_Qinv @ self.C.T
+        A31 = -2 * self.L_Qinv @ self.C.T
         A32 = 2 * self.L_Qinv @ self.F.T
-        A33 = 4 * self.L_Qinv @ self.L.T #+ 2 * rho2 * self.S2_sq
+        A33 = 4 * self.L_Qinv @ self.L.T
 
-        # Assemble the full A matrix using sp.bmat:
-        row1 = sp.hstack([A11, A12, A13], format='csr')
-        row2 = sp.hstack([A21, A22, A23], format='csr')
-        row3 = sp.hstack([A31, A32, A33], format='csr')
-        A = sp.vstack([row1, row2, row3], format='csr') #+ 1e-3 * sp.eye(A11.shape[0] + A22.shape[0] + A33.shape[0], format='csr') #add small diagonal for numerical stability
+        A = sp.bmat([
+                [A11, A12, A13],
+                [A21, A22, A23],
+                [A31, A32, A33]]
+            ,format='csr')
 
-        # For b, cache the constant ones vector:
+        # Construct b
         ones_ng1 = np.ones((n_g1, 1))
         self.pmvec = (self.p - self.L.T @ ones_ng1)
-        b1 = (1)*-self.c + (1)*self.C_Qinv @ self.pmvec
-        b2 = -f.reshape((-1, 1)) - self.F_Qinv @ self.pmvec
-        b3 = -2 * self.L_Qinv @ self.pmvec #+ self.l1_lmbd * rho2 * S2.T @ ones_ng1
-
-        # Assemble b in one call:
+        b1 = -self.c + self.C_Qinv @ self.pmvec
+        b2 = -f - self.F_Qinv @ self.pmvec
+        b3 = -2 * self.L_Qinv @ self.pmvec
         b = sp.vstack([b1, b2, b3]).toarray() #right-hand side vector b in Ax=b
-
+ 
         # Solve least squares with iterative method
         reduce_w_random_rows=False
         if reduce_w_random_rows:
@@ -1078,26 +1047,29 @@ class SMPC():
             A = self.clarkson_woodruff_transform(A,s=n_rows)
             b = self.clarkson_woodruff_transform(b,s=n_rows)
 
-        #Column selection
-        reduced_ls = True
+        #Column selection using RAID-Net classification output
+        reduced_ls = False
         if reduced_ls:
             keep = np.concatenate([ca_dual, np.ones(n_eta),l1_dual])
             keep_arg = np.argwhere(keep>=1).flatten() #indices of non-zero entries in keep
             A = A[:, keep_arg] #select columns corresponding to non-zero entries in keep
-        #Least squares parameters
-        ls_tol = 1e-5
+
+        #Define Least squares parameters
+        ls_tol = 1e-4
         if reduced_ls:
             ls_init_guess = np.zeros(A.shape[1])
             start_idx = sum(ca_dual>0) + n_eta #num of ca_duals that are kept plus n_eta as all of eta is kept always
             ls_init_guess[start_idx:] = 0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
         else:
             ls_init_guess = np.zeros(A.shape[1])
-            ls_init_guess[n_mu+n_eta:]=0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
+            ls_init_guess[n_mu+n_eta:] = 0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
         ls_max_iter = 1000
-        solve_time = time.time() - st
+        solve_time = time.time() - st_first
         print(f'[Dual Approximation] Least Squares Formulation Time: {solve_time} s')
+
+        # Solve least squares problem using LSQR
         st = time.time()
-        x = lsqr(A, b, atol=ls_tol, btol=ls_tol,iter_lim=ls_max_iter,x0=ls_init_guess)[0]
+        x = lsqr(A, b, atol=ls_tol, btol=ls_tol, iter_lim=ls_max_iter, x0=ls_init_guess)[0]
         solve_time = time.time() - st
         print(f'[Dual Approximation] Least Squares Solve Time: {solve_time} s')
 
@@ -1110,11 +1082,8 @@ class SMPC():
 
         # Split variables and project to constraints
         mu = np.maximum(x[:n_mu], 0)
-        eta = np.maximum(x[n_mu:n_mu+n_eta], 0)
-        # g1 = x[n_mu+n_eta:]/self.l1_lmbd 
-        # g1 = np.clip(x[n_mu+n_eta:], 0, self.l1_lmbd) #||g||_inf <= 1, g>= 0          
+        eta = np.maximum(x[n_mu:n_mu+n_eta], 0)      
         g1 = np.clip(x[n_mu+n_eta:], 0, 1) #||g||_inf <= 1, g>= 0
-
         return mu, eta, g1
 
     def _compute_gap_radius(self, f_mu, f_nu, f_g):
@@ -1125,31 +1094,30 @@ class SMPC():
         with f_g_adjusted = 2*f_g - l1_lmbd*ones.
         """
         # Compute eigenvalues of Q once (if Q does not change frequently you could precompute these)
-
         st = time.time()
         Q = sp.csr_matrix(self.Q)
         self.largest_eig = spla.eigsh(Q, k=1, which='LM', v0=self.largest_eig*np.ones(Q.shape[0]) if hasattr(self,'largest_eig') else None, return_eigenvectors=False)[0]
         self.smallest_eig = spla.eigsh(Q, k=1, v0=self.smallest_eig*np.ones(Q.shape[0])  if hasattr(self,'smallest_eig') else None, sigma=0, which='LM', return_eigenvectors=False)[0] #Solve for smallest eigenvalue using shift-invert  [https://docs.scipy.org/doc/scipy/tutorial/arpack.html]
         solve_time = time.time() - st
 
-        print(f'Eigenvalues: {self.largest_eig, self.smallest_eig}')    
-        print(f'Eigenvalue Computation Time: {solve_time} s')
+        print(f'[smpc.py] Hessian Eigenvalues: {self.largest_eig, self.smallest_eig}')    
+        print(f'[smpc.py] Hessian Eigenvalue Computation Time: {solve_time} s')
         eta, sigma = self.largest_eig**(-1), self.smallest_eig**(-1)
 
         # Precompute the right-hand side product. Note: reshape inputs as column vectors.
         st = time.time()
         ones_fg = np.ones((f_g.shape[0], 1))
-        temp = ((1)*-self.C.T @ f_mu.reshape((-1, 1))
+        temp = (-self.C.T @ f_mu.reshape((-1, 1))
                 + self.p
                 + self.F.T @ f_nu.reshape((-1, 1))
                 + self.L.T @ (2 * f_g.reshape((-1, 1)) -  ones_fg))
         
         # Use your precomputed blocks to form the stacked multiplication:
-        stacked_prod = sp.vstack([(1)*-self.C_Qinv, self.F_Qinv, 2 * self.L_Qinv])
+        stacked_prod = sp.vstack([-self.C_Qinv, self.F_Qinv, 2 * self.L_Qinv])
         grad_d = stacked_prod @ temp
         
         # Add the constant offset
-        grad_d += sp.vstack([(1)*self.c, self.f.reshape((-1, 1)), np.zeros(f_g.shape).reshape((-1, 1))])
+        grad_d += sp.vstack([self.c, self.f, np.zeros(f_g.shape).reshape((-1, 1))])
 
         # Form the full dual vector and compute the projected version:
         duals = np.concatenate((f_mu, f_nu, f_g)).reshape((-1, 1))
@@ -1168,7 +1136,6 @@ class SMPC():
         print(gap)
         print(np.linalg.norm(duals - proj_dual))
         print(np.linalg.norm(duals[start_idx:]-proj_dual[start_idx:]))
-        pdb.set_trace()
         return gap
     
     def _safe_screen(self,dual, gap_radius, dual_type = "ca_dual"):
@@ -1280,4 +1247,3 @@ def plot_collision_linearization(Q, c, x):
 
     # Print debug info
     print("Check (oa_ref - c)^T Q (oa_ref - c) =", (oa_ref - c).T @ Q @ (oa_ref - c))
-

@@ -201,7 +201,7 @@ class SMPCPlanner(AbstractIDMPlanner):
 
     def compute_planner_trajectory(self, current_input: PlannerInput, preds = None, tv_paths_se2: Optional[Dict]=None, wayformer_output: Optional[Dict]=None) -> AbstractTrajectory:
         """Inherited, see superclass."""
-        print(f'[SMPCPlanner] compute_planner_trajectory: {self.t} iteration')
+        print(f'[smpc_planner.py] compute_planner_trajectory: {self.t} iteration')
         # Ego current state
         ego_state, observations = current_input.history.current_state
         detection_track_tokens = [v.metadata.track_token for v in observations.tracked_objects.tracked_objects]
@@ -235,7 +235,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 with open('/home/mpc/nuplan-devkit/tutorials/training_config.yaml') as f:
                     self.raidnet_config = yaml.load(f, Loader=yaml.SafeLoader)
                 N = self.config['N']
-                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(N)}_canon_form_' + self.config['collision_avoidance_method'] + '.pkl', 'rb') as f:
+                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{N}_canon_form_N_TV'+ str(self.config['num_tvs']) + '_M' + str(self.config['num_modes']) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'rb') as f:
                     canon_prob = pickle.load(f)
                 self.canon_prob = canon_prob
                 n_modes = [self.config['num_modes'] for _ in range(self.config['num_tvs'])]
@@ -277,7 +277,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state) if self.config['prediction_method']=='idm' else [[0 for _ in range(self.config['num_tvs'])]],   
                     canon_prob_fn=canon_prob if self.config['eval_mode'] else None,
                     config=self.config,)
-            debug = True
+            debug = False
             if debug:
                 self.smpc_offline = SMPC(ev=(A,B),
                     N            =  N,
@@ -355,7 +355,9 @@ class SMPCPlanner(AbstractIDMPlanner):
             #update l1 and ca duals
             update_dict.update({'l1_duals':l1_duals, 'ca_duals':ca_duals})
         self.prev_update_dict = update_dict
+
         # self.smpc.update(update_dict) 
+        debug = False
         if debug:
             self.smpc_offline.update(update_dict) #update the offline smpc with the same update dict
             # Solve the SMPC
@@ -371,6 +373,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             l1_dual_active = (1-int(np.all(l1_duals_vec<(self.smpc.l1_lmbd-1e-3)*np.ones(l1_duals_vec.shape[0])))) or (1-int(np.all(l1_duals_vec>1e-3*np.ones(l1_duals_vec.shape[0]))))
             ca_duals_active = np.sum(ca_duals_vec>1e-3*np.ones(ca_duals_vec.shape[0]))/ca_duals_vec.shape[0]
             print(ca_duals_active,l1_dual_active)
+
         self.smpc.update(update_dict) 
         sol = self.smpc.solve()
 
@@ -433,7 +436,6 @@ class SMPCPlanner(AbstractIDMPlanner):
             if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
                 pred.update({'leading_vehicle':leading_agent}) #update the leading agent in the prediction
             pred.update({'leading_vehicle_active':sol['leading_vehicle_active']}) #update the leading agent active status in the prediction
-
             if not self.config['eval_mode']:
                 fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"])
             else:
@@ -444,12 +446,12 @@ class SMPCPlanner(AbstractIDMPlanner):
             if self.smpc.offline and self.t == 1: #run once
                 # canon_prob = self.smpc._get_canon_form_mats() #Output is in dict
                 canon_prob_fn = self.smpc._get_canon_form_fns() 
-                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_' + self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
+                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn, f)
                 print(f'[Offline Mode] Canonical form saved')
             elif not self.smpc.offline and self.t == 1: #run once
                 canon_prob_fn_precomputed = self.smpc._get_canon_form_fns_precomputed()
-                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed_' + self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
+                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn_precomputed, f)
                 print(f'[Eval Mode] Canonical form saved')   
             # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True) 
