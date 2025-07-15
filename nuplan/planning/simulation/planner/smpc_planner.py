@@ -269,7 +269,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
                     ev_length=ego_state.car_footprint.vehicle_parameters.length,
                     offline_mode= offline_mode,
-                    solver="ipopt",
+                    solver=self.config['solver'],
                     open_loop = False,
                     eval_mode = False,
                     is_mm_preds=self.config['is_mm_preds'],
@@ -291,7 +291,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
                     ev_length=ego_state.car_footprint.vehicle_parameters.length,
                     offline_mode= True,
-                    solver="ipopt",
+                    solver=self.config['solver'],
                     open_loop = False,
                     eval_mode = False,
                     is_mm_preds=self.config['is_mm_preds'],

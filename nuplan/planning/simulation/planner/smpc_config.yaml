@@ -6,6 +6,7 @@ num_tvs: 3
 num_modes: 2
 l1_lmbd: 100
 collision_avoidance_method: 'affine' #['obca','affine']
+
 # state and input constraints
 a_max: 1.5
 a_min: -4.0
@@ -15,8 +16,9 @@ a_lat: 3.2 #m/s^2 used for lane chance mode prediction of the TVs
 
 # Evaluation parameters
 eval_mode_category: 0 #0: closed-loop with IDMAgent observation, 1: open-loop (TVs do not react to EV) using logged trajectories 
-eval_mode: True 
+eval_mode: False 
 prediction_method: wayformer #['idm', 'wayformer']
+solver: 'ipopt' #['ipopt', 'gurobi']
 
 # Directories
 save_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14.pkl

@@ -98,7 +98,7 @@ for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
     # it += 40
     if 50 > it >= 0:
-        try:
+        # try:
             print(f'[Iter:{it}] Collecting data from log: ', log)
             EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
             # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
@@ -177,6 +177,6 @@ for it, log in enumerate(log_list):
 
                 # Run nuBoard
                 main_nuboard(cfg)
-        except:
-            print(f'Error occurred while running NuPlan for log: {log}')
-            continue
+        # except:
+        #     print(f'Error occurred while running NuPlan for log: {log}')
+        #     continue

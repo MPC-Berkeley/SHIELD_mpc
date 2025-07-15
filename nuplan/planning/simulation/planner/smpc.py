@@ -29,12 +29,12 @@ class SMPC():
 
     def __init__(self,
                 ev,
-                N            =  6,
+                N            =  15,
                 V_MIN        = -1.,       #Speed, acceleration constraints
                 V_MAX        = 10.0, 
                 A_MIN        = -5.0,
                 A_MAX        =  2.0,
-                TIGHTENING   =  2.6, #2.6, # of std that you want to be robust w.r.t. the TV uncertainty
+                TIGHTENING   =  2.5, # of std that you want to be robust w.r.t. the TV uncertainty
                 EV_NOISE_STD    =  [0.001, 0.001],
                 TV_NOISE_STD    =[[0.01, 0.02]]*5,
                 Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
@@ -107,21 +107,29 @@ class SMPC():
         if eval_mode:
             s_opts.update({'max_wall_time': 15.,'constr_viol_tol':1e-4})
 
-        s_opts_grb = {'OutputFlag': 0, 'PSDTol' : 1e-2,
-                       'FeasibilityTol' : 1e-2, 
-                       'BarConvTol':1e-2, 
-                       'BarQCPConvTol':1e-2,
+        s_opts_grb = {'OutputFlag': 0, 'PSDTol' : 1e-3,
+                       'FeasibilityTol' : 1e-3, 
+                       'BarConvTol':1e-3, 
+                       'BarQCPConvTol':1e-3,
                        'LogToConsole': 0}
-        p_opts_grb = {'expand': True,'error_on_fail':0, 'verbose':False, 'ad_weight':0}
+        p_opts_grb = {'expand': False,'error_on_fail':0, 'verbose':False, 'ad_weight':0}
 
         self.solver=solver
         
         if self.solver=="ipopt":
             self.opti=ca.Opti()
             self.opti.solver("ipopt", p_opts, s_opts)
-        else:
+        elif self.solver=="gurobi":
             self.opti=ca.Opti("conic")
             self.opti.solver("gurobi", p_opts_grb, s_opts_grb)
+        elif self.solver=="mosek":
+            self.opti=ca.Opti("conic")
+            self.opti.solver("mosek", p_opts, s_opts)
+        elif self.solver=="scs":
+            self.opti=ca.Opti("conic")
+            self.opti.solver("scs", p_opts, s_opts)
+        else:
+            raise ValueError(f"Unknown solver: {self.solver}")
 
         def _flatten2ca(xs):
             if type(xs) == type([]):
@@ -156,10 +164,9 @@ class SMPC():
         self.params+=[self.z_tv_curr, self.u_tvs, self.pos_tvs, self.dpos_tvs, self.Qs, self.psi_tvs, self.tv_params,self.s0]
 
         if not self.offline:
+            #Parameters for constraint and gain screening
             self.gain_keep=[[self.opti.parameter(self.N-1,1) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-            self.constr_keep=[[self.opti.parameter(self.N-1,1) for j in range(len(self.mode_map))] for k in range(self.N_TV)]
-
-        # self.params +=[self.gain_keep, self.constr_keep]
+            self.constr_keep=[[self.opti.parameter(self.N-1,1) for m in range(len(self.mode_map))] for k in range(self.N_TV)]
 
         self.params = ca.vertcat(*_flatten2ca(self.params))  
         
@@ -177,7 +184,6 @@ class SMPC():
         self._update_red_light(None,None)
         self._update_speed_limit(self.config['v_max'])
         self._update_leading_vehicle_params(None)
-
         if not self.offline: 
             _,_,_,_ = self.update_gain_and_constr_keeps()  
         self.solve(first_solve=True)
@@ -187,56 +193,49 @@ class SMPC():
         """
         EV Affine disturbance feedback + TV state feedback policies from https://arxiv.org/abs/2109.09792
         """ 
-        h0=self.opti.variable(1)
         if self.config['collision_avoidance_method'] == 'obca':
             self.obca_lmbd = [[self.opti.variable(4, self.N-1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)] #Assuming rectangular obstacles
             self.obca_lmbd_redlight = self.opti.variable(4, self.N-1)
-        # if self.config['collision_avoidance_method'] == 'affine':
         self.slack = [[[self.opti.variable(1) for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
-        # else:
-        #     self.slack = self.opti.variable(1)
+        self.slack_vec = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[self.slack[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
+
+        #Parameters for red light and lead vehicle collision avoidance
         self.redlight = self.opti.parameter(2,1)
         self.lead_vehicle_s = self.opti.parameter(1)
 
-        # Uncomment next line for disturbance feedback when using Gurobi. 
-        # Runs slow with Ipopt (default)
-        # M=[[[self.opti.variable(1, 2) for n in range(t)] for t in range(self.N)] for j in range(self.N_modes)]
-        M=[[ca.DM(1, 2) for n in range(t)] for t in range(self.N)] #set to 
-        h=[self.opti.variable(1) for t in range(self.N-1)]
+        M=[[ca.DM(1, 2) for n in range(t)] for t in range(self.N)] #Not Used
+        h0=self.opti.variable(1) #Initial nominal input
+        h=[self.opti.variable(1) for t in range(self.N-1)] #nominal input sequence
+
         if self.open_loop:
             K=[[[ ca.DM(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
         else:
-            if not self.offline:
+            if not self.offline: #evaluation mode (online)
                 K4screening=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-                K=[[[ca.if_else(self.gain_keep[k][j][t], K4screening[k][j][t], ca.MX.zeros(1, 2), True) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
-                # K=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
-                # h=[[self.opti.variable(1) for t in range(self.N-1)] for j in range(m.prod(self.N_modes))]
+                # K=[[[ca.if_else(self.gain_keep[k][j][t], K4screening[k][j][t], ca.MX.zeros(1, 2)) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
+                K=[[[self.gain_keep[k][j][t]*K4screening[k][j][t] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
             else: 
                 K=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
-                # K=[[[K[k][j][t] if t%2 == 0 else K[k][j][t-1] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
                 self.gain_l1=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-        # h=[[self.opti.variable(1) for t in range(self.N-1)] for j in range(m.prod(self.N_modes))]            
         h_stack=ca.vertcat(h0,*[h[t] for t in range(self.N-1)])
-        # M_stack=[ca.vertcat(*[ca.horzcat(*[M[j][t][n] for n in range(t)], ca.DM(1,2*(self.N-t))) for t in range(self.N)]) for j in range(self.N_modes)]
-        # h_stack=[ca.vertcat(h0,*[h[j][t] for t in range(self.N-1)]) for j in range(m.prod(self.N_modes))]
         M_stack=ca.vertcat(*[ca.horzcat(*[M[t][n] for n in range(t)], ca.DM(1,2*(self.N-t))) for t in range(self.N)])
-        K_stack=[[ca.diagcat(ca.DM(1,2),*[K[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
+        K_stack=[[ca.diagcat(ca.DM(1,2),*[K[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] #Gains for the first time step is set to zero
 
         if self.config['collision_avoidance_method'] == 'obca':
-            # self.vars_pol = ca.vertcat(h_stack, self.slack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
             self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
         else:
             #Affine
             self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
-        self.slack_vec = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[self.slack[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
+
         if self.offline:
             self.vars_epi = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(self.gain_l1[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
         else:
             if self.config['collision_avoidance_method'] == 'obca':
                 self.vars_pol4screening = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K4screening[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
-                # self.vars_pol4screening = ca.vertcat(h_stack, self.slack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K4screening[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
             else:
                 self.vars_pol4screening = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K4screening[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
+        
+        #Variables for warmstart
         self.vars_ws, self.vars_epi_ws  = None, None 
         return h_stack,M_stack,K_stack
 
@@ -317,34 +316,38 @@ class SMPC():
 
         self.nom_z_tv=[[T_tv[k][j]@self.z_tv_curr[k]+c_tv[k][j]  for j in range(self.N_modes[k])] for k in range(self.N_TV)]
         
-        
+        #Cost initialization
         cost = 0
+        #State and input constraints
         # self.opti.subject_to(self.opti.bounded(self.V_MIN, A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h, self.V_MAX))
         self.opti.subject_to(self.V_MIN<=A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h)
         self.opti.subject_to(A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h <= self.V_MAX + self.slack[0][0][0])
         self.opti.subject_to(self.opti.bounded(self.A_MIN, h, self.A_MAX))
         
+        #Propagate nominal dynamics
         nom_z=A@self.z_curr+B@h
         self.nom_z = nom_z
         nom_s=ca.vec(nom_z.reshape((2,-1))[0,:])
         nom_z_diff=ca.vec(ca.diff(nom_z.reshape((2,-1)),1,1))
-        #collision avoidance with the lead vehicle
+
+        #collision avoidance with the lead vehicle (added because wayformer doesn't detect objects that doesn't move by some threshold)
         self.lead_vehicle_constr = nom_s[-1]<= self.lead_vehicle_s-self.s0 - self.ev_length*2 - 1 +self.slack[0][0][0] #s_{N|t} <= s_{lead|t} - 2*ev_length - 1 + slack
         self.opti.subject_to(self.lead_vehicle_constr) #s_{N|t} <= s_{lead|t}
+
         # cost+=-2.7*self.Q_cost*ca.sum1(nom_s) +2.*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -2.5, 2)
         cost += -0.05*self.Q_cost*ca.sum1(nom_s) + 0.2*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -4, 3.5)
         cost += self.R_cost*0.02*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates
         if self.offline:
-            self.lin_ineq_l1 = []
-            self.ca_ineq = []
-            self.l1_constr=[[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
-            self.ca_constr=[[[ [] for _ in range(self.N-1)] for _ in range(len(self.mode_map))] for _ in range(self.N_TV)]
-            self.test = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
-            self.test2 = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
-            self.test3 = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
+            self.lin_ineq_l1    = []
+            self.ca_ineq        = []
+            self.l1_constr      = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
+            self.ca_constr      = [[[ [] for _ in range(self.N-1)] for _ in range(len(self.mode_map))] for _ in range(self.N_TV)]
 
-        # OBCA for redlight
+        '''
+        Red light related constraints
+        '''
         if self.config['collision_avoidance_method'] == 'obca':
+            # OBCA for redlight
             redlight_obca_lmbd = self.obca_lmbd_redlight
             d_min_red = 0
             
@@ -372,11 +375,16 @@ class SMPC():
                 self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-self.s0-0.5))
         else:  
             raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}")
+
+        '''
+        Collision avoidance constraints
+        '''
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
                 cost += 0.04*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
                 for t in range(1, self.N):  # position at time-step 1 not a function of decision variables 
+                    #Compute the soc constraints (z,y)\in K
                     if self.config['collision_avoidance_method'] == 'obca':
                         '''
                         OBCA constraints
@@ -452,41 +460,28 @@ class SMPC():
                         # self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
                         # self.ca_ineq.append(ca.vertcat(z,y))
 
-                        #slack cost
-                        # cost += 1e5*self.slack**2
-
                         #obca_lambd cost for PD hessian
                         # cost += 0.05*ca.vec(obca_lmbd[k][m][:,t-1]).T@ca.vec(obca_lmbd[k][m][:,t-1])
 
                     elif self.config['collision_avoidance_method'] == 'affine':
                         # Linearised obstacle avoidance constraints
                         # EV position projection onto obstacle ellipse
-                        # oa_ref=self.pos_tvs[k][m][:,t]
                         diff = self.x_pos[:,t] - self.pos_tvs[k][m][:,t]
                         mahalanobis_norm = np.sqrt(diff.T @ self.Qs[k][m][t-1] @ diff)
                         oa_ref = self.pos_tvs[k][m][:,t] + diff / mahalanobis_norm
-                        # oa_ref+=(self.x_pos[:,t]-self.pos_tvs[k][m][:,t])/( (self.x_pos[:,t]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-self.pos_tvs[k][m][:,t]) )**(0.5)
-                        # delta = self.x_pos[:, t] - self.pos_tvs[k][m][:, t]
-                        # norm = ca.sqrt(ca.mtimes([delta.T, self.Qs[k][m][t-1], delta]))
-                        # oa_ref = self.pos_tvs[k][m][:, t] + delta / norm
-                        # self.test[k][m][t-1] = diff.T @ self.Qs[k][m][t-1] @ diff
-                        # self.test2[k][m][t-1] = (oa_ref- self.pos_tvs[k][m][:,t]).T @ self.Qs[k][m][t-1] @ (oa_ref - self.pos_tvs[k][m][:,t])
-                        # self.test3[k][m][t-1] = (oa_ref - self.pos_tvs[k][m][:,t]).T @ self.Qs[k][m][t-1] @ (self.x_pos[:,t] - oa_ref)
-                        
-                        # oa_ref+=(self.x_pos[:,0]-self.pos_tvs[k][m][:,t])/((self.x_pos[:,0]-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,0]-self.pos_tvs[k][m][:,t]))**(0.5)
+
                         # Coefficient of random variables in affine chance constraint
                         z=((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:]-int(l==k)*self.dpos_tvs[k][m][t-1]@E_tv[k][m][2*t,:] for l in range(self.N_TV)]))).T
                         z_norm = self.tight*ca.sqrt(ca.sumsqr(z))
-                        # z=self.tight*((oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(ca.horzcat(self.dpos[t-1]@(B[2*t,:]@M+E[2*t,:]),*[self.dpos[t-1]@B[2*t,:]@K[l][self.mode_map[j][l]]@E_tv[l][self.mode_map[j][l]][:2*self.N,:] for l in range(self.N_TV)]))).T
-                        # pdb.set_trace()
-                        # constant term in affine chance constraint self.slack[k][m][t-1]+
+
+                        # constant term in affine chance constraint
                         y=(oa_ref-self.pos_tvs[k][m][:,t]).T@self.Qs[k][m][t-1]@(self.x_pos[:,t]-oa_ref+self.dpos[t-1]*(A[2*t,:]@self.z_curr+B[2*t,:]@h-(self.z_lin[0,t] - self.s0)))
-                        # cost += 1e5*self.slack**2
 
                     else:
                         NotImplementedError("Collision avoidance method not implemented")
+
+                    # Add the collision avoidance constraints. l1 gain constraints if offline
                     if self.solver=="ipopt":
-                        # norm_2(z)<=y
                         if self.offline:
                             if self.config['collision_avoidance_method'] == 'obca':
                                 # self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
@@ -496,7 +491,6 @@ class SMPC():
                                 self.opti.subject_to(obca_lmbd[k][m][:,t-1] >= 0)
                                 self.ca_ineq.append(z_norm-y)
                             elif self.config['collision_avoidance_method'] == 'affine':
-                                # self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z+1e-4)<=y, 0<=y]
                                 self.ca_constr[k][j][t-1]+=[z_norm<=y+self.slack[k][m][t-1],0<=y+self.slack[k][m][t-1]]
                                 self.ca_ineq.append(ca.vertcat(z,y))
                             else:
@@ -510,8 +504,6 @@ class SMPC():
                                 # self.test[k][m][t-1] +=[K[k][m][t,2*t:2*(t+1)]]
                                 self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]]
                                 # tightening the l1 gain constraints (set self.gain_li[k][m][t-1] to be 1 dimensional variable)
-                                # self.l1_constr[k][m][t-1]+=[ca.max(K[k][m][t,2*t:2*(t+1)])<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=ca.min(K[k][m][t,2*t:2*(t+1)])]
-
                                 self.opti.subject_to(self.l1_constr[k][m][t-1][0])
                                 self.opti.subject_to(self.l1_constr[k][m][t-1][1])
 
@@ -529,17 +521,25 @@ class SMPC():
                                 self.opti.subject_to(obca_switch>=0)
                                 self.opti.subject_to(obca_switch_dual>=0)
                             elif self.config['collision_avoidance_method'] == 'affine':
-                                # soc_constr=ca.vertcat(y,y**2-z@z.T)
-                                soc_constr=ca.vertcat(*[y+self.slack[k][m][t-1] - z_norm,y])
-                                soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM(*soc_constr.shape), True)
+                                soc_constr=ca.vertcat(*[y+self.slack[k][m][t-1] - z_norm,y+self.slack[k][m][t-1]])
+                                # soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM.ones(*soc_constr.shape),True)
+                                soc_switch = self.constr_keep[k][j][t-1]*soc_constr + (1-self.constr_keep[k][j][t-1])*ca.DM.ones(*soc_constr.shape)
+
                                 self.opti.subject_to(soc_switch>=0)
                             else:
                                 NotImplementedError("Collision avoidance method not implemented")
+                            # if len(self.l1_constr[k][m][t-1])==0:
+                            #     self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]]
+                            #     self.opti.subject_to(self.l1_constr[k][m][t-1][0])
+                            #     self.opti.subject_to(self.l1_constr[k][m][t-1][1])     
+                            #     cost += self.l1_lmbd*ca.sum1(ca.vec(self.gain_l1[k][m][t-1]))  
+
                     else:
                         # Use for SOCP solvers: SCS and Gurobi
-                        soc_constr=ca.soc(z,y)
+                        soc_constr=ca.soc(z,y+self.slack[k][m][t-1])
                         if self.offline:
-                            self.ca_ineq.append(ca.horzcat(z,y))
+                            self.ca_ineq.append(ca.vertcat(z,y))
+                            self.opti.subject_to(soc_constr>0)
                             if len(self.l1_constr[k][m][t-1])==0:
                                 self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]]
                                 self.opti.subject_to(self.l1_constr[k][m][t-1][0])
@@ -547,19 +547,14 @@ class SMPC():
 
                                 self.lin_ineq_l1+=[K[k][m][t,2*t:2*(t+1)]-self.gain_l1[k][m][t-1]] #only the first constraint: g1
                                 cost += self.l1_lmbd*ca.sum1(ca.vec(self.gain_l1[k][m][t-1]))
-                                self.opti.subject_to(soc_constr>0)
                         else:
-                            soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM(*soc_constr.shape), True)
-                            self.opti.subject_to(soc_switch>0)
-
-                            # # obca related constraint screening
-                            # obca_constr = ca.vertcat(1 + self.slack - (A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
-                            # obca_switch=ca.if_else(self.constr_keep[k][j][t-1], obca_constr, ca.DM(*obca_constr.shape), True)
-                            # self.opti.subject_to(obca_switch>0)
-        # if self.config['collision_avoidance_method'] == 'affine': 
+                            soc_constr=ca.soc(self.constr_keep[k][j][t-1]*z,y+self.slack[k][m][t-1] + (1-self.constr_keep[k][j][t-1])*ca.DM.ones(1))
+                            # soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM.ones(*soc_constr.shape),True)
+                            self.opti.subject_to(soc_constr>0)
         cost += 1e4*self.slack_vec.T@self.slack_vec
         self.opti.minimize( cost ) 
 
+        #Canonical Form Computations
         if self.offline:
             #g(x) <= 0
             self.lin_ineq_constr =[]
@@ -634,7 +629,6 @@ class SMPC():
             st = time.time()
             sol = self.opti.solve()
             solve_time = time.time() - st
-            # print(f'Solve Time: {solve_time}')
             # Collect Optimal solution.
             u_control  = sol.value(self.policy[0][0])
             h_opt      = sol.value(self.policy[0]).squeeze()
@@ -651,24 +645,16 @@ class SMPC():
                 l1_duals=[[[[sol.value(self.opti.dual(self.l1_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
                 #TODO: if g1_inf norm prediction
                 # l1_duals=[[[[np.linalg.norm(sol.value(self.opti.dual(self.l1_constr[k][j][t][0])),ord=np.inf)] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-                ca_duals=[[[[sol.value(self.opti.dual(self.ca_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(len(self.mode_map))] for k in range(self.N_TV)]
+                ca_duals=[[[[sol.value(self.opti.dual(self.ca_constr[k][m][t][0]))] for t in range(self.N-1)] for m in range(len(self.mode_map))] for k in range(self.N_TV)]
             leading_vehicle_active = (sol.value(self.opti.dual(self.lead_vehicle_constr)) > 1e-3)
             is_opt     = True
-            # Debug checking for non-zero gains K
-            # eps = 1e-3
-            # for k in range(self.N_TV):
-            #     for j in range(len(self.mode_map)):
-            #         m=self.mode_map[j][k]
-            #         for t in range(1,self.N):
-            #             if np.max(np.abs(self.opti.value(self.test[k][m][t-1][0]))) > eps:
-            #                 print('Non-zero gain found in test')
-            #                 pdb.set_trace()
-
             eigs = np.linalg.eig(sol.value(self.Q).toarray())
             largest_eig = np.max(eigs[0])
-            smllest_eig = np.min(eigs[0])
+            smallest_eig = np.min(eigs[0])
             print(f'Largest Eigenvalue: {largest_eig}')
-            print(f'Smallest Eigenvalue: {smllest_eig}')
+            print(f'Smallest Eigenvalue: {smallest_eig}')
+            print(eigs[0])
+            pdb.set_trace()
         except:
             # self.opti.debug.show_infeasibilities()
             # t=0
@@ -738,7 +724,7 @@ class SMPC():
         #reconstruct self.constr_keep lists
         if not self.offline:
             gain_keep=[[self.opti.value(self.gain_keep[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-            constr_keep=[[self.opti.value(self.constr_keep[k][j]) for j in range(len(self.mode_map))] for k in range(self.N_TV)]
+            constr_keep=[[self.opti.value(self.constr_keep[k][m]) for m in range(len(self.mode_map))] for k in range(self.N_TV)]
             print(f'Gain Keep: {gain_keep}')
             print(f'Constr Keep: {constr_keep}')
             sol_dict['gain_keep'] = gain_keep
@@ -864,7 +850,6 @@ class SMPC():
             res *= ele
         return res
     
-
     def _get_canon_form_fns(self):
         '''
         Returns dictionary containing canonical form of the problem (offline mode only)
