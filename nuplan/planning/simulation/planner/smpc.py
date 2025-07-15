@@ -37,7 +37,7 @@ class SMPC():
                 TIGHTENING   =  2.5, # of std that you want to be robust w.r.t. the TV uncertainty
                 EV_NOISE_STD    =  [0.001, 0.001],
                 TV_NOISE_STD    =[[0.01, 0.02]]*5,
-                Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
+                Q = [1.,1.],       # cost for measuring progress: -Q*s_{t+1}. #was 1.
                 R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
                 ev_length = 4.47,
                 offline_mode=True,
@@ -86,7 +86,6 @@ class SMPC():
         self.ev_n_std = EV_NOISE_STD
 
         self.tv_n_std = [TV_NOISE_STD for _ in range(self.N_TV)]
-
         self.Q_cost = ca.diag(Q)
         self.R_cost = ca.diag(R)
 
@@ -267,7 +266,8 @@ class SMPC():
                         T_tv[k][j][t*2:(t+1)*2,:]=self.Atv@T_tv[k][j][(t-1)*2:t*2,:]
                         TB_tv[k][j][t*2:(t+1)*2,:]=self.Atv@TB_tv[k][j][(t-1)*2:t*2,:]
                         TB_tv[k][j][t*2:(t+1)*2,t-1:t]=self.Btv
-                        E_tv[k][j][t*2:(t+1)*2,:]=self.Atv@E_tv[k][j][(t-1)*2:t*2,:]    
+                        # E_tv[k][j][t*2:(t+1)*2,:]=self.Atv@E_tv[k][j][(t-1)*2:t*2,:]
+                        E_tv[k][j][t*2:(t+1)*2,:]=ca.repmat(E, 1, self.N) #No dynamics propagation for the noise in WayFormer    
                         E_tv[k][j][t*2:(t+1)*2,(t-1)*2:t*2]=E #*(t/2)#* (t/3 if t < int(3*self.N/2) else int(self.N/2)/3)
 
                 c_tv[k][j]=TB_tv[k][j]@u_tvs[k][j]             
@@ -333,10 +333,29 @@ class SMPC():
         #collision avoidance with the lead vehicle (added because wayformer doesn't detect objects that doesn't move by some threshold)
         self.lead_vehicle_constr = nom_s[-1]<= self.lead_vehicle_s-self.s0 - self.ev_length*2 - 1 +self.slack[0][0][0] #s_{N|t} <= s_{lead|t} - 2*ev_length - 1 + slack
         self.opti.subject_to(self.lead_vehicle_constr) #s_{N|t} <= s_{lead|t}
-
         # cost+=-2.7*self.Q_cost*ca.sum1(nom_s) +2.*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -2.5, 2)
-        cost += -0.05*self.Q_cost*ca.sum1(nom_s) + 0.2*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -4, 3.5)
-        cost += self.R_cost*0.02*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates
+        cost += -0.05*self.Q_cost[0,0]*ca.sum1(nom_s) + 5.56*nom_z_diff.T@ca.kron(ca.DM.eye(self.N),self.Q_cost)@nom_z_diff# penalizes slow progress (was -4, 3.5)
+        cost += 0.01*self.R_cost*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates
+        # a state=0.5556, b input=0.0010, c=0.0019
+        # for a in np.linspace(0.5,1.0,10):
+        #     for b in np.linspace(0.001,0.003,10):
+        #         for c in np.linspace(0.001,0.003,10):
+        #             # rebuild cost with these two
+        #             cost_test = 0
+        #             cost_test += -0.05*self.Q_cost[0,0]*ca.sum1(nom_s)
+        #             cost_test += a * nom_z_diff.T @ ca.kron(ca.DM.eye(self.N), self.Q_cost) @ nom_z_diff
+        #             cost_test += b * self.R_cost * ca.diff(ca.vertcat(self.u_prev,h),1,0).T @ ca.diff(ca.vertcat(self.u_prev,h),1,0)
+        #             for k in range(self.N_TV):
+        #                 for j in range(len(self.mode_map)):
+        #                     m=self.mode_map[j][k]
+        #                     cost_test += c*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
+        #             H, _ = ca.hessian(cost_test, self.vars_pol)
+        #             eigs = np.linalg.eigvals(self.opti.value(H).toarray())
+        #             sigma = 1/np.min(eigs[np.argwhere(eigs>0)])
+        #             eta = 1/np.max(eigs)
+        #             mult = (1+sigma)/eta
+        #             print(f"a state={a:.4f}, b input={b:.4f}, c={c:.4f}: eig_min={np.min(eigs[np.argwhere(eigs>0)]):.4f}, eig_max={eigs.max():.4f}, multiplier: {mult:.4f}")
+        # cost += 0.2 * self.R_cost * ca.diff(ca.vertcat(h),1,0).T @ ca.diff(ca.vertcat(h), 1, 0) # penalizes large input rates
         if self.offline:
             self.lin_ineq_l1    = []
             self.ca_ineq        = []
@@ -382,7 +401,7 @@ class SMPC():
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
-                cost += 0.04*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
+                cost += 0.019*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
                 for t in range(1, self.N):  # position at time-step 1 not a function of decision variables 
                     #Compute the soc constraints (z,y)\in K
                     if self.config['collision_avoidance_method'] == 'obca':
@@ -653,8 +672,7 @@ class SMPC():
             smallest_eig = np.min(eigs[0])
             print(f'Largest Eigenvalue: {largest_eig}')
             print(f'Smallest Eigenvalue: {smallest_eig}')
-            print(eigs[0])
-            pdb.set_trace()
+            # print(eigs[0])
         except:
             # self.opti.debug.show_infeasibilities()
             # t=0

@@ -265,7 +265,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     A_MAX        =  self.config['a_max'],
                     EV_NOISE_STD    =  self.ev_noise_std,
                     TV_NOISE_STD    = self.tv_noise_std,
-                    Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
+                    Q = [1,1],       # cost for measuring progress: -Q*s_{t+1}. #was 1.
                     R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
                     ev_length=ego_state.car_footprint.vehicle_parameters.length,
                     offline_mode= offline_mode,
@@ -287,7 +287,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     A_MAX        =  self.config['a_max'],
                     EV_NOISE_STD    =  self.ev_noise_std,
                     TV_NOISE_STD    = self.tv_noise_std,
-                    Q = 1.,       # cost for measuring progress: -Q*s_{t+1}. #was 1.
+                    Q = [1.,0.5],       # cost for measuring progress: -Q*s_{t+1}. #was 1.
                     R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
                     ev_length=ego_state.car_footprint.vehicle_parameters.length,
                     offline_mode= True,
