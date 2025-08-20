@@ -13,7 +13,7 @@ import copy
 import os
 import torch as th
 import matplotlib.patches as patches
-from tutorials.policies import RAID_NET
+from tutorials.raidnet import RAID_NET_V2 as RAID_NET
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.maps.nuplan_map.lane_connector import NuPlanLaneConnector
 from nuplan.common.maps.abstract_map_objects import LaneGraphEdgeMapObject
@@ -32,6 +32,7 @@ from nuplan.common.actor_state.agent import Agent
 from nuplan.planning.simulation.planner.smpc_predictor import MultiModalPreds as MultiModalPreds
 from typing import Optional
 import yaml
+import scipy.linalg as la
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.planner.smpc import SMPC
 # from nuplan.planning.simulation.planner.smpc_nlp import SMPC
@@ -101,7 +102,28 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.pred_agent_params = []
         self.smpc_params = []
         self.l1_active = []
-        
+
+        if self.config['eval_mode']:
+            self.expert_computation_time = []
+            self.expert_ca = []
+            self.expert_l1 = []
+            self.expert_optimal_cost = []
+            self.expert_optimal = []
+
+            self.raid_net_classifications = []
+            self.gap_radius = []
+            self.reduced_computation_time = []
+            self.reduced_smpc_optimal = []
+            self.reduced_smpc_optimal_cost = []
+            self.reduced_gain_keep = []
+            self.reduced_constr_keep = []
+
+            self.expert_infeasibility = []
+            self.expert_collisions = []
+
+            self.reduced_infeasibility = []
+            self.reduced_collisions = []
+
         self._initialized = False
         self.t = 0
         self.scenario_num = 0
@@ -237,26 +259,44 @@ class SMPCPlanner(AbstractIDMPlanner):
                 N = self.config['N']
                 with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{N}_canon_form_N_TV'+ str(self.config['num_tvs']) + '_M' + str(self.config['num_modes']) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'rb') as f:
                     canon_prob = pickle.load(f)
+                    print(f'[smpc_planner.py] Loaded Canonical Form smpc_N{N}_canon_form_N_TV'+ str(self.config['num_tvs']) + '_M' + str(self.config['num_modes']) +'_'+ self.config['collision_avoidance_method'] + '.pkl')
                 self.canon_prob = canon_prob
                 n_modes = [self.config['num_modes'] for _ in range(self.config['num_tvs'])]
                 mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(self.config['num_tvs'])])))
-                observation_dim = self.config['num_tvs'] * (4*self.config['N'] + 2)
+                observation_dim = self.config['num_tvs'] * (self.config['num_modes'] * (3 * self.config['N']) + 2 )
                 self.ca_num = len(mode_map)*(self.config['N']-1)*self.config['num_tvs']
-                # self.l1_num = sum(n_modes)*(self.config['N']-1)*2 #2 for each position and velocity disturbance feedback w.r.t. the TV
-                self.l1_num =  sum(n_modes)*(self.config['N']-1)
+                self.l1_num =  sum(n_modes)*(self.config['N']-1)*2 #2 for each position and velocity disturbance feedback w.r.t. the TV
+                
                 num_layers = self.raidnet_config['num_layers']
                 hidden_dim = self.raidnet_config['hidden_dim']
                 device = th.device("cuda:0" if th.cuda.is_available() else "cpu") 
-
+                
                 l1_dual_dim = [self.config['N']-1, n_modes, self.config['num_tvs']]
                 ca_dual_dim = [self.config['N']-1, len(mode_map), self.config['num_tvs']]
                 raidnet_config = {'num_tvs': self.config['num_tvs'], 'num_heads': self.raidnet_config['num_heads'],'dropout_prob':self.raidnet_config['dropout_prob']}
-                l1_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, self.l1_num, self.raidnet_config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=self.l1_num, lambda_ubd=self.config['l1_lmbd'],  pred_mode=['l1','binary','binary'])
-                ca_policy = RAID_NET(raidnet_config,observation_dim, observation_dim, self.ca_num, self.raidnet_config['N']-1, num_layers//2, hidden_dim//2,lambda_dim=self.ca_num, lambda_ubd=self.config['l1_lmbd'], pred_mode=['ca','binary','binary'])
+                l1_policy = RAID_NET(raidnet_config,int(observation_dim/(self.config['num_tvs'])), observation_dim, self.l1_num, self.raidnet_config['N']-1, self.config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=self.l1_num, lambda_ubd=self.config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
+                ca_policy = RAID_NET(raidnet_config,int(observation_dim/(self.config['num_tvs'])), observation_dim, self.ca_num, self.raidnet_config['N']-1, self.config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=self.ca_num, lambda_ubd=self.config['l1_lmbd'], pred_mode=['ca','binary','binary'])
+            
+                # Load the pretrained RAIDNET model
+                l1_policy_state = th.load(self.raidnet_config['l1_model_path'])
+                ca_policy_state = th.load(self.raidnet_config['ca_model_path'])
+                l1_policy.load_state_dict(l1_policy_state['model_state_dict'])
+                ca_policy.load_state_dict(ca_policy_state['model_state_dict'])
                 self.RAID_NET = [l1_policy,ca_policy]
 
+                #Load the feature mean and covariance for normalizing the input features
+                feature_stat = np.load(self.raidnet_config['feature_stat_path']) #open npz file
+                self.feature_mean = th.tensor(feature_stat['feature_mean'], dtype=th.float32)
+                self.feature_cov = th.tensor(feature_stat['feature_cov'], dtype=th.float32)
+                self.feature_cov_inv =  th.tensor(feature_stat['feature_cov_inv'], dtype=th.float32)
+
             # Initialize the SMPC
-            offline_mode = True if not self.config['eval_mode'] else False
+            if self.config['eval_mode']:
+                offline_mode = False
+            elif self.config['eval_mode'] and self.config['expert_only']:
+                offline_mode = True #INitialize as the offline expert
+            else:
+                offline_mode = True
             self.smpc = SMPC(ev=(A,B),
                     N            =  N,
                     V_MIN        = self.config['v_min'],       #Speed, acceleration constraints
@@ -275,11 +315,10 @@ class SMPCPlanner(AbstractIDMPlanner):
                     is_mm_preds=self.config['is_mm_preds'],
                     route = self.ego_route,
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state) if self.config['prediction_method']=='idm' else [[0 for _ in range(self.config['num_tvs'])]],   
-                    canon_prob_fn=canon_prob if self.config['eval_mode'] else None,
+                    canon_prob_fn=canon_prob if (self.config['eval_mode'] and not self.config['expert_only']) else None,
                     config=self.config,)
-            debug = False
-            if debug:
-                self.smpc_offline = SMPC(ev=(A,B),
+            if self.config['eval_mode'] and not self.config['expert_only']:
+                self.smpc_expert = SMPC(ev=(A,B),
                     N            =  N,
                     V_MIN        = self.config['v_min'],       #Speed, acceleration constraints
                     V_MAX        = self.config['v_max'], 
@@ -287,7 +326,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     A_MAX        =  self.config['a_max'],
                     EV_NOISE_STD    =  self.ev_noise_std,
                     TV_NOISE_STD    = self.tv_noise_std,
-                    Q = [1.,0.5],       # cost for measuring progress: -Q*s_{t+1}. #was 1.
+                    Q = [1.,1.],       # cost for measuring progress: -Q*s_{t+1}. #was 1.
                     R = 1.,       # cost for penalizing large input rate: (u_{t+1}-u_t).T@R@(u_{t+1}-u_t) #was 1.5
                     ev_length=ego_state.car_footprint.vehicle_parameters.length,
                     offline_mode= True,
@@ -297,7 +336,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     is_mm_preds=self.config['is_mm_preds'],
                     route = self.ego_route,
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state) if self.config['prediction_method']=='idm' else [[0 for _ in range(self.config['num_tvs'])]],   
-                    canon_prob_fn=canon_prob if self.config['eval_mode'] else None,
+                    canon_prob_fn= None,
                     config=self.config,)
             self._initialized = True
 
@@ -320,7 +359,6 @@ class SMPCPlanner(AbstractIDMPlanner):
                 preds_dict = {'preds': pred, 'prob': prob, 'tv_params': tv_params, 'tv_psi': tv_psi, 'tv_track_tokens': tv_track_tokens}
                 mm_preds = preds_dict
                 update_dict = self.get_update_dict(current_input, preds_dict, tv_paths_se2)
-
         leading_vehicle = self.leading_idm_agent(ego_state,observations,current_input)
         if leading_vehicle is not None:
             leading_vehicle_key =list(leading_vehicle.keys())[0]
@@ -335,53 +373,89 @@ class SMPCPlanner(AbstractIDMPlanner):
             update_dict.update({'leading_vehicle': leading_agent})
         else:
             update_dict.update({'leading_vehicle': None})
-        update_dict.update({'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1/2),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
-
+        update_dict.update({'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
         if self.config['eval_mode']:
             #update canonical form matrices
             # update_dict.update({'canon_prob':self.canon_prob})
             update_dict.update({'canon_prob':1}) #canon_prob form is provided in the initialization of the SMPC Planner
 
-            #Query RAID-Net 
-            if False:
-                obs = self.get_observation(ego_state,update_dict['preds'][0])
-                l1_duals = self.RAID_NET[0](obs)
-                ca_duals = selupdate_dictsf.RAID_NET[1](obs)
+            #RAID-Net Inference
+            if self.t > 0 and hasattr(self, 'ego_traj'): #avoid querying at the first iteration when ego_traj is not defined
+                preds, _ = self.agent_preds2array_wayformer(preds_dict)
+                obs = self.get_observation_for_inference(ego_state,preds,tv_params)
+
+                #Normalize obs
+                obs_norm = (self.feature_cov_inv @ (th.tensor(obs.T,dtype=th.float32)-self.feature_mean.reshape(-1,1))).T
+                obs_reshaped = obs_norm.reshape(1, self.config['num_tvs'], -1)
+
+                # obs_norm = np.real(la.solve(np.real(la.sqrtm(self.feature_cov)), (th.tensor(obs[0,:]) - self.feature_mean).T, assume_a='pos').T)
+                l1_logits = self.RAID_NET[0](obs_reshaped)
+                ca_logits = self.RAID_NET[1](obs_reshaped)
+
+                #Classification
+                l1_duals = l1_logits.argmax(dim=-1)[0].numpy() #Drop the minibatch dimension
+                ca_duals = (th.sigmoid(ca_logits) > 0.5).long()[0].numpy()
+                print('[smpc_planner.py] Using RAID-Net Output...')
+                self.raidnet_classifications.append([l1_duals,ca_duals])
             else:
-                #test random 0-1 vector
-                l1_duals = np.random.randint(3,size=int(self.l1_num))
-                ca_duals = np.random.randint(2,size=self.ca_num)
+                #ALL 1's
+                # l1_duals = np.ones((self.l1_num,),dtype=int)
+                # ca_duals = np.ones((self.ca_num,),dtype=int)
+                l1_duals = None
+                ca_duals = None
 
             #update l1 and ca duals
             update_dict.update({'l1_duals':l1_duals, 'ca_duals':ca_duals})
         self.prev_update_dict = update_dict
-
-        # self.smpc.update(update_dict) 
-        debug = False
-        if debug:
-            self.smpc_offline.update(update_dict) #update the offline smpc with the same update dict
-            # Solve the SMPC
-            sol_offline = self.smpc_offline.solve()
-            l1_duals_vec = np.fromiter(flatten(sol_offline['l1_duals']),float)
-            ca_duals_vec = np.fromiter(flatten(sol_offline['ca_duals']),float) 
-            l1_duals_class = (l1_duals_vec > 1e-3).astype(int)
-            l1_duals_class += (l1_duals_vec > (self.smpc_offline.l1_lmbd*0.99)).astype(int) 
-            ca_duals_class = (ca_duals_vec > 1e-3).astype(int)
-            update_dict.update({'l1_duals':l1_duals_class, 'ca_duals':ca_duals_class})
-            print(l1_duals_vec)
-            print(ca_duals_vec)
-            l1_dual_active = (1-int(np.all(l1_duals_vec<(self.smpc.l1_lmbd-1e-3)*np.ones(l1_duals_vec.shape[0])))) or (1-int(np.all(l1_duals_vec>1e-3*np.ones(l1_duals_vec.shape[0]))))
-            ca_duals_active = np.sum(ca_duals_vec>1e-3*np.ones(ca_duals_vec.shape[0]))/ca_duals_vec.shape[0]
-            print(ca_duals_active,l1_dual_active)
-
         self.smpc.update(update_dict) 
         sol = self.smpc.solve()
-
         self.optimal = sol['optimal']
+
+        # #Depreciated: obca
+        # if self.config['eval_mode'] and (self.config['collision_avoidance_method'] == 'obca'): #online mode and using obca
+        #     violated_constr = self.smpc.collision_avoidance_constraints_check()
+        #     for constr in violated_constr:
+        #         #Add back the constraints
+        #         (agent_idx,scenario_idx,time_idx,mode_idx) = constr
+        #         ca_dual_idx = agent_idx * (self.smpc.N-1)*(len(self.smpc.mode_map)) + scenario_idx * (self.smpc.N-1) + time_idx
+        #         l1_dual_idx = (self.smpc.N-1)* sum([self.smpc.N_modes[k] for k in range(agent_idx)]) + mode_idx * (self.smpc.N-1) + time_idx
+        #         #TODO: Fix and check if idx and assignments below are correct
+        #         ca_duals[ca_dual_idx] = 1
+        #         l1_duals[l1_dual_idx] = [1,1]       
+        #     #solve again
+        #     self.smpc.update(update_dict)
+        #     sol = self.smpc.solve()
+        #     self.optimal = sol['optimal']
+
         info = {}
         if not self.check_preds(preds):
             print('Empty preds detected')
             raise ValueError
+
+        #Solve the expert if evaluation mode
+        if self.config['eval_mode'] and not self.config['expert_only']:
+            self.smpc_expert.update(update_dict)
+            expert_sol = self.smpc_expert.solve()
+            expert_optimal = expert_sol['optimal']
+            if expert_optimal:
+                self.expert_computation_time.append(expert_sol['computation_time'])
+                self.expert_ca.append(np.fromiter(flatten(expert_sol["ca_duals"]),float))
+                self.expert_l1.append(np.fromiter(flatten(expert_sol["l1_duals"]),float))
+                self.expert_optimal_cost.append(sol['optimal_cost_wo_slack'])
+                self.expert_optimal.append(1)
+
+                self.expert_infeasibility.append(0)
+                self.expert_collisions.append(0) #assume no collision as long as nuPlan is running. collision is detected by nuPlan's own metrics
+            else:
+                self.expert_computation_time.append(np.nan)
+                self.expert_ca.append(np.nan)
+                self.expert_l1.append(np.nan)
+                self.expert_optimal_cost.append(np.inf)
+                self.expert_optimal.append(0)
+
+                self.expert_infeasibility.append(1)
+                self.expert_collisions.append(0)
+
         if self.optimal:
             # Get the optimal DUALS
             if not self.config['eval_mode']: #offline mode
@@ -407,6 +481,18 @@ class SMPCPlanner(AbstractIDMPlanner):
                 print(l1_duals_vec)
                 print(dual_class)
                 print(ca_duals_active,l1_dual_active)
+            else:
+                #Evaluation mode
+                self.gap_radius.append(sol['gap_radius'])
+                self.reduced_computation_time.append(sol['computation_time'])
+                self.reduced_smpc_optimal.append(1)
+                self.reduced_smpc_optimal_cost.append(sol['optimal_cost_wo_slack'])
+                self.reduced_gain_keep.append(np.fromiter(flatten(sol["gain_keep"]),float))
+                self.reduced_constr_keep.append(np.fromiter(flatten(sol["constr_keep"]),float))
+
+                self.reduced_infeasibility.append(0)
+                self.reduced_collisions.append(0) #assume no collision as long as nuPlan is running. collision is detected by nuPlan's own metrics
+                
             if (self.config['eval_mode_category']==0):
                 pred = mm_preds
                 if self.config['prediction_method']=='idm':
@@ -433,6 +519,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.ego_planned_trajs.append(self.s2xy(sol['nom_z'][0,1:]))
             self.ego_opt_sols_full_state.append(self.get_ego_full_state())
             self.smpc_params.append(self.smpc.opti.value(self.smpc.params))
+
             if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
                 pred.update({'leading_vehicle':leading_agent}) #update the leading agent in the prediction
             pred.update({'leading_vehicle_active':sol['leading_vehicle_active']}) #update the leading agent active status in the prediction
@@ -453,7 +540,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 canon_prob_fn_precomputed = self.smpc._get_canon_form_fns_precomputed()
                 with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn_precomputed, f)
-                print(f'[Eval Mode] Canonical form saved')   
+                print(f'[Eval Mode] Canonical form saved')  
             # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True) 
         else:
             print('No optimal solution found') 
@@ -462,7 +549,17 @@ class SMPCPlanner(AbstractIDMPlanner):
             fig = self.visualize_scene(current_input, preds_dict, 0)
             self.figs_w_preds.append(fig)
             self.scenario_type = scenario_type
-            
+            if self.config['eval_mode']:
+                self.gap_radius.append(sol['gap_radius'])
+                self.reduced_computation_time.append(np.nan)
+                self.reduced_smpc_optimal.append(0)
+                self.reduced_smpc_optimal_cost.append(np.inf)
+                self.reduced_gain_keep.append(np.fromiter(flatten(sol["gain_keep"]),float))
+                self.reduced_constr_keep.append(np.fromiter(flatten(sol["constr_keep"]),float))
+
+                self.reduced_infeasibility.append(1)
+                self.reduced_collisions.append(0) #assume no collision as long as nuPlan is running. collision is detected by nuPlan's own metrics 
+
             # self.visualize_scene(current_input, pred, 0,visualize=True)
             # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True)
             # self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
@@ -566,6 +663,20 @@ class SMPCPlanner(AbstractIDMPlanner):
             # else:
             #     obs[:,5+4*self.config['num_tvs']+i] = 0
         return obs
+
+    def get_observation_for_inference(self, current_input, predictions, tv_params):
+        if hasattr(self,'ego_traj'):
+            ego_opt_traj = self.get_ego_full_state()
+            agent_preds = predictions
+            agent_params = tv_params #agent l and w
+            ego_opt_traj = np.expand_dims(ego_opt_traj,axis=(2,3)).T #(1,1,N,4)
+            delta_traj = agent_preds[:,:,[0,1,3],:] - ego_opt_traj[:,:,[0,1,3],:] #(n_tv,num_modes,3,N) - (1,N,3,1)
+            delta_traj = np.transpose(delta_traj,(0,1,3,2)) #(n_tv,num_modes,N,3)
+            delta_traj = np.reshape(delta_traj,(self.config['num_tvs'],-1)) #(n_tv,3*N)
+            obs = np.concatenate((agent_params, delta_traj),axis=1) #(n_tv,2+3*N)
+            #flatten obs to row first (C-order)
+            obs = np.reshape(obs,(1,-1)) #(1,n_tv*(2+3*N))
+        return obs
     
     def check_preds(self,preds):
         for pred in preds:
@@ -614,8 +725,10 @@ class SMPCPlanner(AbstractIDMPlanner):
             nearest_id, nearest_agent_polygon, relative_distance = intersecting_agents.get_nearest_entry_to(
                 self._ego_token
             )
-
-            return {nearest_id: self._get_leading_idm_agent(ego_state, unique_observations[nearest_id], relative_distance)}
+            if 'red_light' in nearest_id:
+                return None
+            else:
+                return {nearest_id: self._get_leading_idm_agent(ego_state, unique_observations[nearest_id], relative_distance)}
         
         return None
     
@@ -975,122 +1088,73 @@ class SMPCPlanner(AbstractIDMPlanner):
         #Delete SMPC instance for serialization
         #Store the observation, preds, dual_class, expert_action in a pickle form
         print('End of simulation')
-        if self.t >= 5:
-            try:
-                print('Saving data...')
-                if not self.config['eval_mode']:
-                    save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
-                    filepath = save_dir + '.gz'
-                    if not os.path.exists(filepath): 
-                        with gzip.open(filepath, 'wb') as f:
-                            # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
+        if self.config['eval_mode']:
+            eval_str = '_eval'
+        else:
+            eval_str = ''
+        viddir = '/home/mpc/nuplan-devkit/nuplan/expert_data/video/N'+str(self.config['N'])+'_' + str(self.config['prediction_method']) + '_' + str(self.config['collision_avoidance_method']) + eval_str + '/'
+        duplicate_scenario = False
+        for di in viddir:
+            if logname in di:
+                duplicate_scenario=True
+                break
+        if not duplicate_scenario:
+            if self.t >= 5:
+                try:
+                    print('Saving data...')
+                    if not self.config['eval_mode']:
+                        save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] +'.pkl'
+                        filepath = save_dir + '.gz'
+                        if not os.path.exists(filepath): 
+                            with gzip.open(filepath, 'wb') as f:
+                                pickle.dump({'log_iter':[self.log_iter],
+                                            'logname': [logname], 
+                                            'scenario_id': [self.scenario_id], 
+                                            'ego_opt_sol':[self.ego_opt_sols_full_state], 
+                                            'ego_cl_traj': [self.cl_ego_traj], 
+                                            'ego_planned_trajs':[self.ego_planned_trajs],
+                                            'iteration_data': [self.iteration_data], 
+                                            'optimal_duals': [self.expert_action],
+                                            'dual_class':[self.dual_class],
+                                            'l1_active': [self.l1_active],
+                                            'preds':[self.preds],
+                                            'scenario_type': [self.scenario_type],
+                                            'agent_params':[self.pred_agent_params],
+                                            'smpc_params':[self.smpc_params]}, 
+                                            f, protocol=pickle.HIGHEST_PROTOCOL)
+                        else:
+                            with gzip.open(filepath, 'rb') as f:
+                                data = pickle.load(f)
+                            data['optimal_duals'].append(self.expert_action)
+                            data['scenario_id'].append(self.scenario_id)
+                            data['iteration_data'].append(self.iteration_data)
+                            data['dual_class'].append(self.dual_class)
+                            data['ego_cl_traj'].append(self.cl_ego_traj)
+                            data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
+                            data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
+                            data['preds'].append(self.preds)
+                            data['l1_active'].append(self.l1_active)
+                            data['agent_params'].append(self.pred_agent_params)
+                            data['log_iter'].append(self.log_iter)
+                            data['scenario_type'].append(self.scenario_type)
+                            data['smpc_params'].append(self.smpc_params)
                             # if logname is not None:
-                            pickle.dump({'log_iter':[self.log_iter],
-                                        'logname': [logname], 
-                                        'scenario_id': [self.scenario_id], 
-                                        'ego_opt_sol':[self.ego_opt_sols_full_state], 
-                                        'ego_cl_traj': [self.cl_ego_traj], 
-                                        'ego_planned_trajs':[self.ego_planned_trajs],
-                                        'iteration_data': [self.iteration_data], 
-                                        'optimal_duals': [self.expert_action],
-                                        'dual_class':[self.dual_class],
-                                        'l1_active': [self.l1_active],
-                                        'preds':[self.preds],
-                                        'scenario_type': [self.scenario_type],
-                                        'agent_params':[self.pred_agent_params],
-                                        'smpc_params':[self.smpc_params]}, 
-                                        f, protocol=pickle.HIGHEST_PROTOCOL)
-                            # else:
-                            #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                    else:
-                        with gzip.open(filepath, 'rb') as f:
-                            data = pickle.load(f)
-                        data['optimal_duals'].append(self.expert_action)
-                        data['scenario_id'].append(self.scenario_id)
-                        # data['observation'].append(self.observation)
-                        data['iteration_data'].append(self.iteration_data)
-                        data['dual_class'].append(self.dual_class)
-                        data['ego_cl_traj'].append(self.cl_ego_traj)
-                        data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
-                        data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
-                        data['preds'].append(self.preds)
-                        data['l1_active'].append(self.l1_active)
-                        data['agent_params'].append(self.pred_agent_params)
-                        data['log_iter'].append(self.log_iter)
-                        data['scenario_type'].append(self.scenario_type)
-                        data['smpc_params'].append(self.smpc_params)
-                        # if logname is not None:
-                        data['logname'].append(logname)
-                        with gzip.open(filepath, 'wb') as f:
-                            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                            f.flush()
-                    print('Data saved to', filepath)
-                    # Save the list of figures as video
-                    # Define the codec and create a VideoWriter object
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
-
-                    # check if the directory exists, if not create it
-                    if not os.path.exists(vid_save_dir):
-                        os.makedirs(vid_save_dir) 
-                        print(f"Created directory: {vid_save_dir}")
-
-                    out = cv2.VideoWriter(vid_save_dir+self.scenario_id+ '_' + str(self.scenario_num) + '_' +self.scenario_type + '_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
-
-                    for fig in self.figs_w_preds:
-                        # Convert the figure to an image
-                        fig.canvas.draw()
-                        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-
-                        # Write the image to the video file
-                        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                        out.write(img_bgr)
-
-                    # Release the VideoWriter object
-                    out.release()
-                    print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.smpc.N}_{self.log_iter}.mp4")
-                    # pdb.set_trace()
-                else:
-                    #in evaluation mode
-                    save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_eval'+ '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] + '_' + self.config['prediction_method'] +'.pkl'
-                    filepath = save_dir + '.gz'
-                    if not os.path.exists(filepath): 
-                        with gzip.open(filepath, 'wb') as f:
-                            # pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class, 'preds': self.preds}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                            # if logname is not None:
-                            pickle.dump({'log_iter':[self.log_iter],'logname': [logname], 'scenario_type':[self.scenario_type],'scenario_id': [self.scenario_id], 'ego_opt_sol':[self.ego_opt_sols_full_state], 'ego_cl_traj': [self.cl_ego_traj], 'ego_planned_trajs':[self.ego_planned_trajs],'iteration_data': [self.iteration_data],'preds':[self.preds],'agent_params':[self.pred_agent_params]}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                            # else:
-                            #     pickle.dump({'optimal_duals': self.expert_action, 'observation':self.observation, 'dual_class':self.dual_class}, f, protocol=pickle.HIGHEST_PROTOCOL)
-                    else:
-                        with gzip.open(filepath, 'rb') as f:
-                            data = pickle.load(f)
-                        data['scenario_id'].append(self.scenario_id)
-                        # data['observation'].append(self.observation)
-                        data['iteration_data'].append(self.iteration_data)
-                        data['ego_cl_traj'].append(self.cl_ego_traj)
-                        data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
-                        data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
-                        data['preds'].append(self.preds)
-                        data['agent_params'].append(self.pred_agent_params)
-                        data['scenario_type'].append(self.scenario_type)
-                        data['log_iter'].append(self.log_iter)
-                        # if logname is not None:
-                        data['logname'].append(logname)
-                        with gzip.open(filepath, 'wb') as f:
-                            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                            f.flush()
-                        
+                            data['logname'].append(logname)
+                            with gzip.open(filepath, 'wb') as f:
+                                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                                f.flush()
+                        print('Data saved to', filepath)
                         # Save the list of figures as video
-                        # Define the codebluec and create a VideoWriter object
-                        # pdb.set_trace()
+                        # Define the codec and create a VideoWriter object
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                         vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
+
                         # check if the directory exists, if not create it
                         if not os.path.exists(vid_save_dir):
                             os.makedirs(vid_save_dir) 
                             print(f"Created directory: {vid_save_dir}")
-                        out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+
+                        out = cv2.VideoWriter(vid_save_dir+self.scenario_id+ '_' + str(self.scenario_num) + '_' +self.scenario_type + '_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
 
                         for fig in self.figs_w_preds:
                             # Convert the figure to an image
@@ -1104,11 +1168,101 @@ class SMPCPlanner(AbstractIDMPlanner):
 
                         # Release the VideoWriter object
                         out.release()
-                        # pdb.set_trace() 
-            except:
-                pdb.set_trace()    
-        else:
-            pass
+                        print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.smpc.N}_{self.log_iter}.mp4")
+                        # pdb.set_trace()
+                    else:
+                        #in evaluation mode
+                        save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_eval'+ '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] + '_' + self.config['prediction_method'] +'.pkl'
+                        filepath = save_dir + '.gz'           
+                        if not os.path.exists(filepath): 
+                            with gzip.open(filepath, 'wb') as f:
+                                pickle.dump({'log_iter':[self.log_iter],
+                                            'logname': [logname], 
+                                            'scenario_type':[self.scenario_type],
+                                            'scenario_id': [self.scenario_id], 
+                                            'ego_opt_sol':[self.ego_opt_sols_full_state], 
+                                            'ego_cl_traj': [self.cl_ego_traj], 
+                                            'ego_planned_trajs':[self.ego_planned_trajs],
+                                            'iteration_data': [self.iteration_data],
+                                            'preds':[self.preds],
+                                            'agent_params':[self.pred_agent_params],
+                                            'expert_computation_time': [self.expert_computation_time],
+                                            'expert_ca': [self.expert_ca], 
+                                            'expert_l1': [self.expert_l1], 
+                                            'expert_optimal_cost': [self.expert_optimal_cost],
+                                            'expert_optimal': [self.expert_optimal], 
+                                            'raid_net_classifications': [self.raid_net_classifications], 
+                                            'gap_radius': [self.gap_radius], 
+                                            'reduced_computation_time': [self.reduced_computation_time], 
+                                            'reduced_smpc_optimal': [self.reduced_smpc_optimal], 
+                                            'reduced_smpc_optimal_cost': [self.reduced_smpc_optimal_cost], 
+                                            'reduced_gain_keep': [self.reduced_gain_keep], 
+                                            'reduced_constr_keep': [self.reduced_constr_keep], 
+                                            'expert_infeasibility': [self.expert_infeasibility], 
+                                            'expert_collisions': [self.expert_collisions], 
+                                            'reduced_infeasibility': [self.reduced_infeasibility], 
+                                            'reduced_collisions': [self.reduced_collisions],
+                                            'figs_w_preds': [self.figs_w_preds]
+                                            }, f, protocol=pickle.HIGHEST_PROTOCOL)
+                        else:
+                            with gzip.open(filepath, 'rb') as f:
+                                data = pickle.load(f)
+                            data['scenario_id'].append(self.scenario_id)
+                            data['iteration_data'].append(self.iteration_data)
+                            data['ego_cl_traj'].append(self.cl_ego_traj)
+                            data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
+                            data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
+                            data['preds'].append(self.preds)
+                            data['agent_params'].append(self.pred_agent_params)
+                            data['scenario_type'].append(self.scenario_type)
+                            data['log_iter'].append(self.log_iter)
+                            data['logname'].append(logname)
+                            data['expert_computation_time'].append(self.expert_computation_time)
+                            data['expert_ca'].append(self.expert_ca)
+                            data['expert_l1'].append(self.expert_l1)
+                            data['expert_optimal_cost'].append(self.expert_optimal_cost)
+                            data['expert_optimal'].append(self.expert_optimal)
+                            data['raid_net_classifications'].append(self.raid_net_classifications)
+                            data['gap_radius'].append(self.gap_radius)
+                            data['reduced_computation_time'].append(self.reduced_computation_time)
+                            data['reduced_smpc_optimal'].append(self.reduced_smpc_optimal)
+                            data['reduced_smpc_optimal_cost'].append(self.reduced_smpc_optimal_cost)
+                            data['reduced_gain_keep'].append(self.reduced_gain_keep)
+                            data['reduced_constr_keep'].append(self.reduced_constr_keep)
+                            data['expert_infeasibility'].append(self.expert_infeasibility)
+                            data['expert_collisions'].append(self.expert_collisions)
+                            data['reduced_infeasibility'].append(self.reduced_infeasibility)
+                            data['reduced_collisions'].append(self.reduced_collisions)
+                            data['figs_w_preds'].append(self.figs_w_preds)
+                            with gzip.open(filepath, 'wb') as f:
+                                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+                                f.flush()
+                            
+                            # Save the list of figures as video
+                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                            vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
+                            # check if the directory exists, if not create it
+                            if not os.path.exists(vid_save_dir):
+                                os.makedirs(vid_save_dir) 
+                                print(f"Created directory: {vid_save_dir}")
+                            out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+
+                            for fig in self.figs_w_preds:
+                                # Convert the figure to an image
+                                fig.canvas.draw()
+                                img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                                img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+                                # Write the image to the video file
+                                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                                out.write(img_bgr)
+
+                            # Release the VideoWriter object
+                            out.release()
+                except:
+                    pdb.set_trace()    
+            else:
+                pass
         
         #Delete for memory management and lightweight serialization
         del self.smpc

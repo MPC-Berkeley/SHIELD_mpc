@@ -41,18 +41,17 @@ def main(file_path):
         agent_params = data['agent_params'][i] #List[np.array.shape = (n_tv,2)]
         ego_opt_traj = list(map(lambda x: np.expand_dims(x,axis=(2,3)), ego_opt_traj))
         ego_opt_traj_transposed = list(map(np.transpose, ego_opt_traj))
-        delta_traj = [a - b for a, b in zip(agent_preds, ego_opt_traj_transposed)]
+        delta_traj = [a[:,:,[0,1,3],:] - b[:,:,[0,1,3],:] for a, b in zip(agent_preds, ego_opt_traj_transposed)]
         delta_traj = list(map(lambda x: np.transpose(x,(0,1,3,2)), delta_traj))
         delta_traj = list(map(lambda x: np.reshape(x,(agent_params[0].shape[0],-1)), delta_traj))
 
         smpc_params = data['smpc_params'][i]
 
         obs = [np.concatenate((a,b),axis=1) for a, b in zip(agent_params, delta_traj)]
-        #flatten obs to row first 
+        #flatten obs to row first (C-order)
         obs = list(map(lambda x: np.reshape(x,(1,-1)), obs))
-
-        #concatenate smpc_params to obs
-        obs = list(map(lambda x,y: np.concatenate((x,np.expand_dims(y,axis=0)),axis=1), obs, smpc_params))
+        # #concatenate smpc_params to obs
+        # obs = list(map(lambda x,y: np.concatenate((x,np.expand_dims(y,axis=0)),axis=1), obs, smpc_params))
         observations.append(obs)
     smpc_params_dim = smpc_params[0].shape
     out_data = {'observation': observations, 'dual_class': data['dual_class'], 'optimal_duals': data['optimal_duals'], 'smpc_params_dim': smpc_params_dim}
@@ -64,5 +63,6 @@ def main(file_path):
     print(f'Processed data saved to {out_filename}')
 
 if __name__ == "__main__":
-    filepath = '/home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_obca_copy.pkl.gz'
+    # filepath = '/home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_training.pkl.gz'
+    filepath = '/home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine (another copy).pkl.gz'
     main(filepath)

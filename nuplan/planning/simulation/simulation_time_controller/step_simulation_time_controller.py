@@ -40,6 +40,7 @@ class StepSimulationTimeController(AbstractSimulationTimeController):
         if self.current_iteration_index >= self.number_of_iterations()-1:
             print('[StepSimulationTimeController.py] Reached the end of the scenario')
         return self.current_iteration_index >= self.number_of_iterations() - 1
+        # return self.current_iteration_index >= 50
         # return self.current_iteration_index >= self.number_of_iterations() - 1 - self.planner_N
 
     def number_of_iterations(self) -> int:

@@ -10,7 +10,7 @@ class RAID_NET(nn.Module):
   '''
     Recurrent Transformer architecture for predicting the dual variables of a Stochastic MPC problem
   '''
-  def __init__(self,config,input_dim, embed_dim, output_dim, horizon, num_layers, hidden_size,lambda_dim = None, eps = 0.8, lambda_ubd = 1000, pred_mode=["both duals",'tertiary','binary'],device='cuda:0'):
+  def __init__(self,config,input_dim, embed_dim, output_dim, horizon, num_tvs, num_layers, hidden_size,lambda_dim = None, eps = 0.8, lambda_ubd = 1000, pred_mode=["both duals",'tertiary','binary'],device='cuda:0'):
         super(RAID_NET ,self).__init__()
         self.pred_mode = pred_mode
         self.eps = eps

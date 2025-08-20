@@ -117,13 +117,8 @@ def main(args):
     data = load_simulation_log(args.filepath)
     print(data.keys())
     y = np.vstack(data['optimal_duals'])
-    #PCA
-    from sklearn.decomposition import PCA
-    pca = PCA(n_components=2)
-    pca.fit(y[:10000,:])
-    y_pca = pca.transform(y[10000:,:])
-    y 
-    pdb.set_trace()
+
+   
     # print(data['optimal_duals'])
     # print(data['observation'])
     # print(data['dual_class'])
@@ -131,7 +126,8 @@ def main(args):
     # visualize_observation(data,0)
     # replay_simulation(data)
     #Plot the histogram of dual class
-    plt.hist(data['dual_class'], bins=3)
+    plt.hist(data['dual_class'], bins=len(np.unique(data['dual_class'])))
+    pdb.set_trace()
     plt.xlabel('Dual Class')
     plt.ylabel('Frequency')
     plt.title('Histogram of Dual Class')

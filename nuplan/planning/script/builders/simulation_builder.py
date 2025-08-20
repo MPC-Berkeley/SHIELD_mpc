@@ -69,6 +69,19 @@ def build_simulations(
     )
     scenarios = scenario_filter.get_scenarios()
     print(f'Extracted {len(scenarios)} scenarios')
+    # scenario_names = [sc.scenario_name for sc in scenarios]
+
+    # if '08ee9351335b5c9a' in scenario_names:
+    #     print('FOUND IT'.center(50, '!'))
+    #     #Find index of the scenario with id 08ee9351335b5c9a
+    #     scenario_index = scenario_names.index('08ee9351335b5c9a')
+    #     scenario_type = scenarios[scenario_index].scenario_type
+    #     print(f'The selected scenario type is: {scenario_type}')
+    #     import pdb
+    #     pdb.set_trace()
+    # else:
+    #     print('08ee9351335b5c9a not found in the scenarios list')
+    #     raise ValueError('Scenario with id 08ee9351335b5c9a not found in the scenarios list')
 
     metric_engines_map = {}
     if cfg.run_metric:

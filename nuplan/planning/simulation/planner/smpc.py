@@ -60,7 +60,7 @@ class SMPC():
         self.ev_length = ev_length
         self.canon_prob_fn=canon_prob_fn
         self.config = config
-        print('[smpc.py]: Collision Avoidance Method is ',self.config['collision_avoidance_method'])
+        print('[smpc.py] Collision Avoidance Method is',self.config['collision_avoidance_method'])
 
         self.preds = preds #Predictions of the vehicles List[List[IDMAgent]]. Outer list is of length N+1 and inner list is of length N_TV
         self.N_TV=len(preds[0])
@@ -78,9 +78,9 @@ class SMPC():
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3)
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
         if self.config['collision_avoidance_method'] == 'obca':
-            self.tight=2.5
+            self.tight=2.1
         elif self.config['collision_avoidance_method'] == 'affine':
-            self.tight=2.5
+            self.tight=2.3
         else:
             raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}")
         self.ev_n_std = EV_NOISE_STD
@@ -266,9 +266,9 @@ class SMPC():
                         T_tv[k][j][t*2:(t+1)*2,:]=self.Atv@T_tv[k][j][(t-1)*2:t*2,:]
                         TB_tv[k][j][t*2:(t+1)*2,:]=self.Atv@TB_tv[k][j][(t-1)*2:t*2,:]
                         TB_tv[k][j][t*2:(t+1)*2,t-1:t]=self.Btv
-                        # E_tv[k][j][t*2:(t+1)*2,:]=self.Atv@E_tv[k][j][(t-1)*2:t*2,:]
-                        E_tv[k][j][t*2:(t+1)*2,:]=ca.repmat(E, 1, self.N) #No dynamics propagation for the noise in WayFormer    
-                        E_tv[k][j][t*2:(t+1)*2,(t-1)*2:t*2]=E #*(t/2)#* (t/3 if t < int(3*self.N/2) else int(self.N/2)/3)
+                        # E_tv[k][j][t*2:(t+1)*2,:] = self.Atv@E_tv[k][j][(t-1)*2:t*2,:]
+                        E_tv[k][j][t*2:(t+1)*2,:] = ca.repmat(E, 1, self.N) #No dynamics propagation for the noise in WayFormer    
+                        E_tv[k][j][t*2:(t+1)*2,(t-1)*2:t*2]=E
 
                 c_tv[k][j]=TB_tv[k][j]@u_tvs[k][j]             
 
@@ -334,8 +334,9 @@ class SMPC():
         self.lead_vehicle_constr = nom_s[-1]<= self.lead_vehicle_s-self.s0 - self.ev_length*2 - 1 +self.slack[0][0][0] #s_{N|t} <= s_{lead|t} - 2*ev_length - 1 + slack
         self.opti.subject_to(self.lead_vehicle_constr) #s_{N|t} <= s_{lead|t}
         # cost+=-2.7*self.Q_cost*ca.sum1(nom_s) +2.*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -2.5, 2)
-        cost += -0.05*self.Q_cost[0,0]*ca.sum1(nom_s) + 5.56*nom_z_diff.T@ca.kron(ca.DM.eye(self.N),self.Q_cost)@nom_z_diff# penalizes slow progress (was -4, 3.5)
-        cost += 0.01*self.R_cost*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates
+        self.multiplier = 0.1
+        cost += -0.1*self.multiplier*10*self.Q_cost[0,0]*ca.sum1(nom_s) + self.multiplier*5.56*nom_z_diff.T@ca.kron(ca.DM.eye(self.N),self.Q_cost)@nom_z_diff# penalizes slow progress (was -4, 3.5)
+        cost += self.multiplier*0.01*self.R_cost*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates
         # a state=0.5556, b input=0.0010, c=0.0019
         # for a in np.linspace(0.5,1.0,10):
         #     for b in np.linspace(0.001,0.003,10):
@@ -361,7 +362,9 @@ class SMPC():
             self.ca_ineq        = []
             self.l1_constr      = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
             self.ca_constr      = [[[ [] for _ in range(self.N-1)] for _ in range(len(self.mode_map))] for _ in range(self.N_TV)]
-
+        else:
+            self.constr2check = [[[ [] for _ in range(self.N-1)] for _ in range(len(self.mode_map))] for _ in range(self.N_TV)]
+       
         '''
         Red light related constraints
         '''
@@ -391,7 +394,7 @@ class SMPC():
                 self.opti.subject_to(redlight_obca_lmbd[:,t-1] >= 0)
         elif self.config['collision_avoidance_method'] == 'affine':
             for t in range(1,self.N):
-                self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-self.s0-0.5))
+                self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-self.s0))
         else:  
             raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}")
 
@@ -401,7 +404,9 @@ class SMPC():
         for k in range(self.N_TV):
             for j in range(len(self.mode_map)):
                 m=self.mode_map[j][k]
-                cost += 0.019*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
+                cost += self.multiplier*0.019*1.5*ca.trace(K[k][m]@E_tv[k][m][:2*self.N,:]@E_tv[k][m][:2*self.N,:].T@K[k][m].T)
+                # cost += self.multiplier*0.019*ca.trace(K[k][m]@K[k][m].T)
+
                 for t in range(1, self.N):  # position at time-step 1 not a function of decision variables 
                     #Compute the soc constraints (z,y)\in K
                     if self.config['collision_avoidance_method'] == 'obca':
@@ -434,7 +439,8 @@ class SMPC():
 
                         # Tightening
                         # -self.tight*||Am@(ptw-bmw)@obca_lmbd[k][:,t-1]||_2 >= d_min-[Am@pt-bm.T @ obca_lmbd[k][:,t-1]]
-                        # z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][:,t-1] #(180x1)
+                        # z = self.tight**(0.5)*(A_m @ pt_w).T @ obca_lmbd[k][m][:,t-1] #(180x1)
+                        # z_norm = ca.sqrt(z.T@z+1e-5)
                         # A_m: (4x2), pt_w: (2x180), b_m_w: (4x30), obca_lmbd: (4x1)
                         # z = 1/ca.sqrt(2)*self.tight*ca.norm_fro(A_m @ pt_w - b_m_w) #worst-case effect of noise on y
                         z_norm = self.tight*(1/ca.sqrt(2))*ca.sqrt(ca.sumsqr(A_m @ pt_w - b_m_w)) #decoupling obca_lmbd by upperbounding sup_{lmbd} lmbd.T@(A_m @ pt_w - b_m_w) with 1/sqrt(2). ||z||_2 <= 1/sqrt(2)||Am@pw-bmw||_2
@@ -504,7 +510,7 @@ class SMPC():
                         if self.offline:
                             if self.config['collision_avoidance_method'] == 'obca':
                                 # self.ca_constr[k][j][t-1]+=[ca.sqrt(z.T@z + 1e-4)<=y, 0<=y]
-                                self.ca_constr[k][j][t-1]+=[z_norm<=y+self.slack[k][m][t-1],0<=y]
+                                self.ca_constr[k][j][t-1]+=[z_norm<=y+self.slack[k][m][t-1],0<=y+self.slack[k][m][t-1]]
                                 #obca related constraints 
                                 self.opti.subject_to((A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]) <= 1)
                                 self.opti.subject_to(obca_lmbd[k][m][:,t-1] >= 0)
@@ -534,6 +540,7 @@ class SMPC():
                             if self.config['collision_avoidance_method'] == 'obca':
                                 # obca related constraint screening
                                 obca_constr = ca.vertcat(*[y+self.slack[k][m][t-1] - z_norm,y])
+                                self.constr2check[k][j][t-1] = obca_constr
                                 obca_dual_constr = ca.vertcat(1 - (A_m.T @ obca_lmbd[k][m][:,t-1]).T @(A_m.T @ obca_lmbd[k][m][:,t-1]),obca_lmbd[k][m][:,t-1])
                                 obca_switch=ca.if_else(self.constr_keep[k][j][t-1], obca_constr, ca.DM.ones(*obca_constr.shape))
                                 obca_switch_dual=ca.if_else(self.constr_keep[k][j][t-1], obca_dual_constr, ca.DM.ones(*obca_dual_constr.shape))
@@ -541,6 +548,7 @@ class SMPC():
                                 self.opti.subject_to(obca_switch_dual>=0)
                             elif self.config['collision_avoidance_method'] == 'affine':
                                 soc_constr=ca.vertcat(*[y+self.slack[k][m][t-1] - z_norm,y+self.slack[k][m][t-1]])
+                                self.constr2check[k][j][t-1] = soc_constr
                                 # soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM.ones(*soc_constr.shape),True)
                                 soc_switch = self.constr_keep[k][j][t-1]*soc_constr + (1-self.constr_keep[k][j][t-1])*ca.DM.ones(*soc_constr.shape)
 
@@ -554,7 +562,7 @@ class SMPC():
                             #     cost += self.l1_lmbd*ca.sum1(ca.vec(self.gain_l1[k][m][t-1]))  
 
                     else:
-                        # Use for SOCP solvers: SCS and Gurobi
+                        # Use for SOCP solvers: SCS and Gurobi. Affine constraints ONLY
                         soc_constr=ca.soc(z,y+self.slack[k][m][t-1])
                         if self.offline:
                             self.ca_ineq.append(ca.vertcat(z,y))
@@ -570,8 +578,10 @@ class SMPC():
                             soc_constr=ca.soc(self.constr_keep[k][j][t-1]*z,y+self.slack[k][m][t-1] + (1-self.constr_keep[k][j][t-1])*ca.DM.ones(1))
                             # soc_switch=ca.if_else(self.constr_keep[k][j][t-1], soc_constr, ca.DM.ones(*soc_constr.shape),True)
                             self.opti.subject_to(soc_constr>0)
+                            self.constr2check[k][j][t-1] = soc_constr
         cost += 1e4*self.slack_vec.T@self.slack_vec
         self.opti.minimize( cost ) 
+        self.cost = cost
 
         #Canonical Form Computations
         if self.offline:
@@ -617,11 +627,11 @@ class SMPC():
             nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds]
             self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[nonzero_vec])
             self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))])
-            Q, _ = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape))
+            Q, p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape))
             Q_inv = ca.inv(Q)
             L =  self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape))
-            F, _ = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM(*self.vars_pol4screening.shape),self.params,self.V_MAX))
-            L_Q_inv = L@Q_inv
+            F, f = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM(*self.vars_pol4screening.shape),self.params,self.V_MAX))
+            L_Q_inv = L @ Q_inv
             F_Q_inv =  F @ Q_inv
 
             # Constuct functions for the least squares problem
@@ -646,32 +656,36 @@ class SMPC():
         try:      
             # self.plot_obca_obstacles_and_ego_path(self.pos_tvs, self.psi_tvs, self.tv_params )
             st = time.time()
-            sol = self.opti.solve()
+            self.sol = self.opti.solve()
             solve_time = time.time() - st
             # Collect Optimal solution.
-            u_control  = sol.value(self.policy[0][0])
-            h_opt      = sol.value(self.policy[0]).squeeze()
-            u_opt      = sol.value(self.policy[0]).reshape((1,-1))
-            M_opt      = sol.value(self.policy[1])
-            K_opt      = [[sol.value(self.policy[2][k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-            nom_z_tv   = [[sol.value(self.nom_z_tv[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
-            s0         = sol.value(self.s0)
-            nom_z      = sol.value(self.nom_z).reshape(-1,2).T
+            u_control  = self.sol.value(self.policy[0][0])
+            h_opt      = self.sol.value(self.policy[0]).squeeze()
+            u_opt      = self.sol.value(self.policy[0]).reshape((1,-1))
+            M_opt      = self.sol.value(self.policy[1])
+            K_opt      = [[self.sol.value(self.policy[2][k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
+            nom_z_tv   = [[self.sol.value(self.nom_z_tv[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
+            s0         = self.sol.value(self.s0)
+            nom_z      = self.sol.value(self.nom_z).reshape(-1,2).T
             nom_z[0,:] += s0 
             if self.offline and not first_solve:
-                self.vars_ws , self.vars_epi_ws = sol.value(self.vars_pol), sol.value(self.vars_epi)
+                self.vars_ws , self.vars_epi_ws = self.sol.value(self.vars_pol), self.sol.value(self.vars_epi)
             if self.offline and self.solver=='ipopt':
-                l1_duals=[[[[sol.value(self.opti.dual(self.l1_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-                #TODO: if g1_inf norm prediction
-                # l1_duals=[[[[np.linalg.norm(sol.value(self.opti.dual(self.l1_constr[k][j][t][0])),ord=np.inf)] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-                ca_duals=[[[[sol.value(self.opti.dual(self.ca_constr[k][m][t][0]))] for t in range(self.N-1)] for m in range(len(self.mode_map))] for k in range(self.N_TV)]
-            leading_vehicle_active = (sol.value(self.opti.dual(self.lead_vehicle_constr)) > 1e-3)
+                l1_duals=[[[[self.sol.value(self.opti.dual(self.l1_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
+                ca_duals=[[[[self.sol.value(self.opti.dual(self.ca_constr[k][m][t][0]))] for t in range(self.N-1)] for m in range(len(self.mode_map))] for k in range(self.N_TV)]
+            leading_vehicle_active = (self.sol.value(self.opti.dual(self.lead_vehicle_constr)) > 1e-3)
             is_opt     = True
-            eigs = np.linalg.eig(sol.value(self.Q).toarray())
-            largest_eig = np.max(eigs[0])
-            smallest_eig = np.min(eigs[0])
-            print(f'Largest Eigenvalue: {largest_eig}')
-            print(f'Smallest Eigenvalue: {smallest_eig}')
+            self.cost_opt = self.sol.value(self.cost)
+            self.cost_wo_slack = self.sol.value(self.cost - 1e4*self.slack_vec.T@self.slack_vec)
+            print(f'Optimal Cost: {self.cost_opt}')
+            print(f'Cost without slack: {self.cost_wo_slack}')
+
+            #Hessian eigenvalue 
+            # eigs = np.linalg.eig(self.sol.value(self.Q).toarray())
+            # largest_eig = np.max(eigs[0])
+            # smallest_eig = np.min(eigs[0])
+            # print(f'Largest Eigenvalue: {largest_eig}')
+            # print(f'Smallest Eigenvalue: {smallest_eig}')
             # print(eigs[0])
         except:
             # self.opti.debug.show_infeasibilities()
@@ -683,7 +697,6 @@ class SMPC():
             #             c=self.opti.debug.value(self.pos_tvs[i][m][:, t]),
             #             x=self.opti.debug.value(self.x_pos[:, t])
             # )
-            # pdb.set_trace()
 
             if self.offline:
                 self.vars_ws , self.vars_epi_ws = None, None  
@@ -697,7 +710,7 @@ class SMPC():
                 nom_z = self.opti.debug.value(self.nom_z).reshape((-1,2)).T
                 nom_z[0,:] += s0
             else:
-                pdb.set_trace()
+                # pdb.set_trace()
                 u_control  = self.u_backup
                 u_opt = np.array([self.u_backup]*(self.N-1)).reshape((1,-1))
                 accumulated_dynamics = []
@@ -722,6 +735,10 @@ class SMPC():
         sol_dict['u_opt']      = u_opt      # optimal control sequence
         sol_dict['optimal']    = is_opt      # whether the solution is optimal or not
         sol_dict['leading_vehicle_active'] = leading_vehicle_active
+        sol_dict['optimal_cost'] = self.cost_opt if is_opt else None
+        sol_dict['optimal_cost_wo_slack'] = self.cost_wo_slack if is_opt else None
+        if not self.offline:
+            sol_dict['gap_radius'] = self.gap
         if is_opt:
             sol_dict['h_opt']=h_opt
             sol_dict['M_opt']=M_opt
@@ -731,7 +748,6 @@ class SMPC():
             if self.offline and self.solver == 'ipopt':
                 sol_dict['l1_duals']=l1_duals
                 sol_dict['ca_duals']=ca_duals
-                
                 
         sol_dict['solve_time'] = solve_time  # how long the solver took in seconds
         print(f'Optimization Solve Time [{self.solver}]: {solve_time} s')
@@ -747,7 +763,23 @@ class SMPC():
             print(f'Constr Keep: {constr_keep}')
             sol_dict['gain_keep'] = gain_keep
             sol_dict['constr_keep'] = constr_keep
+        if self.offline:
+            sol_dict['computation_time'] = {}
+        else:
+            sol_dict['computation_time'] = {}
         return sol_dict
+
+    def collision_avoidance_constraints_check(self):
+        violated_constr = []
+        if hasattr(self, 'constr2check') and hasattr(self, 'sol'):
+            for i in range(self.N_TV):
+                for m in range(len(self.mode_map)):
+                    j = self.mode_map[m][i]
+                    for k in range(1,self.N):
+                        if not np.all(self.sol.value(self.constr2check[i][m][k-1]) >= 0):
+                            print(f'Constraint with vehicle {i} in mode-{j} in scenario {m} at time {k} is violated')
+                            violated_constr.append((i,m,k-1,j))
+        return violated_constr
 
     def check_update_dict(self,update_dict):
         assert 'x0' in update_dict.keys(), 'Missing EV Initial Condition'
@@ -797,7 +829,6 @@ class SMPC():
             else:
                 self.update_gain_and_constr_keeps()
             print(f'[smpc.py]: Total safety screening took {time.time()-st_first} seconds')
-
     def _update_leading_vehicle_params(self, leading_vehicle=None):
         if leading_vehicle is None:
             self.opti.set_value(self.lead_vehicle_s, 1e6)
@@ -900,13 +931,13 @@ class SMPC():
         if l1_duals is None:
             mu, eta, g1, gap = None, None, None, None
         else:
-            # Selection matrix for the "non-zero" mu and g1 duals
-            # S1 = np.diag(ca_duals) #if mu_tilde=1, then mu!=0. elif mu_tilde=0, then mu = 0
-            mu_dim = 2*self.N * (self.N_TV+1) + 1
+            self.mu_dim = 2*self.N * (self.N_TV+1) + 1
+            self.num_ca_duals = len(ca_duals)
 
             #Recover feasible dual solutions
-            mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C, self.p, self.f, self.c, np.repeat(ca_duals, mu_dim),l1_duals)
-            gap = self._compute_gap_radius(mu, eta, g1)
+            mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C, self.p, self.f, self.c, np.repeat(ca_duals, self.mu_dim),l1_duals)
+            self.gap = self._compute_gap_radius(mu, eta, g1)
+
         st = time.time()
         vars_kept=0 
         constr_kept=0
@@ -914,10 +945,8 @@ class SMPC():
         vars_seen=set()
         if l1_duals is not None:
             #unflatten duals
-            n_modes = [self.N_modes[k] for k in range(self.N_TV)]
-            mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(self.N_TV)])))
-            l1_dual_dim = [self.N-1, n_modes, self.N_TV]
-            ca_dual_dim = [self.N-1, len(mode_map), self.N_TV]
+            l1_dual_dim = [self.N-1, self.N_modes, self.N_TV]
+            ca_dual_dim = [self.N-1, len(self.mode_map), self.N_TV]
             l1_duals_list, ca_duals_list = unflatten_duals(np.expand_dims(np.concatenate([l1_duals,ca_duals]), axis=0),l1_dual_dim=l1_dual_dim,ca_dual_dim=ca_dual_dim)
             # alternatively, we can use the l1_duals and ca_duals directly
         for k in range(self.N_TV):
@@ -925,32 +954,19 @@ class SMPC():
                 j=self.mode_map[m][k]
                 for t in range(self.N-1):
                     if l1_duals is not None:
-                        try:
-                            if not (k,j,t) in vars_seen:
-                                #TODO: for multi-modal predictions, the indexing for g1 must be fixed
-                                if l1_duals_list[k][j][t][0]:
-                                    gain_keep = 1
-                                else:
-                                    gain_keep = self._safe_screen(g1[len(self.mode_map[m][:k])*2*(self.N-1)+j*2*(self.N-1)+2*t:len(self.mode_map[m][:k])*2*(self.N-1)+j*2*(self.N-1)+2*(t+1)], gap_radius= gap ,dual_type='l1_dual') 
-
-                                # gain_keep = 1- int(np.all(ca.vec(l1_duals[k][j][t][0])==np.zeros(2))) #tertiary simple gain_keep rule
-                                # gain_keep = (1-int(np.all(ca.vec(l1_duals[k][j][t][0])<(self.l1_lmbd-1e-8)*np.ones(2)))) or (1-np.all(ca.vec(l1_duals[k][j][t][0])>(1e-8)*np.ones(2)))
-                                # gain_keep = 1 #Only do constraint screening
-                                vars_kept+=gain_keep*2
-                                vars_seen.add((k,j,t))
-                            # print(f'k,m,t: {k,m,t} \n  ca_duals dim: {len(ca_duals),len(ca_duals[k]),len(ca_duals[k][m])}')
-                            # constr_keep =int(np.linalg.norm(ca_duals[k][m][t][0])>1e-3)
-                            #ca dual should be a vector of size mu_dim
-                            # if t ==0:
-                            #     pdb.set_trace()
-                            if ca_duals_list[k][j][t][0]:
-                                constr_keep = 1
+                        if not (k,j,t) in vars_seen:
+                            if (l1_duals_list[k][j][t][0]==0 or l1_duals_list[k][j][t][0]==2): #tertiary class
+                                gain_keep = 1
                             else:
-                                constr_keep = self._safe_screen(mu[mu_dim *ca_constr_ind_counter:mu_dim *(ca_constr_ind_counter+1)], gap_radius=gap ,dual_type='ca_dual')
-                            ca_constr_ind_counter += 1
-                            constr_kept+=constr_keep
-                        except:
-                            pdb.set_trace()
+                                gain_keep = self._safe_screen(g1[len(self.mode_map[m][:k])*2*(self.N-1)+j*2*(self.N-1)+2*t:len(self.mode_map[m][:k])*2*(self.N-1)+j*2*(self.N-1)+2*(t+1)], gap_radius= self.gap ,dual_type='l1_dual') 
+                            vars_kept+=gain_keep*2
+                            vars_seen.add((k,j,t))
+                        if ca_duals_list[k][j][t][0]:
+                            constr_keep = 1
+                        else:
+                            constr_keep = self._safe_screen(mu[self.mu_dim *ca_constr_ind_counter:self.mu_dim *(ca_constr_ind_counter+1)], gap_radius=self.gap ,dual_type='ca_dual')
+                        ca_constr_ind_counter += 1
+                        constr_kept+=constr_keep
                     else:
                         gain_keep = 1
                         constr_keep = 1
@@ -964,7 +980,7 @@ class SMPC():
             print(f"vars:  {vars_kept} out of {g1.shape[0]}, constr: {constr_kept} out of {ca_duals.shape[0]}")     
         solve_time = time.time() - st
         print('[smpc.py] Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
-        return mu, eta, g1, gap
+        return mu, eta, g1, self.gap
 
     def clarkson_woodruff_transform(self,A, s):
         """
@@ -1051,14 +1067,15 @@ class SMPC():
             b = self.clarkson_woodruff_transform(b,s=n_rows)
 
         #Column selection using RAID-Net classification output
-        reduced_ls = False
+        reduced_ls = True
         if reduced_ls:
-            keep = np.concatenate([ca_dual, np.ones(n_eta),l1_dual])
+            keep = np.concatenate([ca_dual, np.ones(n_eta), l1_dual]) #keep all n_eta as eta duals are always kept
             keep_arg = np.argwhere(keep>=1).flatten() #indices of non-zero entries in keep
             A = A[:, keep_arg] #select columns corresponding to non-zero entries in keep
 
         #Define Least squares parameters
-        ls_tol = 1e-4
+        ls_tol = 1e-6
+        ls_max_iter = 1000
         if reduced_ls:
             ls_init_guess = np.zeros(A.shape[1])
             start_idx = sum(ca_dual>0) + n_eta #num of ca_duals that are kept plus n_eta as all of eta is kept always
@@ -1066,9 +1083,8 @@ class SMPC():
         else:
             ls_init_guess = np.zeros(A.shape[1])
             ls_init_guess[n_mu+n_eta:] = 0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
-        ls_max_iter = 1000
         solve_time = time.time() - st_first
-        print(f'[Dual Approximation] Least Squares Formulation Time: {solve_time} s')
+        print(f'[Dual Approximation] Least Squares Formulation Time: {solve_time} s (Depends on the Hessian of the cost function)')
 
         # Solve least squares problem using LSQR
         st = time.time()
@@ -1123,27 +1139,78 @@ class SMPC():
         grad_d += sp.vstack([self.c, self.f, np.zeros(f_g.shape).reshape((-1, 1))])
 
         # Form the full dual vector and compute the projected version:
-        duals = np.concatenate((f_mu, f_nu, f_g)).reshape((-1, 1))
-        proj_dual = duals - grad_d
-        start_idx = f_mu.shape[0] + f_nu.shape[0]
-        proj_dual[:start_idx] = np.maximum(proj_dual[:start_idx], 0)
-        proj_dual[start_idx:] = np.clip(proj_dual[start_idx:], 0, 1)# Ensure ||g||_inf <= 1 and g>=0
+        dual = np.concatenate((f_mu, f_nu, f_g)).reshape((-1, 1))
+        proj_dual = dual - grad_d
+        blocks = [self.mu_dim - 1] * self.num_ca_duals
+        # test = np.maximum(proj_dual[:f_mu.shape[0]], 0) #f_mu non-negativity (Wrong... Fixed below)
+        proj_dual[:f_mu.shape[0]] = self._proj_soc_dual_stacked_np(f_mu,blocks) #f_mu dual cone projection
+        
+        proj_dual[f_mu.shape[0]:f_mu.shape[0] + f_nu.shape[0]] = np.maximum(proj_dual[f_mu.shape[0]:f_mu.shape[0] + f_nu.shape[0]], 0) # f_eta projection (non negative)
+        proj_dual[f_mu.shape[0] + f_nu.shape[0]:] = np.clip(proj_dual[f_mu.shape[0] + f_nu.shape[0]:], 0, 1)# Ensure ||g||_inf <= 1 and g>=0
         solve_time = time.time() - st
         print(f'Gradient Computation Time: {solve_time} s')
 
         # Compute gap
         st = time.time()
-        gap = np.linalg.norm(duals - proj_dual) * (1 + sigma) / eta
+        gap = np.linalg.norm(dual - proj_dual) * (1 + sigma) / eta
         solve_time = time.time() - st
         print(f'Norm time: {solve_time} s')
         print(gap)
-        print(np.linalg.norm(duals - proj_dual))
-        print(np.linalg.norm(duals[start_idx:]-proj_dual[start_idx:]))
+        print(np.linalg.norm(dual - proj_dual))
+        print(np.linalg.norm(dual[:f_mu.shape[0]]-proj_dual[:f_mu.shape[0]]))
+        print(np.linalg.norm(dual[f_mu.shape[0]:f_mu.shape[0]+f_nu.shape[0]]-proj_dual[f_mu.shape[0]:f_mu.shape[0]+f_nu.shape[0]]))
+        print(np.linalg.norm(dual[f_mu.shape[0] + f_nu.shape[0]:]-proj_dual[f_mu.shape[0] + f_nu.shape[0]:]))
         return gap
     
+    def _proj_soc_np(self,t, x, eps=1e-12):
+        """
+        Project (t, x) onto the SOC K = {(tau, y): ||y||_2 <= tau}.
+        Returns (t_proj, x_proj) as numpy arrays.
+        """
+        x = np.asarray(x, dtype=float)
+        t = float(t)
+        nx = np.linalg.norm(x, 2)
+
+        if nx <= t:
+            # already in the cone
+            return t, x
+        if nx <= -t:
+            # projects to the apex
+            return 0.0, np.zeros_like(x)
+
+        # edge case: x ~ 0
+        if nx < eps:
+            val = max(t, 0.0) / 2.0
+            return val, np.zeros_like(x)
+
+        alpha = 0.5 * (nx + t)
+        scale = alpha / nx
+        return alpha, scale * x
+
+    def _proj_soc_dual_stacked_np(self, vec, blocks, eps=1e-12):
+        """
+        Project onto a Cartesian product of SOC* blocks.
+        vec: flat array concatenating blocks [(t_i, x_i)] with sizes 1+n_i
+        blocks: list of n_i (the dimension of each x_i)
+        Returns a flat array with the projection.
+        """
+        out = []
+        idx = 0
+        for n in blocks:
+            x = vec[idx: idx+n]
+            t = vec[idx+n]
+            tp, xp = self._proj_soc_np(t, x, eps=eps)
+            out.append(xp)
+            out.append(np.array([tp]))
+            idx += n + 1
+        return np.concatenate(out)[:,np.newaxis]
+
     def _safe_screen(self,dual, gap_radius, dual_type = "ca_dual"):
             keep = 1
-            TOL = 1e-1
+            if hasattr(self, 'cost_wo_slack'):
+                TOL = abs(self.cost_wo_slack)*0.10 #TODO: should it be dynamic? optimal cost changes as states and scenario change
+            else:
+                TOL = 0.1
             if dual_type == "ca_dual":
                 # Do ca_dual sensitivity-based screen (l2 norm of mu)
                 # if np.linalg.norm(dual,ord=2) <= min(TOL, gap_radius):
@@ -1152,7 +1219,7 @@ class SMPC():
                     keep = 0
             else:
                 # Do l1_dual strong duality screen (infinity norm of g1) with lambda normalization to match the canoncial form
-                if np.linalg.norm(dual,ord=np.inf) + gap_radius < 1 and np.linalg.norm(dual,ord=np.inf) - gap_radius > 0:
+                if np.linalg.norm(dual,ord=np.inf) + gap_radius < 1:
                     keep = 0
             return keep #output 1 or 0
 

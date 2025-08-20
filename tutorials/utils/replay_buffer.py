@@ -5,7 +5,7 @@ import scipy.linalg as la
 
 class ReplayBuffer(th.utils.data.Dataset):
 
-    def __init__(self, max_size=1000000):
+    def __init__(self, max_size=1000000,training_dataset=True):
 
         self.max_size = max_size
 
@@ -23,9 +23,10 @@ class ReplayBuffer(th.utils.data.Dataset):
         self.dual_classes = None
         self.num_classes=4
         self.class_weights = np.zeros(self.num_classes)
+        self.training_dataset = training_dataset
 
     def __len__(self):
-        if self.obs:
+        if self.obs is not None:
             return self.obs.shape[0]
         else:
             return 0
@@ -72,10 +73,16 @@ class ReplayBuffer(th.utils.data.Dataset):
         #               (1-(self.acs[:,:l1_dim]>1e-3*np.ones_like(self.acs[:,:l1_dim]))))
         if l1_pred_mode == 'binary':
             l1_duals = self.acs[:,:l1_dim]
-            l1_class = np.where(l1_duals<1e-3,2*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where(l1_duals>l1_lmbd - 1e-3,3*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where((1e-3 <= l1_duals) & (l1_duals <= l1_lmbd - 1e-3),np.ones_like(l1_duals),np.zeros_like(l1_duals))
-            assert not 0 in l1_class
+            # l1_class = np.where(l1_duals<1e-3,2*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where(l1_duals>l1_lmbd - 1e-3,3*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where((1e-3 <= l1_duals) & (l1_duals <= l1_lmbd - 1e-3),np.ones_like(l1_duals),np.zeros_like(l1_duals))
+            l1_class = (l1_duals>1e-3).astype(int)
+            l1_class += (l1_duals > (self.policy[0].lmbd_ubd*0.99)).astype(int)
+            # assert not 0 in l1_class
             self.acs[:,:l1_dim] = (l1_class - np.ones_like(l1_class) > 1e-3)
 
+        #Save feature mean and cov for unnormalization in the policy
+        if self.training_dataset:
+            np.savez('/home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz', feature_mean=self.feature_mean, feature_cov=self.feature_cov, feature_cov_inv =la.inv(self.feature_cov), target_mean=self.target_mean, target_cov=self.target_cov)
+            print('Normalization done! Feature mean and cov saved to /home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz')
     def set_weights(self):
         
         if self.obs is None:
@@ -84,13 +91,13 @@ class ReplayBuffer(th.utils.data.Dataset):
         self.class_weights = np.zeros(self.num_classes)
 
         class_count = Counter(self.dual_classes)
-
         for i in range(self.num_classes):
             if i in class_count:
-                self.class_weights[i] = class_count[i]*(1-0.9*int(i==1 or i==2 or i ==3))
-        total =  np.sum(self.class_weights)
+                # self.class_weights[i] = class_count[i]*(1-0.9*int(i==1 or i==2 or i ==3))
+                self.class_weights[i] = 1/class_count[i]
+        # total =  np.sum(self.class_weights)
 
-        self.class_weights = (total - self.class_weights)/total
+        # self.class_weights = (total - self.class_weights)/total
         self.dataset_weights = np.zeros(self.max_size)
 
         # for i in range(self.max_size):

@@ -22,6 +22,7 @@ from omegaconf import OmegaConf
 import torch
 import pytorch_lightning as pl
 import numpy
+import os
 import pdb
 
 def for_each(fn: Callable[[Any], Any], items: List[Any]) -> None:
@@ -221,73 +222,86 @@ class SimulationRunner(AbstractRunner):
         filtered_idx = []
         temp = torch.argsort(avg_distances_over_modes)
         closest_vehicles_indices = temp[temp!=ego_index][:V]
-        while closest_vehicles_indices.shape[0] < V:
-            logger.warning(f"Only {closest_vehicles_indices.shape[0]} vehicles found, expected {V}. Using all available vehicles.")
-            add_ind = V - closest_vehicles_indices.shape[0]
-            closest_vehicles_indices = torch.hstack([closest_vehicles_indices,closest_vehicles_indices[:add_ind]])
-
-        # Compute relative positions and angles
-        dx = pred_gathered[:, 0, 0, 0] - ego_x
-        dy = pred_gathered[:, 0, 0, 1] - ego_y
-        distances = torch.sqrt(dx**2 + dy**2)
-        angles = torch.atan2(dy, dx)  # angle from ego to target
-
-        # Normalize angles to [-pi, pi]
-        angle_diff = (angles - ego_heading + math.pi) % (2 * math.pi) - math.pi
-
-        # Vehicles within ±80 degrees (~0.5236 rad)
-        fov_mask = (angle_diff.abs() <= math.radians(80))
-
-        # Sort both FOV and non-FOV by distance
-        sorted_fov = torch.argsort(distances[fov_mask])
-        sorted_out_fov = torch.argsort(distances[~fov_mask])
-
-        fov_indices = torch.arange(len(distances))[fov_mask][sorted_fov]
-        out_fov_indices = torch.arange(len(distances))[~fov_mask][sorted_out_fov]
-
-        # Combine
-        num_fov_veh = len(fov_indices)
-        prioritized_indices = torch.cat([fov_indices, out_fov_indices], dim=0)
-        # V-1 from top of prioritized list (excluding ego)
-        top_fov_vehicles = prioritized_indices[prioritized_indices != ego_index][:V-1]
-
-        # One more from outside FOV starting after num_fov_veh (excluding ego)
-        if ego_index in fov_indices:
-            non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh-1:]
+        if closest_vehicles_indices.shape[0] == 0:
+            # If no vehicles are found, use dummy vehicles (same heading as ego, x and y really far away)
+            # This is a fallback mechanism and should rarely happen
+            pred_output = pred.repeat(V,1,1,1)
+            pred_output[:,:,:,0] += 1000.0 #x
+            pred_output[:,:,:,1] += 1000.0 #y
+            prob_output = prob.repeat(V,1)
+            tv_params = [(4, 2)] * V #arbitrary length and width
+            tv_track_tokens = ['dummy'] * V
+            filtered_idx = [ego_index]*V
+            print("No vehicles found, using dummy vehicles.")
         else:
-            non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh:]
-        if len(non_fov_rest) > 0:
-            extra_vehicle = non_fov_rest[:1]  # Select just one
-            closest_vehicles_indices = torch.cat([top_fov_vehicles, extra_vehicle])
-        else:
-            closest_vehicles_indices = top_fov_vehicles  # Fallback: use only top FOV
+            while closest_vehicles_indices.shape[0] < V:
+                print(f"Only {closest_vehicles_indices.shape[0]} vehicles found, expected {V}. Using all available vehicles.")
+                add_ind = V - closest_vehicles_indices.shape[0]
+                closest_vehicles_indices = torch.hstack([closest_vehicles_indices,closest_vehicles_indices[:add_ind]])
 
-        pred_output = pred_gathered[closest_vehicles_indices]
-        prob_output = torch.gather(prob[closest_vehicles_indices], dim = 1, index = pred_M_ind[closest_vehicles_indices])
-        
-        #(length, width)
-        detection_track_tokens = [v.metadata.track_token for v in observation.tracked_objects.tracked_objects]
-        tv_params = []
-        tv_track_tokens = []
-        if closest_vehicles_indices.shape[0] < V:
-            logger.warning(f"Only {closest_vehicles_indices.shape[0]} vehicles found, expected {V}. Creating dummy vehicles.")
-            #Fill with a dummy vehicle
-            closest_vehicles_indices = torch.cat([closest_vehicles_indices, torch.tensor([closest_vehicles_indices[-1]] * (V - closest_vehicles_indices.shape[0]))])
-        for i in range(V):
-            ind = closest_vehicles_indices[i]
-            try:
-                idx4tv_param = detection_track_tokens.index(wayformerinput[ind]['center_objects_id'])
-                length = observation.tracked_objects.tracked_objects[idx4tv_param].box.length
-                width = observation.tracked_objects.tracked_objects[idx4tv_param].box.width
-                # Get the length and width of the vehicle
-                tv_params.append((length, width))
-                tv_track_tokens.append(wayformerinput[ind]['center_objects_id'])
-            except:
-                # If the vehicle is not found in the tracked objects, use default values
-                tv_params.append((0, 0))
-                tv_track_tokens.append(wayformerinput[ind]['center_objects_id'])
-                logger.warning(f"Vehicle with token {wayformerinput[ind]['center_objects_id']} not found in tracked objects.")
-            filtered_idx.append(ind.item())
+            # Compute relative positions and angles
+            dx = pred_gathered[:, 0, 0, 0] - ego_x
+            dy = pred_gathered[:, 0, 0, 1] - ego_y
+            distances = torch.sqrt(dx**2 + dy**2)
+            angles = torch.atan2(dy, dx)  # angle from ego to target
+
+            # Normalize angles to [-pi, pi]
+            angle_diff = (angles - ego_heading + math.pi) % (2 * math.pi) - math.pi
+
+            # Vehicles within ±80 degrees (~0.5236 rad)
+            fov_mask = (angle_diff.abs() <= math.radians(80))
+
+            # Sort both FOV and non-FOV by distance
+            sorted_fov = torch.argsort(distances[fov_mask])
+            sorted_out_fov = torch.argsort(distances[~fov_mask])
+
+            fov_indices = torch.arange(len(distances))[fov_mask][sorted_fov]
+            out_fov_indices = torch.arange(len(distances))[~fov_mask][sorted_out_fov]
+
+            # Combine
+            num_fov_veh = len(fov_indices)
+            prioritized_indices = torch.cat([fov_indices, out_fov_indices], dim=0)
+            # V-1 from top of prioritized list (excluding ego)
+            top_fov_vehicles = prioritized_indices[prioritized_indices != ego_index][:V-1]
+
+            # One more from outside FOV starting after num_fov_veh (excluding ego)
+            if ego_index in fov_indices:
+                non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh-1:]
+            else:
+                non_fov_rest = prioritized_indices[prioritized_indices != ego_index][num_fov_veh:]
+            if len(non_fov_rest) > 0:
+                extra_vehicle = non_fov_rest[:1]  # Select just one
+                closest_vehicles_indices = torch.cat([top_fov_vehicles, extra_vehicle])
+            else:
+                closest_vehicles_indices = top_fov_vehicles  # Fallback: use only top FOV
+
+            #(length, width)
+            detection_track_tokens = [v.metadata.track_token for v in observation.tracked_objects.tracked_objects]
+            tv_params = []
+            tv_track_tokens = []
+            if 0 < closest_vehicles_indices.shape[0] < V:
+                print(f"Only {closest_vehicles_indices.shape[0]} vehicles found, expected {V}. Creating dummy vehicles.")
+                #Fill with a dummy vehicle
+                closest_vehicles_indices = torch.cat([closest_vehicles_indices, torch.tensor([closest_vehicles_indices[-1]] * (V - closest_vehicles_indices.shape[0]))])
+            pred_output = pred_gathered[closest_vehicles_indices]
+            prob_output = torch.gather(prob[closest_vehicles_indices], dim = 1, index = pred_M_ind[closest_vehicles_indices])
+            
+            for i in range(V):
+                ind = closest_vehicles_indices[i]
+                try:
+                    idx4tv_param = detection_track_tokens.index(wayformerinput[ind]['center_objects_id'])
+                    length = observation.tracked_objects.tracked_objects[idx4tv_param].box.length
+                    width = observation.tracked_objects.tracked_objects[idx4tv_param].box.width
+                    # Get the length and width of the vehicle
+                    tv_params.append((length, width))
+                    tv_track_tokens.append(wayformerinput[ind]['center_objects_id'])
+                except:
+                    # If the vehicle is not found in the tracked objects, use default values
+                    tv_params.append((0, 0))
+                    tv_track_tokens.append(wayformerinput[ind]['center_objects_id'])
+                    print(f"Vehicle with token {wayformerinput[ind]['center_objects_id']} not found in tracked objects.")
+                filtered_idx.append(ind.item())
+
         return pred_output, prob_output, tv_params, tv_track_tokens, filtered_idx
     
     def get_heading_wayformer(self, pred_filtered, init_psi):
@@ -421,69 +435,83 @@ class SimulationRunner(AbstractRunner):
         # Initialize all simulations
         self._initialize()
         counter = 0
-        while self.simulation.is_simulation_running():
-            # print(f'Simulation t: {counter}:')
-            # Execute specific callback
-            self.simulation.callback.on_step_start(self.simulation.setup, self.planner)
-            self.planner.set_scenario_id(self.simulation.scenario.token)
+        viddir = '/home/mpc/nuplan-devkit/nuplan/expert_data/video/N'+str(self.planner.config['N'])+'_' + str(self.planner.config['prediction_method']) + '_' + str(self.planner.config['collision_avoidance_method']) + '/'
+        filenames = os.listdir(viddir)
+        duplicate_scenario = False
+        print(f'Looking for {self.simulation.scenario.token} in {viddir}')
+        for filename in filenames:
+            if self.simulation.scenario.token in filename:
+                print(f"Scenario {self.simulation.scenario.token} already exists. Skipping scenario.")
+                duplicate_scenario=True
+                break
+        duplicate_scenario = False #disable duplicate check
+        if self.planner.config['eval_mode']:
+            duplicate_scenario = False
+        if not duplicate_scenario:
+            while self.simulation.is_simulation_running():
+                # print(f'Simulation t: {counter}:')
+                # Execute specific callback
+                self.simulation.callback.on_step_start(self.simulation.setup, self.planner)
 
-            # Perform step
-            planner_input = self._simulation.get_planner_input()
-            logger.debug("Simulation iterations: %s" % planner_input.iteration.index)
+                self.planner.set_scenario_id(self.simulation.scenario.token)
 
-            # Execute specific callback
-            self._simulation.callback.on_planner_start(self.simulation.setup, self.planner)
+                # Perform step
+                planner_input = self._simulation.get_planner_input()
+                logger.debug("Simulation iterations: %s" % planner_input.iteration.index)
 
-            # Get predictions for planner
-            pred, prob, tv_params, tv_psi, tv_track_tokens = self.wayformer_inference(planner_input)
-            if isinstance(self.planner, SMPCPlanner):             
-                #Get IDM predictions for planner
-                time_controller_copy = copy.deepcopy(self.simulation._time_controller)
-                if self.planner.config['prediction_method'] == 'idm':
-                    if isinstance(self.simulation.setup.observations,IDMAgents):
+                # Execute specific callback
+                self._simulation.callback.on_planner_start(self.simulation.setup, self.planner)
+
+                # Get predictions for planner
+                pred, prob, tv_params, tv_psi, tv_track_tokens = self.wayformer_inference(planner_input)
+                if isinstance(self.planner, SMPCPlanner):             
+                    #Get IDM predictions for planner
+                    time_controller_copy = copy.deepcopy(self.simulation._time_controller)
+                    if self.planner.config['prediction_method'] == 'idm':
+                        if isinstance(self.simulation.setup.observations,IDMAgents):
+                            if self.simulation._time_controller.get_iteration().index == 0:
+                                ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
+                                self.planner.ego_traj = ego_traj[:self.planner.config['N']+1]
+                                history_buffer = copy.deepcopy(self.simulation._history_buffer)
+                                preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], history_buffer, num_samples=self.planner.config['N'])
+                            else:
+                                history_buffer = copy.deepcopy(self.simulation._history_buffer)
+                                preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(history_buffer), history_buffer, num_samples=self.planner.config['N'])
+                            tv_paths_se2 = None
+
+                        else:
+                            preds = self.simulation.scenario._get_log_predictions(time_controller_copy.get_iteration(), num_samples=self.planner.config['N'])
+                            tv_paths_se2 = self.simulation._scenario._get_agent_paths_from_log()
+                    else:
+                        #use Wayformer predictions
+                        tv_paths_se2 = None
+                        scenario_type = self.simulation.scenario.scenario_type
+                        preds = (pred, prob, tv_params, tv_psi, tv_track_tokens, scenario_type)
                         if self.simulation._time_controller.get_iteration().index == 0:
                             ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
                             self.planner.ego_traj = ego_traj[:self.planner.config['N']+1]
-                            history_buffer = copy.deepcopy(self.simulation._history_buffer)
-                            preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), ego_traj[:self.planner.config['N']+1], history_buffer, num_samples=self.planner.config['N'])
-                        else:
-                            history_buffer = copy.deepcopy(self.simulation._history_buffer)
-                            preds = self.simulation._observations.get_idm_predictions(time_controller_copy.get_iteration(), time_controller_copy.next_iteration() if time_controller_copy.next_iteration() is not None else time_controller_copy.get_iteration(), self.planner.get_x_ego(history_buffer), history_buffer, num_samples=self.planner.config['N'])
-                        tv_paths_se2 = None
-
-                    else:
-                        preds = self.simulation.scenario._get_log_predictions(time_controller_copy.get_iteration(), num_samples=self.planner.config['N'])
                         tv_paths_se2 = self.simulation._scenario._get_agent_paths_from_log()
+                    try:
+                        trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
+                    except:
+                        break
                 else:
-                    #use Wayformer predictions
+                    preds = [] #empty preds
                     tv_paths_se2 = None
-                    scenario_type = self.simulation.scenario.scenario_type
-                    preds = (pred, prob, tv_params, tv_psi, tv_track_tokens, scenario_type)
-                    if self.simulation._time_controller.get_iteration().index == 0:
-                        ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
-                        self.planner.ego_traj = ego_traj[:self.planner.config['N']+1]
-                    tv_paths_se2 = self.simulation._scenario._get_agent_paths_from_log()
-                try:
                     trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
-                except:
-                    break
-            else:
-                preds = [] #empty preds
-                tv_paths_se2 = None
-                trajectory = self.planner.compute_trajectory(planner_input,preds,tv_paths_se2)
-            
-            # Propagate simulation based on planner trajectory
-            self._simulation.callback.on_planner_end(self.simulation.setup, self.planner, trajectory)
-            self.simulation.propagate(trajectory)
+                
+                # Propagate simulation based on planner trajectory
+                self._simulation.callback.on_planner_end(self.simulation.setup, self.planner, trajectory)
+                self.simulation.propagate(trajectory)
 
-            # Execute specific callback
-            self.simulation.callback.on_step_end(self.simulation.setup, self.planner, self.simulation.history.last())
-            
-            # Store reports for simulations which just finished running
-            current_time = time.perf_counter()
-            if not self.simulation.is_simulation_running():
-                report.end_time = current_time
-            counter += 1
+                # Execute specific callback
+                self.simulation.callback.on_step_end(self.simulation.setup, self.planner, self.simulation.history.last())
+                
+                # Store reports for simulations which just finished running
+                current_time = time.perf_counter()
+                if not self.simulation.is_simulation_running():
+                    report.end_time = current_time
+                counter += 1
 
         # Execute specific callback
         if isinstance(self.planner, SMPCPlanner):

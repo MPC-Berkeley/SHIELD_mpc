@@ -71,7 +71,7 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
                             u_tvs[j][:,t] = next_time_agent._u_prev if isinstance(agent,IDMAgent) else (next_time_agent.velocity.magnitude()-agent.velocity.magnitude())/dt #u
                         except:
                             print('error: u_tvs in get_preds()')
-                            pdb.set_trace()
+                            # pdb.set_trace()
                     if t == 0:
                         agent_paths.append(agent._path) if isinstance(agent,IDMAgent) else agent_paths.append(create_path_from_se2(tv_paths_se2[agent.metadata.track_token]))
                         tv_lengths.append(agent.length) if isinstance(agent,IDMAgent) else tv_lengths.append(agent.box.length)
@@ -325,7 +325,8 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
                                             mm_routes[i][n] = make_ca_fun(s_arr, x_arr, y_arr, psi_arr, v_arr)
                                             mm_droutes[i][n][t] = make_jac_fun(mm_routes[i][n])(mm_o[i][n][0,t+1])[:2]
                                 except:
-                                    pdb.set_trace()
+                                    # pdb.set_trace()
+                                    raise ValueError('Error generating mm_routes in get_preds()')
 
                             Rtv=np.array([[np.cos(psi), -np.sin(psi)],[np.sin(psi), np.cos(psi)]])
                             Stv_ = np.diag([tv_lengths[i]/2, tv_widths[i]/2])
