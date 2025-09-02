@@ -69,8 +69,9 @@ def build_simulations(
     )
     scenarios = scenario_filter.get_scenarios()
     print(f'Extracted {len(scenarios)} scenarios')
-    # scenario_names = [sc.scenario_name for sc in scenarios]
 
+    # scenario_names = [sc.scenario_name for sc in scenarios]
+    # print(scenario_names)
     # if '08ee9351335b5c9a' in scenario_names:
     #     print('FOUND IT'.center(50, '!'))
     #     #Find index of the scenario with id 08ee9351335b5c9a

@@ -25,4 +25,5 @@ model_save_dir: nn_models/
 l1_model_path: /home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42_L1_400.pt
 ca_model_path: /home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42_CA_400.pt
 feature_stat_path: /home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz
-eval_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_training_processed.pkl.gz
+# eval_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_training_processed.pkl.gz
+eval_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_evaluation_processed_.pkl.gz

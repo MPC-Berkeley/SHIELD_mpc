@@ -435,7 +435,8 @@ class SimulationRunner(AbstractRunner):
         # Initialize all simulations
         self._initialize()
         counter = 0
-        viddir = '/home/mpc/nuplan-devkit/nuplan/expert_data/video/N'+str(self.planner.config['N'])+'_' + str(self.planner.config['prediction_method']) + '_' + str(self.planner.config['collision_avoidance_method']) + '/'
+        evalstr = 'eval/' if self.planner.config['eval_mode'] else ''
+        viddir = '/home/mpc/nuplan-devkit/nuplan/expert_data/video/N'+str(self.planner.config['N'])+'_' + str(self.planner.config['prediction_method']) + '_' + str(self.planner.config['collision_avoidance_method']) +'/' + evalstr
         filenames = os.listdir(viddir)
         duplicate_scenario = False
         print(f'Looking for {self.simulation.scenario.token} in {viddir}')

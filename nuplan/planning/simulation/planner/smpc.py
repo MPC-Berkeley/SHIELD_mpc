@@ -60,8 +60,7 @@ class SMPC():
         self.ev_length = ev_length
         self.canon_prob_fn=canon_prob_fn
         self.config = config
-        print('[smpc.py] Collision Avoidance Method is',self.config['collision_avoidance_method'])
-
+        print('[smpc.py]: Collision Avoidance Method is',self.config['collision_avoidance_method'])
         self.preds = preds #Predictions of the vehicles List[List[IDMAgent]]. Outer list is of length N+1 and inner list is of length N_TV
         self.N_TV=len(preds[0])
         self.is_mm_preds = is_mm_preds
@@ -74,7 +73,6 @@ class SMPC():
 
         else:
             self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles
-
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3)
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
         if self.config['collision_avoidance_method'] == 'obca':
@@ -100,7 +98,12 @@ class SMPC():
         self.offline=offline_mode
         self.open_loop = open_loop
         self.route = route
-        
+
+        if not self.offline:
+            self.time_safety_screening = np.nan
+            self.time_set_canon_form_mats = np.nan
+            self.time_least_squares_formulation = np.nan
+            self.time_least_squares_solve = np.nan
         p_opts = {'expand': False, 'print_time':0, 'verbose' :False, 'error_on_fail':0}
         s_opts = {'print_level': 0,'tol':1e-4,'max_wall_time': 120.,'constr_viol_tol':1e-4} 
         if eval_mode:
@@ -129,7 +132,6 @@ class SMPC():
             self.opti.solver("scs", p_opts, s_opts)
         else:
             raise ValueError(f"Unknown solver: {self.solver}")
-
         def _flatten2ca(xs):
             if type(xs) == type([]):
                 for x in xs:
@@ -161,12 +163,11 @@ class SMPC():
         self.psi_tvs = [[self.opti.parameter(1,self.N+1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)] # TV heading
         self.tv_params = [self.opti.parameter(2) for _ in range(self.N_TV)] # TV length and width
         self.params+=[self.z_tv_curr, self.u_tvs, self.pos_tvs, self.dpos_tvs, self.Qs, self.psi_tvs, self.tv_params,self.s0]
-
+        
         if not self.offline:
             #Parameters for constraint and gain screening
             self.gain_keep=[[self.opti.parameter(self.N-1,1) for j in range(self.N_modes[k])] for k in range(self.N_TV)]
             self.constr_keep=[[self.opti.parameter(self.N-1,1) for m in range(len(self.mode_map))] for k in range(self.N_TV)]
-
         self.params = ca.vertcat(*_flatten2ca(self.params))  
         
         self.policy=self._return_policy_class()
@@ -184,7 +185,7 @@ class SMPC():
         self._update_speed_limit(self.config['v_max'])
         self._update_leading_vehicle_params(None)
         if not self.offline: 
-            _,_,_,_ = self.update_gain_and_constr_keeps()  
+            _,_,_,_ = self.update_gain_and_constr_keeps() 
         self.solve(first_solve=True)
 
     def _return_policy_class(self):
@@ -444,7 +445,6 @@ class SMPC():
                         # A_m: (4x2), pt_w: (2x180), b_m_w: (4x30), obca_lmbd: (4x1)
                         # z = 1/ca.sqrt(2)*self.tight*ca.norm_fro(A_m @ pt_w - b_m_w) #worst-case effect of noise on y
                         z_norm = self.tight*(1/ca.sqrt(2))*ca.sqrt(ca.sumsqr(A_m @ pt_w - b_m_w)) #decoupling obca_lmbd by upperbounding sup_{lmbd} lmbd.T@(A_m @ pt_w - b_m_w) with 1/sqrt(2). ||z||_2 <= 1/sqrt(2)||Am@pw-bmw||_2
-                        # pdb.set_trace()
                         # z = self.tight *(A_m @ pt_w - b_m_w).T @ obca_lmbd[k][m][:,t-1] #((N-1)*x1) -- z is quadratic in theta
                         y = -d_min + (A_m @ pt - b_m).T @ obca_lmbd[k][m][:,t-1] #+ 0 + 1e-12*obca_lmbd[k][:,t-1].T@obca_lmbd[k][:,t-1]  #(1x1) Nominal                         
             
@@ -585,7 +585,7 @@ class SMPC():
 
         #Canonical Form Computations
         if self.offline:
-            #g(x) <= 0
+            #g(theta) <= 0
             self.lin_ineq_constr =[]
             self.lin_ineq_constr+=[A[t*2+1,:]@self.z_curr+B[t*2+1,:]@h-self.V_MAX for t in range(1,self.N+1)]
             self.lin_ineq_constr+=[-A[t*2+1,:]@self.z_curr-B[t*2+1,:]@h + self.V_MIN  for t in range(1,self.N+1)]
@@ -594,8 +594,8 @@ class SMPC():
 
             self.f_l_i_c = ca.Function("lin_ineq", [self.vars_pol,self.params, self.V_MAX], self.lin_ineq_constr)
 
-            # F\theta < =f
-            self.F, self.f = ca.jacobian(ca.vertcat(*self.f_l_i_c(self.vars_pol,self.params,self.V_MAX)),self.vars_pol), -ca.vertcat(*self.f_l_i_c(ca.DM(*self.vars_pol.shape),self.params, self.V_MAX))
+            # F\theta <= f
+            self.F, self.f = ca.jacobian(ca.vertcat(*self.f_l_i_c(self.vars_pol,self.params,self.V_MAX)),self.vars_pol), -ca.vertcat(*self.f_l_i_c(ca.DM.zeros(*self.vars_pol.shape),self.params, self.V_MAX))
 
             # L\theta <= psi
             self.f_l_i_l1 =ca.Function("l1_ineq", [self.vars_pol,self.vars_epi],self.lin_ineq_l1)
@@ -630,7 +630,7 @@ class SMPC():
             Q, p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape))
             Q_inv = ca.inv(Q)
             L =  self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape))
-            F, f = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM(*self.vars_pol4screening.shape),self.params,self.V_MAX))
+            F, f = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX))
             L_Q_inv = L @ Q_inv
             F_Q_inv =  F @ Q_inv
 
@@ -641,9 +641,10 @@ class SMPC():
 
     def _set_canon_form_mats(self):
         #In online mode, vars_epi is not defined. So, set it to zero
-        self.F, self.f = self.F_fn(ca.DM(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)))
-        self.L = self.L_fn(ca.DM(*self.vars_pol4screening.shape))
+        self.F, self.f = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)))
+        self.L = self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape))
         C = self.C_fn_nonzero(self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape))  # Evaluate C_fn to get the non-zero elements
+        
         #construct sparse C matrix
         self.C = sp.csr_matrix((np.array(C).reshape(-1), (self.row_indices, self.col_indices)), shape=self.C_shape)
         self.c = self.c_fn(self.opti.value(self.params))
@@ -671,7 +672,10 @@ class SMPC():
             if self.offline and not first_solve:
                 self.vars_ws , self.vars_epi_ws = self.sol.value(self.vars_pol), self.sol.value(self.vars_epi)
             if self.offline and self.solver=='ipopt':
+                #g1 dual
                 l1_duals=[[[[self.sol.value(self.opti.dual(self.l1_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
+                gain_l1 = [[[self.sol.value(self.gain_l1[k][j][t]) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
+                #soc collision avoidance dual
                 ca_duals=[[[[self.sol.value(self.opti.dual(self.ca_constr[k][m][t][0]))] for t in range(self.N-1)] for m in range(len(self.mode_map))] for k in range(self.N_TV)]
             leading_vehicle_active = (self.sol.value(self.opti.dual(self.lead_vehicle_constr)) > 1e-3)
             is_opt     = True
@@ -764,9 +768,9 @@ class SMPC():
             sol_dict['gain_keep'] = gain_keep
             sol_dict['constr_keep'] = constr_keep
         if self.offline:
-            sol_dict['computation_time'] = {}
+            sol_dict['computation_time'] = {'solve_time': solve_time}
         else:
-            sol_dict['computation_time'] = {}
+            sol_dict['computation_time'] = {'solve_time': solve_time, 'safety_screening': self.time_safety_screening, 'set_canon_form_mats': self.time_set_canon_form_mats, 'time_least_squares_formulation': self.time_least_squares_formulation, 'time_least_squares_solve': self.time_least_squares_solve}
         return sol_dict
 
     def collision_avoidance_constraints_check(self):
@@ -819,16 +823,16 @@ class SMPC():
                     print('[smpc.py]: Calling set_canon_form_mats,,,')
                     st = time.time()
                     self._set_canon_form_mats()
-                    solve_time = time.time()-st
-                    print(f'[smpc.py]: set_canon_form_mats took {solve_time} seconds')
+                    self.time_set_canon_form_mats = time.time()-st
+                    print(f'[smpc.py]: set_canon_form_mats took {self.time_set_canon_form_mats} seconds')
                     print('[smpc.py]: Finished set_canon_form_mats,,,')
                 print('[smpc.py]: Calling update_gain_and_constr_keeps')
                 _,_,_,_= self.update_gain_and_constr_keeps(*[update_dict[key] for key in ['l1_duals', 'ca_duals']])
-                solve_time = time.time()-st
                 print('[smpc.py]: Finished update_gain_and_constr_keeps,,,')
             else:
                 self.update_gain_and_constr_keeps()
-            print(f'[smpc.py]: Total safety screening took {time.time()-st_first} seconds')
+            self.time_safety_screening = time.time() - st_first
+            print(f'[smpc.py]: Total safety screening took {self.time_safety_screening} seconds')
     def _update_leading_vehicle_params(self, leading_vehicle=None):
         if leading_vehicle is None:
             self.opti.set_value(self.lead_vehicle_s, 1e6)
@@ -839,7 +843,7 @@ class SMPC():
             self.opti.set_value(self.V_MAX, self.config['v_max'])
         else:
             sl = min(speed_limit,self.config['v_max'])
-            print(f"[smpc.py] Speed Limit: {speed_limit}, SL: {sl}")
+            print(f"[smpc.py]: Speed Limit: {speed_limit}, SL: {sl}")
             self.opti.set_value(self.V_MAX, min(speed_limit,self.config['v_max']))
 
     def _update_red_light(self, red_light_agent = None,ego_sim_init_state=None):
@@ -858,7 +862,7 @@ class SMPC():
 
     def _update_ev_initial_condition(self, x0, u_prev):
         self.x0 = x0
-        print(f'[smpc.py] Initial Velocity: {x0[1]}')
+        print(f'[smpc.py]: Initial Velocity: {x0[1]}')
         self.opti.set_value(self.s0, x0[0])    
         self.opti.set_value(self.z_curr, np.array([0,x0[1]],dtype=np.float64))
         self.opti.set_value(self.u_prev, u_prev)
@@ -915,21 +919,10 @@ class SMPC():
         if not self.offline:
             canon_prob_fn.update({'F_fn':self.F_fn, 'L_fn': self.L_fn, 'C_fn_nonzero':self.C_fn_nonzero, 'c_fn':self.c_fn,'row_indices':self.row_indices,'col_indices':self.col_indices,'C_shape':self.C_shape,'vars_pol4screening_shape':self.vars_pol4screening.shape})
         return canon_prob_fn
-    
-    def _get_canon_form_mats(self):
-        '''
-        Returns dictionary containing canonical form of the problem 
-        '''
-        canon_prob ={}
-        canon_prob.update({"Q":self.opti.value(self.Q), "p":self.opti.value(self.p), "d":self.opti.value(self.d), 
-                           "F":self.opti.value(self.F), "f":self.opti.value(self.f), "L":self.opti.value(self.L), 
-                        #    "C":self.opti.value(ca.vertcat(*self.C)), "c":self.opti.value(ca.vertcat(*self.c))}) #self.C and self.c are generator and tuple
-                        "C":[self.opti.value(ca.vertcat(C)) for C in self.C], "c":[self.opti.value(ca.vertcat(c)) for c in self.c]}) 
-        return canon_prob
 
     def update_gain_and_constr_keeps(self, l1_duals=None, ca_duals=None):
         if l1_duals is None:
-            mu, eta, g1, gap = None, None, None, None
+            mu, eta, g1, self.gap = None, None, None, None
         else:
             self.mu_dim = 2*self.N * (self.N_TV+1) + 1
             self.num_ca_duals = len(ca_duals)
@@ -937,7 +930,10 @@ class SMPC():
             #Recover feasible dual solutions
             mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C, self.p, self.f, self.c, np.repeat(ca_duals, self.mu_dim),l1_duals)
             self.gap = self._compute_gap_radius(mu, eta, g1)
-
+        if self.gap is None:
+            print(f"[smpc.py]: Gap Radius is {self.gap}")
+        else:
+            print(f"[smpc.py]: Gap Radius is {self.gap:.5f}")
         st = time.time()
         vars_kept=0 
         constr_kept=0
@@ -955,12 +951,11 @@ class SMPC():
                 for t in range(self.N-1):
                     if l1_duals is not None:
                         if not (k,j,t) in vars_seen:
-                            if (l1_duals_list[k][j][t][0]==0 or l1_duals_list[k][j][t][0]==2): #tertiary class
+                            if (0 in l1_duals_list[k][j][t]) or (2 in l1_duals_list[k][j][t]): #tertiary class
                                 gain_keep = 1
                             else:
                                 gain_keep = self._safe_screen(g1[len(self.mode_map[m][:k])*2*(self.N-1)+j*2*(self.N-1)+2*t:len(self.mode_map[m][:k])*2*(self.N-1)+j*2*(self.N-1)+2*(t+1)], gap_radius= self.gap ,dual_type='l1_dual') 
                             vars_kept+=gain_keep*2
-                            vars_seen.add((k,j,t))
                         if ca_duals_list[k][j][t][0]:
                             constr_keep = 1
                         else:
@@ -972,16 +967,18 @@ class SMPC():
                         constr_keep = 1
                         vars_kept+=gain_keep*2
                         constr_kept+=constr_keep
-                    self.opti.set_value(self.gain_keep[k][j][t],gain_keep)
+                    if not (k,j,t) in vars_seen:
+                        self.opti.set_value(self.gain_keep[k][j][t],gain_keep)
+                        vars_seen.add((k,j,t))
                     self.opti.set_value(self.constr_keep[k][m][t],constr_keep)
         if l1_duals is not None:
             self.vars_kept = vars_kept
             self.constr_kept = constr_kept
             print(f"vars:  {vars_kept} out of {g1.shape[0]}, constr: {constr_kept} out of {ca_duals.shape[0]}")     
         solve_time = time.time() - st
-        print('[smpc.py] Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
+        print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
         return mu, eta, g1, self.gap
-
+        
     def clarkson_woodruff_transform(self,A, s):
         """
         Applies a Clarkson-Woodruff transform (CountSketch) to matrix A.
@@ -1010,216 +1007,828 @@ class SMPC():
         A_sketch = S.dot(A)
         return A_sketch
 
-    def solve_dual_approximation(self,Q, L, F, C, p, f, c, ca_dual, l1_dual):
-        """
-        Solves regularized dual problem via least squares with constraint projection
-        Returns feasible (mu, eta, g1) approximation
-        """
-        # Precompute dimensions
-        st_first = time.time()
-        n_mu = C.shape[0]
-        n_eta = F.shape[0]
-        n_g1 = L.shape[0]
+    if False:
+        def _eta_best_response(self, mu, g):
+            # Build a single Q^{-1} apply using factorization (consistent everywhere)
+            # s-free linear part a = p + L^T(2g-1) + C^T mu  (NO F^T eta here)
+            # b = F Q^{-1} a + f
+            Qa = self._solve_Q(self.p + (self.L.T @ (2.0*g - 1.0)) + (self.C.T @ mu))                               # Q^{-1} a
+            b_vec = (self.F @ Qa) + self.f       # shape (n_eta,)
 
-        # # Construct least squares problem 
-        self.L_Qinv = sp.csr_matrix(self.L_Q_inv_fn(self.opti.value(self.params)))
-        self.F_Qinv = sp.csr_matrix(self.F_Q_inv_fn(self.opti.value(self.params),self.opti.value(self.V_MAX)))
-        self.Q_inv = sp.csr_matrix(self.Q_inv_fn(self.opti.value(self.params)))
-        self.C_Qinv = C @ self.Q_inv
-        self.c = sp.csr_matrix(c) 
-        self.p = sp.csr_matrix(p)
-        self.f = sp.csr_matrix(f) #f is a vector, reshape to column vector
-        self.L = sp.csr_matrix(self.l1_lmbd*L) #Scaling by lambda as we are normalizing the l1-gain dual: \tilde{g1} = g1/lambda
-        self.F = sp.csr_matrix(F)
+            # H = F Q^{-1} F^T   (use the SAME Q^{-1} operator)
+            # Solve Q X = F^T  -> X = Q^{-1} F^T
+            H = (self.F @ self._solve_Q(self.F.toarray().T))            # (n_eta x n_eta)
+            # Symmetrize (kills tiny asymmetries from numerics)
+            H = 0.5*(H + H.T)
 
-        # Construct A matrix
-        A11 = self.C@(self.Q_inv @ self.C.T)
-        A12 = -self.C_Qinv @ self.F.T
-        A13 = -2 * self.C_Qinv @ self.L.T
+            # Cholesky (add tiny jitter only if needed)
+            eps = 1e-6
+            R = sla.cholesky(H + eps*np.eye(H.shape[0]), lower=False, check_finite=False)
 
-        A21 = -self.F_Qinv @ self.C.T
-        A22 = self.F_Qinv @ self.F.T
-        A23 = 2 * self.F_Qinv @ self.L.T
+            # Transform 1/2 η^T H η + b^T η  <=>  min ||R η + y||^2 ,  R^T y = b
+            y = sla.solve_triangular(R.T, b_vec, lower=True, check_finite=False)
 
-        A31 = -2 * self.L_Qinv @ self.C.T
-        A32 = 2 * self.L_Qinv @ self.F.T
-        A33 = 4 * self.L_Qinv @ self.L.T
+            # Exact bounded LS: min ||R η + y|| with η >= 0
+            sol = lsq_linear(R, -y.ravel(), bounds=(0.0, np.inf), lsmr_tol=1e-4, max_iter=100)
+            eta = sol.x.reshape(-1,1)
 
-        A = sp.bmat([
-                [A11, A12, A13],
-                [A21, A22, A23],
-                [A31, A32, A33]]
-            ,format='csr')
-
-        # Construct b
-        ones_ng1 = np.ones((n_g1, 1))
-        self.pmvec = (self.p - self.L.T @ ones_ng1)
-        b1 = -self.c + self.C_Qinv @ self.pmvec
-        b2 = -f - self.F_Qinv @ self.pmvec
-        b3 = -2 * self.L_Qinv @ self.pmvec
-        b = sp.vstack([b1, b2, b3]).toarray() #right-hand side vector b in Ax=b
- 
-        # Solve least squares with iterative method
-        reduce_w_random_rows=False
-        if reduce_w_random_rows:
-            n_rows = 8000
-            A = self.clarkson_woodruff_transform(A,s=n_rows)
-            b = self.clarkson_woodruff_transform(b,s=n_rows)
-
-        #Column selection using RAID-Net classification output
-        reduced_ls = True
-        if reduced_ls:
-            keep = np.concatenate([ca_dual, np.ones(n_eta), l1_dual]) #keep all n_eta as eta duals are always kept
-            keep_arg = np.argwhere(keep>=1).flatten() #indices of non-zero entries in keep
-            A = A[:, keep_arg] #select columns corresponding to non-zero entries in keep
-
-        #Define Least squares parameters
-        ls_tol = 1e-6
-        ls_max_iter = 1000
-        if reduced_ls:
-            ls_init_guess = np.zeros(A.shape[1])
-            start_idx = sum(ca_dual>0) + n_eta #num of ca_duals that are kept plus n_eta as all of eta is kept always
-            ls_init_guess[start_idx:] = 0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
-        else:
-            ls_init_guess = np.zeros(A.shape[1])
-            ls_init_guess[n_mu+n_eta:] = 0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
-        solve_time = time.time() - st_first
-        print(f'[Dual Approximation] Least Squares Formulation Time: {solve_time} s (Depends on the Hessian of the cost function)')
-
-        # Solve least squares problem using LSQR
-        st = time.time()
-        x = lsqr(A, b, atol=ls_tol, btol=ls_tol, iter_lim=ls_max_iter, x0=ls_init_guess)[0]
-        solve_time = time.time() - st
-        print(f'[Dual Approximation] Least Squares Solve Time: {solve_time} s')
-
-        #Reconstruct dual
-        if reduced_ls:
-            mask = (keep>=1).astype(bool)  
-            x_full = np.zeros(mask.shape, dtype=x.dtype)
-            x_full[mask] = x 
-            x = x_full
-
-        # Split variables and project to constraints
-        mu = np.maximum(x[:n_mu], 0)
-        eta = np.maximum(x[n_mu:n_mu+n_eta], 0)      
-        g1 = np.clip(x[n_mu+n_eta:], 0, 1) #||g||_inf <= 1, g>= 0
-        return mu, eta, g1
-
-    def _compute_gap_radius(self, f_mu, f_nu, f_g):
-        """
-        gap_radius = ||(dual - Proj(dual-grad_dual))|| * (1+sigma)/eta where
-        eta = 1/largest_eigval(Q), sigma = 1/smallest_eigval(Q),
-        grad_d_obj = [C; -F; -2L] * inv(Q) * (C' f_mu - F' f_nu - 2L' f_g_adjusted) + [c; f; 0],
-        with f_g_adjusted = 2*f_g - l1_lmbd*ones.
-        """
-        # Compute eigenvalues of Q once (if Q does not change frequently you could precompute these)
-        st = time.time()
-        Q = sp.csr_matrix(self.Q)
-        self.largest_eig = spla.eigsh(Q, k=1, which='LM', v0=self.largest_eig*np.ones(Q.shape[0]) if hasattr(self,'largest_eig') else None, return_eigenvectors=False)[0]
-        self.smallest_eig = spla.eigsh(Q, k=1, v0=self.smallest_eig*np.ones(Q.shape[0])  if hasattr(self,'smallest_eig') else None, sigma=0, which='LM', return_eigenvectors=False)[0] #Solve for smallest eigenvalue using shift-invert  [https://docs.scipy.org/doc/scipy/tutorial/arpack.html]
-        solve_time = time.time() - st
-
-        print(f'[smpc.py] Hessian Eigenvalues: {self.largest_eig, self.smallest_eig}')    
-        print(f'[smpc.py] Hessian Eigenvalue Computation Time: {solve_time} s')
-        eta, sigma = self.largest_eig**(-1), self.smallest_eig**(-1)
-
-        # Precompute the right-hand side product. Note: reshape inputs as column vectors.
-        st = time.time()
-        ones_fg = np.ones((f_g.shape[0], 1))
-        temp = (-self.C.T @ f_mu.reshape((-1, 1))
-                + self.p
-                + self.F.T @ f_nu.reshape((-1, 1))
-                + self.L.T @ (2 * f_g.reshape((-1, 1)) -  ones_fg))
+            return eta
         
-        # Use your precomputed blocks to form the stacked multiplication:
-        stacked_prod = sp.vstack([-self.C_Qinv, self.F_Qinv, 2 * self.L_Qinv])
-        grad_d = stacked_prod @ temp
-        
-        # Add the constant offset
-        grad_d += sp.vstack([self.c, self.f, np.zeros(f_g.shape).reshape((-1, 1))])
+        def solve_dual_approximation(self,Q, L, F, C, p, f, c, ca_dual, l1_dual):
+            """
+            Solves regularized dual problem via least squares with constraint projection
+            Returns feasible (mu, eta, g1) approximation
+            """
+            # Precompute dimensions
+            st_first = time.time()
+            n_mu = C.shape[0]
+            n_eta = F.shape[0]
+            n_g1 = L.shape[0]
+            assert n_mu == self.num_ca_duals * self.mu_dim, f"n_mu {n_mu} != self.num_ca_duals {self.num_ca_duals} * self.mu_dim {self.mu_dim}"
 
-        # Form the full dual vector and compute the projected version:
-        dual = np.concatenate((f_mu, f_nu, f_g)).reshape((-1, 1))
-        proj_dual = dual - grad_d
-        blocks = [self.mu_dim - 1] * self.num_ca_duals
-        # test = np.maximum(proj_dual[:f_mu.shape[0]], 0) #f_mu non-negativity (Wrong... Fixed below)
-        proj_dual[:f_mu.shape[0]] = self._proj_soc_dual_stacked_np(f_mu,blocks) #f_mu dual cone projection
-        
-        proj_dual[f_mu.shape[0]:f_mu.shape[0] + f_nu.shape[0]] = np.maximum(proj_dual[f_mu.shape[0]:f_mu.shape[0] + f_nu.shape[0]], 0) # f_eta projection (non negative)
-        proj_dual[f_mu.shape[0] + f_nu.shape[0]:] = np.clip(proj_dual[f_mu.shape[0] + f_nu.shape[0]:], 0, 1)# Ensure ||g||_inf <= 1 and g>=0
-        solve_time = time.time() - st
-        print(f'Gradient Computation Time: {solve_time} s')
+            # Construct least squares problem 
+            self.L_Qinv = sp.csr_matrix(self.L_Q_inv_fn(self.opti.value(self.params)))
+            self.F_Qinv = sp.csr_matrix(self.F_Q_inv_fn(self.opti.value(self.params),self.opti.value(self.V_MAX)))
+            self.Q_inv = sp.csr_matrix(self.Q_inv_fn(self.opti.value(self.params)))
+            self.C_Qinv = C @ self.Q_inv
+            self.c = sp.csr_matrix(c) 
+            self.p = sp.csr_matrix(p)
+            self.f = sp.csr_matrix(f) #f is a vector, reshape to column vector
+            self.L = sp.csr_matrix(L) 
+            self.F = sp.csr_matrix(F)
 
-        # Compute gap
-        st = time.time()
-        gap = np.linalg.norm(dual - proj_dual) * (1 + sigma) / eta
-        solve_time = time.time() - st
-        print(f'Norm time: {solve_time} s')
-        print(gap)
-        print(np.linalg.norm(dual - proj_dual))
-        print(np.linalg.norm(dual[:f_mu.shape[0]]-proj_dual[:f_mu.shape[0]]))
-        print(np.linalg.norm(dual[f_mu.shape[0]:f_mu.shape[0]+f_nu.shape[0]]-proj_dual[f_mu.shape[0]:f_mu.shape[0]+f_nu.shape[0]]))
-        print(np.linalg.norm(dual[f_mu.shape[0] + f_nu.shape[0]:]-proj_dual[f_mu.shape[0] + f_nu.shape[0]:]))
-        return gap
+            # Construct A matrix
+            A11 = self.C @ (self.Q_inv @ self.C.T)
+            A12 = self.C_Qinv @ self.F.T
+            A13 = 2 * self.C_Qinv @ self.L.T
+
+            A21 = self.F_Qinv @ self.C.T
+            A22 = self.F_Qinv @ self.F.T
+            A23 = 2 * self.F_Qinv @ self.L.T
+
+            A31 = 2 * self.L_Qinv @ self.C.T
+            A32 = 2 * self.L_Qinv @ self.F.T
+            A33 = 4 * self.L_Qinv @ self.L.T
+
+            A = sp.bmat([
+                    [A11, A12, A13],
+                    [A21, A22, A23],
+                    [A31, A32, A33]]
+                ,format='csr')
+
+            # Construct b
+            ones_ng1 = np.ones((n_g1, 1))
+            self.pmvec = (self.p - self.L.T @ ones_ng1)
+            b1 = self.c - self.C_Qinv @ self.pmvec
+            b2 = -f - self.F_Qinv @ self.pmvec
+            b3 = -2 * self.L_Qinv @ self.pmvec
+            b = sp.vstack([b1, b2, b3]).toarray() #right-hand side vector b in Ax=b
     
-    def _proj_soc_np(self,t, x, eps=1e-12):
+            # Solve least squares with iterative method
+            reduce_w_random_rows=False
+            if reduce_w_random_rows:
+                n_rows = 8000
+                A = self.clarkson_woodruff_transform(A,s=n_rows)
+                b = self.clarkson_woodruff_transform(b,s=n_rows)
+
+            #Column selection using RAID-Net classification output
+            reduced_ls = self.config['reduced_ls']
+            if reduced_ls:
+                keep = np.concatenate([ca_dual, np.ones(n_eta), l1_dual]) #keep all n_eta as eta duals are always kept
+                keep_arg = np.argwhere(keep>=1).flatten() #indices of non-zero entries in keep
+                A = A[:, keep_arg] #select columns corresponding to non-zero entries in keep
+
+            #Define Least squares parameters
+            ls_tol = 1e-6
+            ls_max_iter = 1000
+            if reduced_ls:
+                ls_init_guess = np.zeros(A.shape[1])
+                start_idx = sum(ca_dual>0) + n_eta #num of ca_duals that are kept plus n_eta as all of eta is kept always
+                ls_init_guess[start_idx:] = 0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
+            else:
+                ls_init_guess = np.zeros(A.shape[1])
+                ls_init_guess[n_mu+n_eta:] = 0.5 #0.5 because g1 = 1/2 of upperbound which is 1 for the normalized l1_dual
+            self.time_least_squares_formulation = time.time() - st_first
+            print(f'[Dual Approximation] Least Squares Formulation Time: {self.time_least_squares_formulation} s (Depends on the Hessian of the cost function)')
+
+            # Solve least squares problem using LSQR
+            st = time.time()
+            x = lsqr(A, b, atol=ls_tol, btol=ls_tol, iter_lim=ls_max_iter, x0=ls_init_guess)[0]
+            self.time_least_squares_solve = time.time() - st
+            print(f'[Dual Approximation] Least Squares Solve Time: {self.time_least_squares_solve} s')
+
+            #Reconstruct dual
+            if reduced_ls:
+                mask = (keep>=1).astype(bool)  
+                x_full = np.zeros(mask.shape, dtype=x.dtype)
+                x_full[mask] = x 
+                x = x_full
+
+            # Split variables and project to appropriate dual constraints
+            self.blocks = [self.mu_dim - 1] * self.num_ca_duals
+            mu  = self._proj_soc_dual_stacked_np(x[:n_mu],self.blocks).flatten() 
+            eta = np.maximum(x[n_mu:n_mu+n_eta], 0.0)      
+            g1 = np.clip(x[n_mu+n_eta:], 0.0, 1.0) #||g||_inf <= 1, g>= 0
+            return mu, eta, g1
+
+        def _compute_gap_radius(self, f_mu, f_nu, f_g):
+            """
+            gap_radius = ||(dual - Proj(dual-grad_dual))|| * (1+sigma)/eta where
+            eta = 1/largest_eigval(Q), sigma = 1/smallest_eigval(Q),
+            grad_d_obj = [C; F; 2L] * inv(Q) * (C' f_mu + F' f_nu + L' (2*f_g - 1) + [-c; f; 0],        
+            """
+            # Compute eigenvalues of Q once (if Q does not change frequently you could precompute these)
+            st = time.time()
+            Q = sp.csr_matrix(self.Q)
+            Q_csc = sp.csc_matrix(self.Q)
+            self._solve_Q = spla.factorized(Q_csc)   # closure: y = solve_Q(b) solves Q y = b
+            self.largest_eig = spla.eigsh(Q, k=1, which='LM', v0=self.largest_eig*np.ones(Q.shape[0]) if hasattr(self,'largest_eig') else None, return_eigenvectors=False)[0]
+            self.smallest_eig = spla.eigsh(Q, k=1, v0=self.smallest_eig*np.ones(Q.shape[0])  if hasattr(self,'smallest_eig') else None, sigma=0, which='LM', return_eigenvectors=False)[0] #Solve for smallest eigenvalue using shift-invert  [https://docs.scipy.org/doc/scipy/tutorial/arpack.html]
+            solve_time = time.time() - st
+            # st = time.time()
+            # eta_br = self._eta_best_response(f_mu.reshape(-1,1), f_g.reshape(-1,1))
+            # print(f'Best Response Time: {time.time()-st} s')
+            # f_nu = eta_br.flatten()
+            # print(f'[smpc.py]: Hessian Eigenvalues: {self.largest_eig, self.smallest_eig}')    
+            # print(f'[smpc.py]: Hessian Eigenvalue Computation Time: {solve_time} s')
+            eta, sigma = self.largest_eig**(-1), self.smallest_eig**(-1)
+
+            # Precompute the right-hand side product. Note: reshape inputs as column vectors.
+            st = time.time()
+            ones_fg = np.ones((f_g.shape[0], 1))
+            temp = (self.p
+                    + self.F.T @ f_nu.reshape((-1, 1))
+                    + self.L.T @ (2 * f_g.reshape((-1, 1)) -  ones_fg)
+                    + self.C.T @ f_mu.reshape((-1, 1)))
+            w = self._solve_Q(temp) 
+            g_mu  =  self.C @ w - self.c
+            g_eta =  self.F @ w + self.f
+            g_g   =  2 * self.L @ w
+
+
+            grad_d = sp.vstack([g_mu, g_eta, g_g])
+            # Use your precomputed blocks to form the stacked multiplication:
+            # stacked_prod = sp.vstack([-1*-self.C_Qinv, self.F_Qinv, 2 * self.L_Qinv])
+            # print(stacked_prod.shape, temp.shape)
+            # grad_d = stacked_prod @ temp
+            
+            # # Add the constant offset
+            # grad_d += sp.vstack([-1*self.c, self.f, np.zeros(f_g.shape).reshape((-1, 1))])
+
+            # # Form the full dual vector and compute the projected version:
+            dual = np.concatenate((f_mu, f_nu, f_g)).reshape((-1, 1))
+            proj_dual = dual - grad_d
+                    
+            #Projection to the dual feasible set
+            proj_dual[:f_mu.shape[0]] = self._proj_soc_dual_stacked_np(np.array(proj_dual[:f_mu.shape[0]]).flatten(),self.blocks) #f_mu dual cone projection
+            proj_dual[f_mu.shape[0]:f_mu.shape[0] + f_nu.shape[0]] = np.maximum(proj_dual[f_mu.shape[0]:f_mu.shape[0] + f_nu.shape[0]], 0.0) # f_eta projection (non negative)
+            proj_dual[f_mu.shape[0] + f_nu.shape[0]:] = np.clip(proj_dual[f_mu.shape[0] + f_nu.shape[0]:], 0.0, 1.0)# Ensure ||g||_inf <= 1 and g>=0
+            self.gradient_computation_time = time.time() - st
+            # print(f'Gradient Computation Time: {self.gradient_computation_time} s')
+
+            # Compute gap
+            st = time.time()
+            gap = np.linalg.norm(dual - proj_dual) * (1 + sigma) / eta
+            solve_time = time.time() - st
+            print(f'Norm time: {solve_time} s')
+            print(np.linalg.norm(dual - proj_dual))
+            print(np.linalg.norm(dual[:f_mu.shape[0]]-proj_dual[:f_mu.shape[0]]))
+            print(np.linalg.norm(dual[f_mu.shape[0]:f_mu.shape[0]+f_nu.shape[0]]-proj_dual[f_mu.shape[0]:f_mu.shape[0]+f_nu.shape[0]]))
+            print(np.linalg.norm(dual[f_mu.shape[0] + f_nu.shape[0]:]-proj_dual[f_mu.shape[0] + f_nu.shape[0]:]))
+            return gap
+    else:
+        def _eta_best_response(self, mu, g):
+            # Build a single Q^{-1} apply using factorization (consistent everywhere)
+            # s-free linear part a = p + L^T(2g-1) + C^T mu  (NO F^T eta here)
+            # b = F Q^{-1} a + f
+            Qa = self._solve_Q(self._p.toarray() + (self._L.T @ (2.0*g - 1.0)) + (self._C.T @ mu))                               # Q^{-1} a
+            b_vec = (self._F @ Qa) + self._f.toarray()       # shape (n_eta,)
+
+            # H = F Q^{-1} F^T   (use the SAME Q^{-1} operator)
+            # Solve Q X = F^T  -> X = Q^{-1} F^T
+            H = (self._F @ self._solve_Q(self._F.toarray().T))            # (n_eta x n_eta)
+            # Symmetrize (kills tiny asymmetries from numerics)
+            H = 0.5*(H + H.T)
+
+            # Cholesky (add tiny jitter only if needed)
+            eps = 1e-6
+            R = sla.cholesky(H + eps*np.eye(H.shape[0]), lower=False, check_finite=False)
+
+            # Transform 1/2 η^T H η + b^T η  <=>  min ||R η + y||^2 ,  R^T y = b
+            y = sla.solve_triangular(R.T, b_vec, lower=True, check_finite=False)
+
+            # Exact bounded LS: min ||R η + y|| with η >= 0
+            sol = lsq_linear(R, -y.ravel(), bounds=(0.0, np.inf), lsmr_tol=1e-4, max_iter=100)
+            eta = sol.x.reshape(-1,1)
+
+            return eta
+
+        def solve_dual_approximation(self, Q, L, F, C, p, f, c, ca_dual, l1_dual):
+            """
+            Solves regularized dual problem via least squares with constraint projection
+            using LinearOperators (no explicit Q^{-1} or dense A).
+            Keeps verbose prints and stores timing/metadata on self.
+            Returns feasible (mu, eta, g1) approximation.
+            """
+
+            # -------- small helper to force 1-D numpy --------
+            def _np1d(v):
+                return np.asarray(v, dtype=float).ravel()
+
+            # ---------------------------
+            # Dimensions & quick logging
+            # ---------------------------
+            st_first = time.time()
+            # Ensure C,F,L are scipy sparse (avoid any CasADi types)
+            C = C if sp.issparse(C) else sp.csr_matrix(np.asarray(C, dtype=float))
+            F = F if sp.issparse(F) else sp.csr_matrix(np.asarray(F, dtype=float))
+            L = L if sp.issparse(L) else sp.csr_matrix(np.asarray(L, dtype=float))
+
+            n_mu = C.shape[0]
+            n_eta = F.shape[0]
+            n_g1 = L.shape[0]
+            m = n_mu + n_eta + n_g1
+            print(f"[Dual Approx] Dimensions: n_mu={n_mu}, n_eta={n_eta}, n_g1={n_g1}, total={m}")
+
+            # ---------------------------
+            # Factorize Q once, reuse solve
+            # ---------------------------
+            t0 = time.time()
+            # Q_csc = sp.csc_matrix(Q)  # factorization expects CSC
+            Q_csc = sp.csc_matrix(Q + 1e-8*sp.eye(Q.shape[0]))
+            solve_Q = spla.factorized(Q_csc)  # closure: solve_Q(b) solves Q x = b (expects np.ndarray)
+            t_fac = time.time() - t0
+            print(f"[Dual Approx] Factorized Q in {t_fac:.3f}s")
+
+            # Store for gap computation later
+            self._solve_Q = solve_Q
+            self._C, self._F, self._L = C, F, L
+            self._p, self._c, self._f = p, c, f
+            self.blocks = [self.mu_dim - 1] * self.num_ca_duals
+
+            # Ensure p,c,f are 1-D numpy
+            p = _np1d(p)
+            c = _np1d(c)
+            f = _np1d(f)
+
+            # ---------------------------
+            # Helper ops: C Q^{-1} v, etc. (always 1‑D in/out)
+            # ---------------------------
+            def CQinv(v):
+                w = solve_Q(_np1d(v))
+                return _np1d(C @ w)
+
+            def FQinv(v):
+                w = solve_Q(_np1d(v))
+                return _np1d(F @ w)
+
+            def LQinv(v):
+                w = solve_Q(_np1d(v))
+                return _np1d(L @ w)
+
+            # ---------------------------
+            # Build RHS b = [b1; b2; b3] without materializing Q^{-1}
+            # ---------------------------
+            ones_ng1 = np.ones((n_g1, 1))
+            pmvec = p.reshape(-1, 1) - (L.T @ ones_ng1)   # (n_vars, 1)
+            pmvec = _np1d(pmvec)                          # -> (n_vars,)
+
+            b1 = _np1d(-c - CQinv(pmvec))
+            b2 = _np1d(-f - FQinv(pmvec))
+            b3 = _np1d(-2.0*LQinv(pmvec))
+            b  = _np1d(np.concatenate([b1, b2, b3]))
+            self.time_least_squares_formulation = time.time() - st_first
+            print(f"[Dual Approximation] Least Squares Formulation Time: "
+                f"{self.time_least_squares_formulation:.6f} s (Depends on the Hessian/cost)")
+
+            # ---------------------------
+            # LinearOperator for A (symmetric):
+            # y = A * [x1; x2; x3] via block matvec and Q-solves
+            # Preallocate and fill slices instead of concatenate (shape‑safe).
+            # ---------------------------
+            def A_mv(x):
+                x = _np1d(x)
+                x1 = x[:n_mu]
+                x2 = x[n_mu:n_mu+n_eta]
+                x3 = x[n_mu+n_eta:]
+
+                y = np.empty(m, dtype=float)
+                # three Q^{-1} applications
+                y[:n_mu]          = _np1d(CQinv(C.T @ x1) + CQinv(F.T @ x2) + 2.0 * CQinv(L.T @ x3))
+                y[n_mu:n_mu+n_eta]= _np1d(FQinv(C.T @ x1) + FQinv(F.T @ x2) + 2.0 * FQinv(L.T @ x3))
+                y[n_mu+n_eta:]    = _np1d(2.0 * LQinv(C.T @ x1) + 2.0 * LQinv(F.T @ x2) + 4.0 * LQinv(L.T @ x3))
+                return y
+
+            def A_rmv(y):
+                y = _np1d(y)
+                y1 = y[:n_mu]
+                y2 = y[n_mu:n_mu+n_eta]
+                y3 = y[n_mu+n_eta:]
+
+                # one Q^{-1} application for the adjoint
+                s = _np1d(C.T @ y1 + F.T @ y2 + 2.0 * L.T @ y3)
+                z = _np1d(solve_Q(s))
+
+                out = np.empty(m, dtype=float)
+                out[:n_mu]           = _np1d(C @ z)
+                out[n_mu:n_mu+n_eta] = _np1d(F @ z)
+                out[n_mu+n_eta:]     = _np1d(2.0 * L @ z)
+                return out
+
+            A_op = spla.LinearOperator((m, m), matvec=A_mv, rmatvec=A_rmv, dtype=float)
+
+            # ---------------------------
+            # RAID‑Net column reduction
+            # (masks are already expanded to exact lengths)
+            # ---------------------------
+            reduced_ls = self.config['reduced_ls']
+            print(f"[Dual Approx] Reduced LS: {reduced_ls}")
+            if reduced_ls:
+                keep_mu = np.asarray(ca_dual, dtype=bool)   # length n_mu
+                keep_eta = np.ones(n_eta, dtype=bool)       # keep all eta
+                keep_g1  = np.asarray(l1_dual, dtype=bool)  # length n_g1
+                keep = np.concatenate([keep_mu, keep_eta, keep_g1])
+                idx = np.flatnonzero(keep)
+            else:
+                keep = np.ones(m, dtype=bool)
+                idx = np.arange(m, dtype=int)
+
+            self.dual_dims = {"n_mu": int(n_mu), "n_eta": int(n_eta), "n_g1": int(n_g1), "m_total": int(m)}
+            self.reduced_cols = int(idx.size)
+            self.total_cols = int(m)
+            self.keep_mask = keep.copy()
+            self.keep_idx = idx.copy()
+            print(f"[Dual Approx] Kept {self.reduced_cols} / {self.total_cols} dual columns after RAID‑Net reduction")
+
+            # Selection operator S: x_full = S @ x_red
+            S = sp.csr_matrix((np.ones(idx.size), (idx, np.arange(idx.size))), shape=(m, idx.size))
+
+            # Reduced operator Ar(xr) = A(S xr), Ar^T(y) = S^T A(y)
+            # Bind A_op and S as default args to avoid late‑binding issues.
+            # reduced operator
+            def Ar_mv(xr, A_op=A_op, S=S):
+                return _np1d(A_op.matvec(_np1d(S @ xr)))
+
+            def Ar_rmv(y, A_op=A_op, S=S):
+                # Ar^T y = S^T A^T y
+                return _np1d(S.T @ _np1d(A_op.rmatvec(_np1d(y))))
+
+            Ar = spla.LinearOperator((m, idx.size), matvec=Ar_mv, rmatvec=Ar_rmv, dtype=float)
+
+            # ---------------------------
+            # LSQR solve on reduced system
+            # ---------------------------
+            ls_tol = 1e-6
+            ls_max_iter = 5000
+
+            # warm start (seed g1 part with 0.5)
+            ls_init_guess = np.zeros(Ar.shape[1], dtype=float)
+            if reduced_ls:
+                start_idx = int(np.sum(keep_mu)) + n_eta  # kept mu + all eta
+                ls_init_guess[start_idx:] = 0.5  # g1 region
+            else:
+                ls_init_guess[n_mu+n_eta:] = 0.5 #0.5
+
+            # quick asserts before lsqr:
+            assert b.ndim == 1 and b.shape[0] == Ar.shape[0]
+            assert ls_init_guess.ndim == 1 and ls_init_guess.shape[0] == Ar.shape[1]
+            # st = time.time()
+            # # lsqr returns (x, istop, itn, r1norm, r2norm, anorm, acond, arnorm, xnorm)
+            # x_red, istop, itn, r1norm, r2norm, anorm, acond, arnorm, xnorm, var = lsqr(
+            #     Ar, b, atol=ls_tol, btol=ls_tol, iter_lim=ls_max_iter, x0=ls_init_guess
+            # )
+            # self.time_least_squares_solve = time.time() - st
+
+            # print(f"[Dual Approximation] LSQR finished in {self.time_least_squares_solve:.6f} s "
+            #     f"with reduced system {Ar.shape}, iters={itn}, istop={istop}")
+            # print(f"[Dual Approximation] Residuals: r1norm={r1norm:.3e}, r2norm={r2norm:.3e}, "
+            #     f"||A||≈{anorm:.3e}, cond≈{acond:.3e}, arnorm={arnorm:.3e}, ||x||={xnorm:.3e}")
+
+            # # ---------------------------
+            # # Scatter back, split, and project
+            # # ---------------------------
+            # x_full = np.zeros(m, dtype=float)
+            # x_full[idx] = x_red
+            # x = x_full
+
+            # def proj_full(x,dual_dims):
+            #     n_mu, n_eta, n_g1 = dual_dims["n_mu"], dual_dims["n_eta"], dual_dims["n_g1"]
+            #     mu  = x[:n_mu]
+            #     eta = x[n_mu:n_mu+n_eta]
+            #     g1  = x[n_mu+n_eta:]
+
+            #     # mu  = self._proj_soc_dual_stacked_np(mu, self.blocks).ravel()
+            #     mu = self._proj_normal_soc_stacked_vecfirst(x[:n_mu], self.s_stack, self.blocks, tol=1e-9).flatten()   
+            #     eta = np.maximum(eta, 0.0)
+            #     g1  = np.clip(g1, 0.0, 1.0)
+            #     return np.concatenate([mu, eta, g1])
+
+            # Initialize (warm start like before)
+            x = np.zeros(self.dual_dims["m_total"])
+            x[n_mu+n_eta:] = 0.5
+
+            # Row-scale A and b (optional but recommended)
+            # D_r ~ 1/sqrt(row power); apply by wrapping A_op and b
+
+            # Estimate ||A|| via a few power iterations
+            def power_it(A, iters=20):
+                z = np.random.randn(A.shape[1])
+                for _ in range(iters):
+                    z = A.rmatvec(A.matvec(z))
+                    z /= np.linalg.norm(z) + 1e-12
+                Az = A.matvec(z)
+                return np.linalg.norm(Az)  # spectral norm estimate
+
+            L_est = power_it(A_op, 15)
+            tau = 0.9 / (L_est**2 + 1e-12)  # conservative step
+
+            # Projected gradient
+            for _ in range(100):  # or until residual small
+                r  = A_op.matvec(x) - b
+                g  = A_op.rmatvec(r)           # gradient of 0.5*||Ax-b||^2
+                x  = x - tau * g
+                # ones_fg = np.ones(n_g1)
+                # temp = (C.T @ x[:n_mu]) + p + (F.T @ x[n_mu:n_mu+n_eta]) + (L.T @ (2.0*x[n_mu+n_eta:] - ones_fg))
+                # temp = _np1d(temp)
+
+                # # Solve Q u = temp  (uses cached factorization)
+                # u = _np1d(self._solve_Q(temp))
+                # # grad_d blockwise:
+                # grad = _np1d((C @ u))
+                # self.s_stack = -(grad - c)
+
+                # x  = proj_full(x,self.dual_dims)
+
+            # SOC* projection for μ:
+            # blocks list holds x-dimension per SOC dual cone (i.e., self.mu_dim - 1)
+            # mu  = self._proj_soc_dual_stacked_np(x[:n_mu], self.blocks).flatten()            
+            # mu  = self._proj_normal_soc_stacked_vecfirst(x[:n_mu], self.s_stack, self.blocks, tol=1e-9).flatten()   
+
+            # eta = np.maximum(x[n_mu:n_mu+n_eta], 0.0)
+            # g1  = np.clip(x[n_mu+n_eta:], 0.0, 1.0)
+            # print(f"[Dual Approx] Projection complete: "
+            #     f"||mu||2={np.linalg.norm(mu):.3e}, ||eta||2={np.linalg.norm(eta):.3e}, ||g1||2={np.linalg.norm(g1):.3e}")
+
+            # Build per-block slack from your grad_dual slice or C@theta + c
+            ones_fg = np.ones(n_g1)
+            temp = (C.T @ x[:n_mu]) + p + (F.T @ x[n_mu:n_mu+n_eta]) + (L.T @ (2.0*x[n_mu+n_eta:] - ones_fg))
+            temp = _np1d(temp)
+
+            # Solve Q u = temp  (uses cached factorization)
+            u = _np1d(self._solve_Q(temp))
+            # grad_d blockwise:
+            grad = _np1d((C @ u))
+            self.s_stack = -(grad - c)
+
+            # mu_blocks: list of index arrays (into the global x) for each μ block (z then y)
+            s_soc_stack = grad + c
+
+            mu_blocks = []
+            k = 0
+            for n in self.blocks:
+                mu_blocks.append(np.arange(k, k+n+1, dtype=int))
+                k += n + 1
+            x_ls = x.copy()
+            # optional: first snap each μ block to the normal direction (projection we added)
+            # x_snap = self._proj_normal_soc_stacked_vecfirst(x_ls[:n_mu], self.s_stack, self.blocks)
+            # x_ls[:n_mu] = x_snap.ravel()
+            nu_indices = np.arange(n_mu, n_mu+n_eta, dtype=int)
+
+
+            # refine magnitudes τ per block
+            try:
+                x_refined = self.cone_aware_refine(A_op, b, x_ls, mu_blocks, nu_indices, s_soc_stack, self.blocks, iters=1)
+            except:
+                pdb.set_trace()
+
+            total_time = time.time() - st_first
+            print(f"[Dual Approx] Total time {total_time:.6f} s")
+
+            mu = x_refined[:n_mu]
+            eta = x_refined[n_mu:n_mu+n_eta]
+            g1 = x_refined[n_mu+n_eta:]
+            return mu, eta, g1
+
+        def _compute_gap_radius(self, f_mu, f_nu, f_g):
+            """
+            gap_radius = ||dual - Proj(dual - grad_d)|| * (1+sigma)/eta
+            where
+            grad_d = [C; F; 2L] Q^{-1} (C^T μ + F^T η + L^T(2g-1) + p) + [-c; f; 0]
+            with eta = 1/largest_eig(Q), sigma = 1/smallest_eig(Q).
+            """
+            # ---- tiny helper: force 1-D numpy ----
+            _np1d = lambda v: np.asarray(v, dtype=float).ravel()
+
+            # ---- inputs as 1-D numpy ----
+            # st = time.time()
+            # eta_br = self._eta_best_response(f_mu.reshape(-1,1), f_g.reshape(-1,1))
+            # print(f'Best Response Time: {time.time()-st} s')
+            # f_nu = eta_br.flatten()
+            f_mu = _np1d(f_mu)
+            f_nu = _np1d(f_nu)
+            f_g  = _np1d(f_g)
+
+            # ---- sparse handles (set by solve_dual_approximation) ----
+            C = self._C  # scipy.sparse
+            F = self._F
+            L = self._L
+            p = _np1d(self._p)
+            c = _np1d(self._c)
+            f = _np1d(self._f)
+
+            # ---- eigenvalues of Q (cache & print timing like before) ----
+            st = time.time()
+            Q = sp.csr_matrix(self.Q)
+            # largest
+            self.largest_eig = spla.eigsh(
+                Q, k=1, which='LM',
+                v0=(self.largest_eig*np.ones(Q.shape[0]) if hasattr(self, 'largest_eig') else None),
+                return_eigenvectors=False
+            )[0]
+            # smallest (shift-invert around 0)
+            self.smallest_eig = spla.eigsh(
+                Q, k=1, which='LM', sigma=0,
+                v0=(self.smallest_eig*np.ones(Q.shape[0]) if hasattr(self, 'smallest_eig') else None),
+                return_eigenvectors=False
+            )[0]
+            
+            solve_time = time.time() - st
+            # print(f'[smpc.py]: Hessian Eigenvalue Computation Time: {solve_time:.6f} s')
+            eta, sigma = self.largest_eig**(-1), self.smallest_eig**(-1)
+            # ---- gradient of dual objective (no explicit stacks, use Q^{-1} apply) ----
+            st = time.time()
+
+            ones_fg = np.ones_like(f_g)
+            temp = (C.T @ f_mu) + p + (F.T @ f_nu) + (L.T @ (2.0*f_g - ones_fg))
+            temp = _np1d(temp)
+
+            # Solve Q u = temp  (uses cached factorization)
+            u = _np1d(self._solve_Q(temp))
+            # grad_d blockwise:
+            g1 = _np1d((C @ u))
+            g2 = _np1d(F @ u)
+            g3 = _np1d(2*(L @ u))
+
+            grad_d = np.concatenate([g1 + c, g2 + f, g3])
+            self.gradient_computation_time = time.time() - st
+            print(f'[smpc.py]: Dual gradient build time: {self.gradient_computation_time:.6f} s')
+
+            # ---- one projected step (alpha=1; equivalent to your proj_dual = dual - grad_d) ----
+            dual = np.concatenate([f_mu, f_nu, f_g])
+            #CHEATING
+            # grad_d[C.shape[0]:C.shape[0]+F.shape[0]] = np.maximum(grad_d[C.shape[0]:C.shape[0]+F.shape[0]],0)
+            proj_dual = dual - grad_d
+
+            # ---- projection to dual feasible set ----
+            n_mu = C.shape[0]
+            n_eta = F.shape[0]
+            # μ ∈ SOC* (blockwise)
+            # self.blocks should be [self.mu_dim - 1] * self.num_ca_duals (set earlier).
+            # proj_dual[:n_mu] = self._proj_soc_dual_stacked_np(proj_dual[:n_mu], self.blocks).flatten()
+            proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(proj_dual[:n_mu], -(g1-c), self.blocks, tol=1e-9).flatten()
+            # η ≥ 0
+            proj_dual[n_mu:n_mu+n_eta] = np.maximum(proj_dual[n_mu:n_mu+n_eta], 0.0)
+            # 0 ≤ g ≤ 1
+            proj_dual[n_mu+n_eta:] = np.clip(proj_dual[n_mu+n_eta:], 0.0, 1.0)
+
+            # ---- gap radius ----
+            st = time.time()
+            gap = np.linalg.norm(dual - proj_dual) * (1.0 + sigma) / eta
+            solve_time_norm = time.time() - st
+            print(f'[smpc.py]: Gap norm time: {solve_time_norm:.6f} s')
+            print(np.linalg.norm((dual - proj_dual)[:n_mu]))
+            if np.linalg.norm((dual - proj_dual)[:n_mu]) > 1:
+                pdb.set_trace()
+            print(np.linalg.norm((dual - proj_dual)[n_mu:n_mu+n_eta]))
+            print(np.linalg.norm((dual - proj_dual)[n_mu+n_eta:]))
+
+            return gap
+
+
+
+    def cone_aware_refine(self, A_op, b, x,
+                        mu_blocks,           # list of index arrays for μ blocks (z,y order)
+                        nu_indices,          # 1D index array for ν entries
+                        s_soc_stack, blocks, # SOC slacks stacked as (z,y); sizes in 'blocks'
+                        *, iters=1, tol=1e-12):
         """
-        Project (t, x) onto the SOC K = {(tau, y): ||y||_2 <= tau}.
-        Returns (t_proj, x_proj) as numpy arrays.
+        Gauss–Seidel refinement on μ (SOC normal rays built from Π_K(slack)) and ν (R_+).
+        Uses only A_op @ v; no slicing A.
+        """
+        def _embed_block(vec_block, blk, n_total):
+            v = np.zeros(n_total, dtype=float)
+            v[blk] = vec_block
+            return v
+
+        def _projK_scalar_first(proj_soc_np, y, z):
+            # helper: call your scalar-first projector and return (y~, z~)
+            y_tilde, z_tilde = proj_soc_np(y, z)  # Π_K(y,z)
+            return y_tilde, z_tilde
+        x = np.asarray(x, float).copy()
+        n_total = x.size
+
+        # -------- unpack slacks to per-block (y_i, z_i) --------
+        z_list, y_list = [], []
+        idx = 0
+        flat = np.asarray(s_soc_stack, float).ravel()
+        for n in blocks:
+            z_i = flat[idx: idx+n]
+            y_i = flat[idx+n]
+            z_list.append(z_i.copy())
+            y_list.append(float(y_i))
+            idx += n + 1
+
+        for _ in range(iters):
+            Ax = A_op @ x
+
+            # ---- SOC μ updates: ray τ along normal from Π_K(slack) ----
+            for blk, y_i, z_i in zip(mu_blocks, y_list, z_list):
+                # 1) Build normal direction from projected slack
+                y_til, z_til = _projK_scalar_first(self._proj_soc_np, y_i, z_i)
+                nz_til = float(np.linalg.norm(z_til))
+                # Interior → μ=0
+                if y_til > nz_til + 1e-12:
+                    new_blk = np.zeros_like(x[blk])
+                # Apex → safe zero (or your -K projection fallback)
+                elif nz_til < 1e-12 and abs(y_til) < 1e-12:
+                    new_blk = np.zeros_like(x[blk])
+                else:
+                    # boundary: normal direction u=(z~/||z~||, -1)
+                    u = np.concatenate([z_til / max(nz_til, 1e-12), [-1.0]])
+                    # residual with this block removed
+                    r = b - (Ax - A_op @ _embed_block(x[blk], blk, n_total))
+                    col = A_op @ _embed_block(u, blk, n_total)
+                    num = float(col @ r)
+                    den = float(col @ col) + tol
+                    tau = max(0.0, num / den)
+                    new_blk = tau * u
+
+                d_blk = new_blk - x[blk]
+                if np.any(d_blk):
+                    Ax += A_op @ _embed_block(d_blk, blk, n_total)
+                    x[blk] = new_blk
+
+            # ---- ν updates: one-dimensional NNLS per coordinate ----
+            if nu_indices is not None and len(nu_indices):
+                for j in nu_indices:
+                    # residual with this coordinate removed
+                    e = np.zeros(n_total); e[j] = x[j]
+                    r = b - (Ax - A_op @ e)
+                    col = A_op @ (np.eye(1, n_total, j).ravel())  # A_op @ e_j
+                    num = float(col @ r)
+                    den = float(col @ col) + tol
+                    tau = max(0.0, num / den)  # nonnegativity
+                    d = tau - x[j]
+                    if abs(d) > 0:
+                        Ax += d * col
+                        x[j] = tau
+
+        return x
+    def _proj_minusK_block_vecfirst(self, mu_zy, eps=1e-12):
+        """Project one (z,y) block onto -K, using self._proj_soc_np."""
+        z = np.asarray(mu_zy[:-1], float); y = float(mu_zy[-1])
+        # Π_{-K}(y,z) = - Π_K(-y,-z); call scalar-first projector
+        tp_K, xp_K = self._proj_soc_np(-y, -z, eps=eps)  # onto K
+        yp, zp = -tp_K, -xp_K
+        out = np.empty_like(mu_zy)
+        out[:-1] = zp; out[-1] = yp
+        return out
+
+    def _split_slack_vecfirst(self, s_stack, blocks):
+        """
+        s_stack holds concatenated (z_i, y_i) blocks from Cθ+c (or grad_dual slice).
+        Returns (y_list, z_list) aligned with 'blocks'.
+        """
+        s = np.asarray(s_stack, float).ravel()
+        y_list, z_list = [], []
+        idx = 0
+        for n in blocks:
+            z_i = s[idx: idx+n]
+            y_i = s[idx+n]
+            z_list.append(z_i.copy())
+            y_list.append(float(y_i))
+            idx += n + 1
+        return y_list, z_list
+
+    def _proj_normal_soc_stacked_vecfirst(self, mu_stack, s_stack, blocks, tol=1e-10):
+        """
+        Project stacked μ (z,y per block) onto ⨅_i N_K(s_i),
+        where s_stack supplies current slacks (z,y per block) in the same order.
+        """
+        mu = np.asarray(mu_stack, float).ravel()
+        y_list, z_list = self._split_slack_vecfirst(s_stack, blocks)
+        out = []
+        idx = 0
+        for n, y_i, z_i in zip(blocks, y_list, z_list):
+            mu_i = mu[idx: idx+n+1]
+            mu_hat = self._proj_normal_soc_block_vecfirst(mu_i, y_i, z_i, tol=tol)
+            out.append(mu_hat)
+            idx += n + 1
+        return np.concatenate(out)[:, None]
+
+    def _proj_normal_soc_block_vecfirst(self, mu_zy, y, z, tol=1e-10):
+        """
+        Project unconstrained μ block (z,y) onto the normal cone N_K(s) at s=(y,z).
+        Returns μ̂ in (z,y) order.
+        """
+        z = np.asarray(z, float); y = float(y)
+        nz = float(np.linalg.norm(z, 2))
+        phi = nz - y  # <0: interior, =0: boundary, >0: (slightly) infeasible
+
+        # Interior: μ = 0
+        if phi < -tol:
+            return np.zeros_like(mu_zy)
+
+        # Apex: N_K(0) = -K
+        if nz < tol and abs(y) < tol:
+            return self._proj_minusK_block_vecfirst(mu_zy)
+
+        # Boundary (and small violation): project onto ray u=(z/nz, -1)
+        u_z = z / (nz + 1e-16)
+        u_y = -1.0
+        dot = float(np.dot(mu_zy[:-1], u_z) + mu_zy[-1] * u_y)   # ⟨μ, u⟩
+        # Ray projection: μ̂ = max(0, ⟨μ,u⟩) / ||u||^2 * u,  ||u||^2 = 2
+        tau = max(0.0, dot) * 0.5
+        mu_hat = np.empty_like(mu_zy)
+        mu_hat[:-1] = tau * u_z
+        mu_hat[-1]  = tau * u_y
+        return mu_hat
+    def _proj_soc_np(self, t, x, eps=1e-12):
+        """
+        Project (t, x) onto K = { (tau, y): ||y||_2 <= tau }.
+        Returns (t_proj, x_proj).
         """
         x = np.asarray(x, dtype=float)
         t = float(t)
         nx = np.linalg.norm(x, 2)
 
         if nx <= t:
-            # already in the cone
             return t, x
         if nx <= -t:
-            # projects to the apex
             return 0.0, np.zeros_like(x)
 
-        # edge case: x ~ 0
-        if nx < eps:
-            val = max(t, 0.0) / 2.0
-            return val, np.zeros_like(x)
-
+        # middle case: here nx > 0, so division is safe; keep exact alpha
         alpha = 0.5 * (nx + t)
-        scale = alpha / nx
+        scale = alpha / max(nx, eps)
         return alpha, scale * x
+
+    # def _proj_soc_dual_stacked_np(self, vec, blocks, eps=1e-12):
+    #     """
+    #     Project onto a Cartesian product of SOC* blocks.
+    #     vec: flat array concatenating blocks [(x_i,t_i)] with sizes 1+n_i
+    #     blocks: list of n_i (the dimension of each x_i)
+    #     Returns a flat array with the projection.
+    #     """
+    #     out = []
+    #     idx = 0
+    #     for n in blocks:
+    #         x = vec[idx: idx+n]
+    #         t = vec[idx+n]
+    #         # tp, xp = self._proj_soc_np(np.maximum(-t,0), x, eps=eps)
+    #         tp = xp = self._proj_soc_np(-t, x, eps=eps)
+    #         out.append(xp)
+    #         out.append(np.array([-tp]))
+    #         idx += n + 1
+    #     return np.concatenate(out)[:,np.newaxis]
 
     def _proj_soc_dual_stacked_np(self, vec, blocks, eps=1e-12):
         """
-        Project onto a Cartesian product of SOC* blocks.
-        vec: flat array concatenating blocks [(t_i, x_i)] with sizes 1+n_i
-        blocks: list of n_i (the dimension of each x_i)
-        Returns a flat array with the projection.
+        Project a stacked vector with blocks [(x_i, t_i)] onto (-K)^m.
+        'blocks' holds each x_i dimension n_i.
+        Returns a column vector with the same layout: [(x_i^proj, t_i^proj)].
         """
+        vec = np.asarray(vec, dtype=float).ravel()
         out = []
         idx = 0
         for n in blocks:
             x = vec[idx: idx+n]
             t = vec[idx+n]
-            tp, xp = self._proj_soc_np(t, x, eps=eps)
+            # project (t,x) onto -K via sign symmetry: Π_{-K}(t,x) = - Π_K(-t,-x)
+            tp_K, xp_K = self._proj_soc_np(-t, -x, eps=eps)  # onto K
+            tp = -tp_K
+            xp = -xp_K
             out.append(xp)
             out.append(np.array([tp]))
             idx += n + 1
-        return np.concatenate(out)[:,np.newaxis]
+        return np.concatenate(out)[:, None]
 
     def _safe_screen(self,dual, gap_radius, dual_type = "ca_dual"):
             keep = 1
-            if hasattr(self, 'cost_wo_slack'):
-                TOL = abs(self.cost_wo_slack)*0.10 #TODO: should it be dynamic? optimal cost changes as states and scenario change
-            else:
-                TOL = 0.1
+            # if hasattr(self, 'cost_wo_slack'):
+            #     TOL = abs(self.cost_wo_slack)*0.20 #TODO: should it be dynamic? optimal cost changes as states and scenario change
+            # else:
+            TOL = 0.3
             if dual_type == "ca_dual":
                 # Do ca_dual sensitivity-based screen (l2 norm of mu)
-                # if np.linalg.norm(dual,ord=2) <= min(TOL, gap_radius):
-                #     keep = 0
                 if np.linalg.norm(dual, ord=2) + gap_radius < TOL:
                     keep = 0
             else:
-                # Do l1_dual strong duality screen (infinity norm of g1) with lambda normalization to match the canoncial form
-                if np.linalg.norm(dual,ord=np.inf) + gap_radius < 1:
+                '''
+                Practically, we are taking half of the dual vector g that corresponds to the upperbound z_k,i >= S\theta in eq(4) and calling it g1.
+                Thus, when applying the safety screening condition ||g||_inf + gap_radius < 1, we are also checking the condition 0 < min_i(g1) - gap_radius 
+                because when g1 = 0, the corresponding g2 component is 1 as g1 + g2 = 1 (see the paper).
+                '''
+                if (np.linalg.norm(dual,ord=np.inf) + gap_radius < 1) and (min(abs(dual)) - gap_radius > 1e-3): 
                     keep = 0
             return keep #output 1 or 0
 

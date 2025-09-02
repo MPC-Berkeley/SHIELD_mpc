@@ -90,15 +90,14 @@ scenario_types=[
   'high_lateral_acceleration',
 #   'traversing_traffic_light_intersection'
     ]
-# scenario_types = ['starting_unprotected_cross_turn']
-#TODO: 08ee9351335b5c9a - intereseting scenario. NEED to find. Iter 59 and starting_unprotected_cross_turn
+scenario_types = ['starting_unprotected_cross_turn']
+#TODO: 08ee9351335b5c9a - intereseting scenario. NEED to find. Iter 59 and starting_unprotected_cross_turn. log  2021.10.06.17.43.07_veh-28_00508_00877
 print('total log list length:',len(log_list))
-log_list = log_list
-num_scenarios = 5 #float: fraction, int: number of scenarios to use from the log
+log_list = log_list[59:]
+num_scenarios = 10 #float: fraction, int: number of scenarios to use from the log
 num_scenarios_per_type = 1
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
-    # it += 50
     # if 50 > it >= 0:
     if True:
         try:
@@ -110,7 +109,7 @@ for it, log in enumerate(log_list):
                 'scenario_builder=nuplan_mini',  # [nuplan, nuplan_mini] use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
                 f"scenario_filter.log_names=[{str(log)}]",
                 f'scenario_filter.scenario_types={scenario_types}', 
-                f'scenario_filter.num_scenarios_per_type={num_scenarios_per_type}',  # use n scenarios per type
+                # f'scenario_filter.num_scenarios_per_type={num_scenarios_per_type}',  # use n scenarios per type
                 f'scenario_filter.limit_total_scenarios={num_scenarios}',  # use n total scenarios
                 'scenario_filter.remove_invalid_goals=true',  
             ]

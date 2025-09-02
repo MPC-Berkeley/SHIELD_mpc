@@ -62,6 +62,7 @@ class ReplayBuffer(th.utils.data.Dataset):
         # Regularize the covariance matrices
         reg_value = 4e-5
         self.feature_cov += reg_value * np.eye(self.feature_cov.shape[0])
+        pdb.set_trace()
         eigs = np.linalg.eigvals(self.target_cov)
         self.target_cov += reg_value * np.eye(self.target_cov.shape[0])
         self.obs = np.real(la.solve(np.real(la.sqrtm(self.feature_cov)), (self.obs - self.feature_mean).T, assume_a='pos').T)
@@ -83,6 +84,19 @@ class ReplayBuffer(th.utils.data.Dataset):
         if self.training_dataset:
             np.savez('/home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz', feature_mean=self.feature_mean, feature_cov=self.feature_cov, feature_cov_inv =la.inv(self.feature_cov), target_mean=self.target_mean, target_cov=self.target_cov)
             print('Normalization done! Feature mean and cov saved to /home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz')
+    
+    def normalize4evaluation(self, l1_dim, feature_mean=None, feature_cov=None, target_mean=None, target_cov=None,l1_pred_mode='tertiary'):
+        assert feature_mean is not None, 'Feature mean must be provided for evaluation normalization!'
+        self.acs[:,l1_dim:] = 1.*(self.acs[:,l1_dim:] > 1e-3)
+        self.obs = np.real(la.solve(np.real(la.sqrtm(feature_cov)), (self.obs - feature_mean).T, assume_a='pos').T)
+        if l1_pred_mode == 'binary':
+            l1_duals = self.acs[:,:l1_dim]
+            # l1_class = np.where(l1_duals<1e-3,2*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where(l1_duals>l1_lmbd - 1e-3,3*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where((1e-3 <= l1_duals) & (l1_duals <= l1_lmbd - 1e-3),np.ones_like(l1_duals),np.zeros_like(l1_duals))
+            l1_class = (l1_duals>1e-3).astype(int)
+            l1_class += (l1_duals > (self.policy[0].lmbd_ubd*0.99)).astype(int)
+            # assert not 0 in l1_class
+            self.acs[:,:l1_dim] = (l1_class - np.ones_like(l1_class) > 1e-3)
+
     def set_weights(self):
         
         if self.obs is None:

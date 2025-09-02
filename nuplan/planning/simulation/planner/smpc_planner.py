@@ -8,6 +8,7 @@ from itertools import product
 import datetime, cv2
 import pickle
 import gzip
+import time
 import faulthandler
 import copy
 import os
@@ -56,6 +57,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         ev_noise_std: List,
         tv_noise_std: List,
         iter: int,
+        evaluation_mode: bool = False,
     ):
         """
         Constructor for IDMPlanner
@@ -68,9 +70,12 @@ class SMPCPlanner(AbstractIDMPlanner):
         :param planned_trajectory_sample_interval: [s] time interval of sequence to sample from.
         :param occupancy_map_radius: [m] The range around the ego to add objects to be considered.
         """
-        with open("/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml") as f:
-        # with open("/home/hansung/L4SMPC_nuplan/nuplan/planning/simulation/planner/smpc_config_affine.yaml") as f:
-            self.config = yaml.load(f, Loader=yaml.FullLoader)
+        if not evaluation_mode:
+            with open("/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml") as f:
+                self.config = yaml.load(f, Loader=yaml.FullLoader)
+        else:
+            with open("/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config_eval.yaml") as f:
+                self.config = yaml.load(f, Loader=yaml.FullLoader)         
 
         super(SMPCPlanner, self).__init__(
             target_velocity=13.0, # (Not used)
@@ -109,8 +114,10 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.expert_l1 = []
             self.expert_optimal_cost = []
             self.expert_optimal = []
+            self.expert_dagger_obs = []
+            self.figs_w_preds_expert = []
 
-            self.raid_net_classifications = []
+            self.raidnet_classifications = []
             self.gap_radius = []
             self.reduced_computation_time = []
             self.reduced_smpc_optimal = []
@@ -126,6 +133,7 @@ class SMPCPlanner(AbstractIDMPlanner):
 
         self._initialized = False
         self.t = 0
+        self.time_thresh = 5
         self.scenario_num = 0
         print('SMPC Planner Instantiated')
 
@@ -278,20 +286,25 @@ class SMPCPlanner(AbstractIDMPlanner):
                 ca_policy = RAID_NET(raidnet_config,int(observation_dim/(self.config['num_tvs'])), observation_dim, self.ca_num, self.raidnet_config['N']-1, self.config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=self.ca_num, lambda_ubd=self.config['l1_lmbd'], pred_mode=['ca','binary','binary'])
             
                 # Load the pretrained RAIDNET model
+                print('[smpc_planner.py] Loading pretrained RAIDNET model from ', self.raidnet_config['l1_model_path'], 'and', self.raidnet_config['ca_model_path'])
                 l1_policy_state = th.load(self.raidnet_config['l1_model_path'])
                 ca_policy_state = th.load(self.raidnet_config['ca_model_path'])
                 l1_policy.load_state_dict(l1_policy_state['model_state_dict'])
                 ca_policy.load_state_dict(ca_policy_state['model_state_dict'])
+                l1_policy.to('cpu')
+                ca_policy.to('cpu')
+                l1_policy.eval()
+                ca_policy.eval()
                 self.RAID_NET = [l1_policy,ca_policy]
 
                 #Load the feature mean and covariance for normalizing the input features
                 feature_stat = np.load(self.raidnet_config['feature_stat_path']) #open npz file
-                self.feature_mean = th.tensor(feature_stat['feature_mean'], dtype=th.float32)
-                self.feature_cov = th.tensor(feature_stat['feature_cov'], dtype=th.float32)
-                self.feature_cov_inv =  th.tensor(feature_stat['feature_cov_inv'], dtype=th.float32)
+                self.feature_mean = feature_stat['feature_mean']
+                self.feature_cov = feature_stat['feature_cov']
+                self.feature_cov_inv =  feature_stat['feature_cov_inv']
 
             # Initialize the SMPC
-            if self.config['eval_mode']:
+            if self.config['eval_mode'] and not self.config['expert_only']:
                 offline_mode = False
             elif self.config['eval_mode'] and self.config['expert_only']:
                 offline_mode = True #INitialize as the offline expert
@@ -317,6 +330,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state) if self.config['prediction_method']=='idm' else [[0 for _ in range(self.config['num_tvs'])]],   
                     canon_prob_fn=canon_prob if (self.config['eval_mode'] and not self.config['expert_only']) else None,
                     config=self.config,)
+            print(f'[smpc_planner.py] SMPC initialized with N={N}, dt={dt}, ev_noise_std={self.ev_noise_std}, tv_noise_std={self.tv_noise_std}, offline_mode={offline_mode}, solver={self.config["solver"]}')
             if self.config['eval_mode'] and not self.config['expert_only']:
                 self.smpc_expert = SMPC(ev=(A,B),
                     N            =  N,
@@ -332,12 +346,13 @@ class SMPCPlanner(AbstractIDMPlanner):
                     offline_mode= True,
                     solver=self.config['solver'],
                     open_loop = False,
-                    eval_mode = False,
+                    eval_mode = False, #only affects the solver settings
                     is_mm_preds=self.config['is_mm_preds'],
                     route = self.ego_route,
                     preds=filter_preds(preds,self.config['num_tvs'],ego_state) if self.config['prediction_method']=='idm' else [[0 for _ in range(self.config['num_tvs'])]],   
                     canon_prob_fn= None,
                     config=self.config,)
+                print(f'[smpc_planner.py] SMPC_expert initialized with N={N}, dt={dt}, ev_noise_std={self.ev_noise_std}, tv_noise_std={self.tv_noise_std}, offline_mode={offline_mode}, solver={self.config["solver"]}')
             self._initialized = True
 
         # Update the SMPC parameters
@@ -359,6 +374,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 preds_dict = {'preds': pred, 'prob': prob, 'tv_params': tv_params, 'tv_psi': tv_psi, 'tv_track_tokens': tv_track_tokens}
                 mm_preds = preds_dict
                 update_dict = self.get_update_dict(current_input, preds_dict, tv_paths_se2)
+        self.scenario_type = scenario_type
         leading_vehicle = self.leading_idm_agent(ego_state,observations,current_input)
         if leading_vehicle is not None:
             leading_vehicle_key =list(leading_vehicle.keys())[0]
@@ -380,52 +396,48 @@ class SMPCPlanner(AbstractIDMPlanner):
             update_dict.update({'canon_prob':1}) #canon_prob form is provided in the initialization of the SMPC Planner
 
             #RAID-Net Inference
-            if self.t > 0 and hasattr(self, 'ego_traj'): #avoid querying at the first iteration when ego_traj is not defined
-                preds, _ = self.agent_preds2array_wayformer(preds_dict)
-                obs = self.get_observation_for_inference(ego_state,preds,tv_params)
+            if self.t > self.time_thresh and hasattr(self, 'ego_traj'): #avoid querying at the first iteration when ego_traj is not defined
+                preds4obs, _ = self.agent_preds2array_wayformer(preds_dict)
+                obs = self.get_observation_for_inference(ego_state,preds4obs,tv_params)
 
                 #Normalize obs
-                obs_norm = (self.feature_cov_inv @ (th.tensor(obs.T,dtype=th.float32)-self.feature_mean.reshape(-1,1))).T
-                obs_reshaped = obs_norm.reshape(1, self.config['num_tvs'], -1)
-
-                # obs_norm = np.real(la.solve(np.real(la.sqrtm(self.feature_cov)), (th.tensor(obs[0,:]) - self.feature_mean).T, assume_a='pos').T)
+                obs_norm = np.real(la.solve(np.real(la.sqrtm(self.feature_cov)), (obs - self.feature_mean).T, assume_a='pos').T)
+                obs_reshaped = th.tensor(obs_norm,dtype=th.float32).view(1, self.config['num_tvs'], -1)
+                
+                # RAIDNET Inference
+                st = time.time()
                 l1_logits = self.RAID_NET[0](obs_reshaped)
                 ca_logits = self.RAID_NET[1](obs_reshaped)
+                self.raidnet_query_time = time.time() - st
+                print(f'[smpc_planner.py]: RAID-Net Inference Time: {self.raidnet_query_time:.3f} seconds')
 
                 #Classification
-                l1_duals = l1_logits.argmax(dim=-1)[0].numpy() #Drop the minibatch dimension
-                ca_duals = (th.sigmoid(ca_logits) > 0.5).long()[0].numpy()
-                print('[smpc_planner.py] Using RAID-Net Output...')
-                self.raidnet_classifications.append([l1_duals,ca_duals])
+                l1_duals_raidnet = l1_logits.argmax(dim=-1)[0].numpy() #Drop the minibatch dimension
+                ca_duals_raidnet = (th.sigmoid(ca_logits) > 0.5).long()[0].numpy() #Drop the minibatch dimension
+                print(f'[smpc_planner.py]: RAID-Net L1 Duals: {l1_duals_raidnet}, CA Duals: {ca_duals_raidnet}')
+                self.raidnet_classifications.append([l1_duals_raidnet,ca_duals_raidnet])
+                self.expert_dagger_obs.append(obs_norm) #append the observation for expert dagger
+
+                #TODO (Check functionality) Check if the RAIDNET output is more than 50% active
+                ca_duals_raidnet4recall = ca_duals_raidnet
+                # ca_duals_raidnet = None if (np.sum(ca_duals_raidnet)/self.RAID_NET[1].output_dim) > 0.5 else ca_duals_raidnet #if no CA duals are active, set to None
+                # if ca_duals_raidnet is None:
+                #     l1_duals_raidnet = None
+                #     print('[smpc_planner.py]: Ignoring RAID-Net Output')
+                # else:
+                #     if not self.config['expert_only']:
+                #         print('[smpc_planner.py]: Using RAID-Net Output...')
+
             else:
-                #ALL 1's
-                # l1_duals = np.ones((self.l1_num,),dtype=int)
-                # ca_duals = np.ones((self.ca_num,),dtype=int)
-                l1_duals = None
-                ca_duals = None
+                l1_duals_raidnet = None
+                ca_duals_raidnet = None
 
             #update l1 and ca duals
-            update_dict.update({'l1_duals':l1_duals, 'ca_duals':ca_duals})
+            update_dict.update({'l1_duals':l1_duals_raidnet, 'ca_duals':ca_duals_raidnet})
         self.prev_update_dict = update_dict
         self.smpc.update(update_dict) 
         sol = self.smpc.solve()
         self.optimal = sol['optimal']
-
-        # #Depreciated: obca
-        # if self.config['eval_mode'] and (self.config['collision_avoidance_method'] == 'obca'): #online mode and using obca
-        #     violated_constr = self.smpc.collision_avoidance_constraints_check()
-        #     for constr in violated_constr:
-        #         #Add back the constraints
-        #         (agent_idx,scenario_idx,time_idx,mode_idx) = constr
-        #         ca_dual_idx = agent_idx * (self.smpc.N-1)*(len(self.smpc.mode_map)) + scenario_idx * (self.smpc.N-1) + time_idx
-        #         l1_dual_idx = (self.smpc.N-1)* sum([self.smpc.N_modes[k] for k in range(agent_idx)]) + mode_idx * (self.smpc.N-1) + time_idx
-        #         #TODO: Fix and check if idx and assignments below are correct
-        #         ca_duals[ca_dual_idx] = 1
-        #         l1_duals[l1_dual_idx] = [1,1]       
-        #     #solve again
-        #     self.smpc.update(update_dict)
-        #     sol = self.smpc.solve()
-        #     self.optimal = sol['optimal']
 
         info = {}
         if not self.check_preds(preds):
@@ -433,16 +445,25 @@ class SMPCPlanner(AbstractIDMPlanner):
             raise ValueError
 
         #Solve the expert if evaluation mode
-        if self.config['eval_mode'] and not self.config['expert_only']:
+        if self.t > self.time_thresh and self.config['eval_mode'] and (not self.config['expert_only']):
             self.smpc_expert.update(update_dict)
+            print(f'[smpc_planner.py] Solving Expert SMPC in iter {self.t}')
             expert_sol = self.smpc_expert.solve()
             expert_optimal = expert_sol['optimal']
+            if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
+                mm_preds.update({'leading_vehicle':leading_agent}) #update the leading agent in the prediction
+            mm_preds.update({'leading_vehicle_active':expert_sol['leading_vehicle_active']}) #update the leading agent active status in the prediction
             if expert_optimal:
                 self.expert_computation_time.append(expert_sol['computation_time'])
                 self.expert_ca.append(np.fromiter(flatten(expert_sol["ca_duals"]),float))
                 self.expert_l1.append(np.fromiter(flatten(expert_sol["l1_duals"]),float))
-                self.expert_optimal_cost.append(sol['optimal_cost_wo_slack'])
+                self.expert_optimal_cost.append(expert_sol['optimal_cost_wo_slack'])
                 self.expert_optimal.append(1)
+                print(np.sum(np.fromiter(flatten(expert_sol["ca_duals"]),float) > 1e-3))
+                #Compute recall
+                target = np.fromiter(flatten(expert_sol["ca_duals"]),float) > 1e-3
+                recall = np.sum(target & ca_duals_raidnet4recall) / np.sum(target)
+                print(f'[smpc_planner.py]: Recall is {recall}')
 
                 self.expert_infeasibility.append(0)
                 self.expert_collisions.append(0) #assume no collision as long as nuPlan is running. collision is detected by nuPlan's own metrics
@@ -455,7 +476,9 @@ class SMPCPlanner(AbstractIDMPlanner):
 
                 self.expert_infeasibility.append(1)
                 self.expert_collisions.append(0)
-
+            print('[smpc_planner.py] saving expert SMPC outputs... ')
+            solve_time = expert_sol['solve_time']
+            print(f'[smpc_planner.py] Expert SMPC Optimal: {expert_optimal}, Cost: {expert_sol["optimal_cost_wo_slack"]}, solve time: {solve_time} s')
         if self.optimal:
             # Get the optimal DUALS
             if not self.config['eval_mode']: #offline mode
@@ -475,24 +498,32 @@ class SMPCPlanner(AbstractIDMPlanner):
                 elif ca_duals_active > 0.05 :
                     dual_class = 2
                 self.dual_class.append(dual_class)
-                self.expert_action.append(expert_action)
-                self.scenario_type = scenario_type
+                self.expert_action.append(expert_action)          
                 self.l1_active.append(l1_dual_active)
                 print(l1_duals_vec)
                 print(dual_class)
                 print(ca_duals_active,l1_dual_active)
             else:
                 #Evaluation mode
-                self.gap_radius.append(sol['gap_radius'])
-                self.reduced_computation_time.append(sol['computation_time'])
-                self.reduced_smpc_optimal.append(1)
-                self.reduced_smpc_optimal_cost.append(sol['optimal_cost_wo_slack'])
-                self.reduced_gain_keep.append(np.fromiter(flatten(sol["gain_keep"]),float))
-                self.reduced_constr_keep.append(np.fromiter(flatten(sol["constr_keep"]),float))
+                if self.t > self.time_thresh and not self.config['expert_only']: #avoid querying at the first iteration when ego_traj is not defined
+                    self.gap_radius.append(sol['gap_radius'])
+                    sol['computation_time'].update({'raidnet_query_time':self.raidnet_query_time})
+                    self.reduced_computation_time.append(sol['computation_time'])
+                    self.reduced_smpc_optimal.append(1)
+                    self.reduced_smpc_optimal_cost.append(sol['optimal_cost_wo_slack'])
+                    self.reduced_gain_keep.append(np.fromiter(flatten(sol["gain_keep"]),float))
+                    self.reduced_constr_keep.append(np.fromiter(flatten(sol["constr_keep"]),float))
 
-                self.reduced_infeasibility.append(0)
-                self.reduced_collisions.append(0) #assume no collision as long as nuPlan is running. collision is detected by nuPlan's own metrics
-                
+                    self.reduced_infeasibility.append(0)
+                    self.reduced_collisions.append(0) #assume no collision as long as nuPlan is running. collision is detected by nuPlan's own metrics
+                elif self.t > self.time_thresh and self.config['expert_only']:
+                    ca_vec = np.fromiter(flatten(sol["ca_duals"]),float) > 1e-3
+                    ca_vec = ca_vec.astype(int)
+                    print(f'[smpc_planner.py] CA Duals Expert: {ca_vec}')
+                    #Recall
+                    recall = np.sum(ca_vec & ca_duals_raidnet4recall) / np.sum(ca_vec)
+                    print(f'[smpc_planner.py]: Recall is {recall}')
+                    
             if (self.config['eval_mode_category']==0):
                 pred = mm_preds
                 if self.config['prediction_method']=='idm':
@@ -524,19 +555,24 @@ class SMPCPlanner(AbstractIDMPlanner):
                 pred.update({'leading_vehicle':leading_agent}) #update the leading agent in the prediction
             pred.update({'leading_vehicle_active':sol['leading_vehicle_active']}) #update the leading agent active status in the prediction
             if not self.config['eval_mode']:
-                fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"])
+                fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"], info["l1_duals"]) 
             else:
-                fig = self.visualize_scene(current_input, pred, 0)
+                if self.t > self.time_thresh and not self.config['expert_only']:
+                    fig = self.visualize_scene(current_input, pred, 0, sol["constr_keep"], sol['gain_keep']) #reduced smpc
+                elif self.t > self.time_thresh and self.config['expert_only']:
+                    fig = self.visualize_scene(current_input, pred, 0, sol["ca_duals"], sol['l1_duals'])
+                else:
+                    fig = self.visualize_scene(current_input, pred,0)
             self.figs_w_preds.append(fig)
             
             #Save canonical form
-            if self.smpc.offline and self.t == 1: #run once
+            if self.smpc.offline and self.t == self.time_thresh and self.config['save_canon_forms']: #run once
                 # canon_prob = self.smpc._get_canon_form_mats() #Output is in dict
                 canon_prob_fn = self.smpc._get_canon_form_fns() 
                 with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn, f)
                 print(f'[Offline Mode] Canonical form saved')
-            elif not self.smpc.offline and self.t == 1: #run once
+            elif not self.smpc.offline and self.t == self.time_thresh and self.config['save_canon_forms']: #run once
                 canon_prob_fn_precomputed = self.smpc._get_canon_form_fns_precomputed()
                 with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn_precomputed, f)
@@ -549,7 +585,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             fig = self.visualize_scene(current_input, preds_dict, 0)
             self.figs_w_preds.append(fig)
             self.scenario_type = scenario_type
-            if self.config['eval_mode']:
+            if self.config['eval_mode'] and (self.t > self.time_thresh) and not self.config['expert_only']:
                 self.gap_radius.append(sol['gap_radius'])
                 self.reduced_computation_time.append(np.nan)
                 self.reduced_smpc_optimal.append(0)
@@ -563,7 +599,14 @@ class SMPCPlanner(AbstractIDMPlanner):
             # self.visualize_scene(current_input, pred, 0,visualize=True)
             # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True)
             # self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
-        
+        if (self.t > self.time_thresh) and self.config['eval_mode'] and (not self.config['expert_only']) and expert_optimal:
+            fig_expert = self.visualize_scene(current_input, pred, 0, expert_sol["ca_duals"], expert_sol['l1_duals']) #expert smpc
+            self.figs_w_preds_expert.append(fig_expert)
+        elif (self.t <= self.time_thresh) and self.config['eval_mode']:
+            fig_expert = self.visualize_scene(current_input, preds_dict, 0) #expert smpc
+            self.figs_w_preds_expert.append(fig_expert)
+        else:
+            pass
         #Update u_prev
         self.u_prev = sol['u_control'] if self.optimal else 0 #scalar
         self.u_opt = sol['u_opt'] #size N-1
@@ -676,6 +719,8 @@ class SMPCPlanner(AbstractIDMPlanner):
             obs = np.concatenate((agent_params, delta_traj),axis=1) #(n_tv,2+3*N)
             #flatten obs to row first (C-order)
             obs = np.reshape(obs,(1,-1)) #(1,n_tv*(2+3*N))
+        else:
+            raise ValueError('Ego trajectory is not defined. Please run the planner first to get the ego trajectory.')
         return obs
     
     def check_preds(self,preds):
@@ -757,7 +802,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             ego_traj.append(ego_state)
         self.ego_traj = ego_traj
     
-    def visualize_scene(self, current_input, preds, t=0, ca_duals=[], visualize=False) -> None:
+    def visualize_scene(self, current_input, preds, t=0, ca_duals=[], l1_duals=[], visualize=False) -> None:
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
         from shapely.geometry import Point
@@ -771,19 +816,6 @@ class SMPCPlanner(AbstractIDMPlanner):
 
         fig = plt.figure()
         ax = plt.gca()
-        
-        # Draw the ego vehicle
-        ego_rect = plt.Rectangle(
-            (ego_x - ego_length/2, ego_y - ego_width/2),
-            ego_length,
-            ego_width,
-            angle=ego_heading*180/np.pi,
-            fill=True,
-            color='green',
-            rotation_point='center',
-            label='Ego Vehicle'
-        )
-        ax.add_patch(ego_rect)
         self.visualize_road_boundaries(ax, ego_x, ego_y, self._map_api, search_radius=100)
             
         # ---- Add Road Lanes Visualization using route roadblocks ----
@@ -802,7 +834,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                             xs = [pt.x for pt in pts]
                             ys = [pt.y for pt in pts]
                             # Only add the label once
-                            label = 'Lane' if not lane_plotted else None
+                            label = 'Lane Centerline' if not lane_plotted else None
                             plt.plot(xs, ys, color='gray', linestyle='-', linewidth=1, label=label)
                             lane_plotted = True
         else:
@@ -822,10 +854,11 @@ class SMPCPlanner(AbstractIDMPlanner):
         except Exception as e:
             print("Could not retrieve traffic light geometry:", e)
 
+        #Display the ellipses
         if ca_duals:
-            for t_idx in range(self.smpc.N):
+            for t_idx in range(self.smpc.N): #time indexing
                 if self.config['prediction_method']=='idm':
-                    for j, agent in enumerate(preds[t_idx]):
+                    for j, agent in enumerate(preds[t_idx]): #agent indexing
                         if isinstance(agent, IDMAgent):
                             x, y = agent.to_se2().x, agent.to_se2().y 
                             length, width = agent.length, agent.width
@@ -841,12 +874,15 @@ class SMPCPlanner(AbstractIDMPlanner):
                             )
                             ax.add_patch(rect)
                         else:
-                            active_ca_dual = (ca_duals[j][0][t_idx-1][0] > 1e-3)
-                            color = 'red' if active_ca_dual else 'yellow'
-                            ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, color=color)
+                            if type(ca_duals[j][0][t_idx-1]) == list:
+                                active_ca_dual = (ca_duals[j][0][t_idx-1][0] > 1e-3)
+                            else:
+                                active_ca_dual = (ca_duals[j][0][t_idx-1] > 1e-3)
+                            color = '#0096c7' if active_ca_dual else '#90e0ef'
+                            ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, facecolor=color,edgecolor='black',linewidth=0.5)
                             ax.add_patch(ellipsoid)
-                else:
-                    #Plot all vehicles in the observation track
+                else: #wayformer
+                    #Plot all vehicles (blue rectangles) in the observation track
                     for i, vh in enumerate(observations.tracked_objects.tracked_objects):
                         x, y = vh.center.x, vh.center.y
                         length, width = vh.box.length, vh.box.width
@@ -856,18 +892,44 @@ class SMPCPlanner(AbstractIDMPlanner):
                             angle=heading*180/np.pi, fill=True, color='blue', rotation_point='center'
                         )
                         ax.add_patch(rect)
-                    for j in range(self.config['num_tvs']):
+                    #Plot the Wayformer predictions as ellipses
+                    for j in range(self.config['num_tvs']): #iterate over agents
                         if t_idx == 0:
-                            pass #vehicles already plotted
+                            pass #vehicles already plotted for current time
                         else:
-                            for n in range(self.config['num_modes']):
+                            for n in range(self.config['num_modes']): #iterate over modes
+                                #Extract predictions
                                 x,y = preds['preds'][j,n,t_idx,0], preds['preds'][j,n,t_idx,1]
                                 length, width = preds['tv_params'][j][0], preds['tv_params'][j][1]
                                 heading = preds['tv_psi'][j,n,t_idx,0]
 
-                                active_ca_dual = (ca_duals[j][0][t_idx-1][0] > 1e-3)
-                                color = 'red' if active_ca_dual else 'yellow'
-                                ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, color=color)
+                                #check if any ca_duals with the corresponding mode n is active
+                                #Get all scenarios with mode n
+                                m_inds = [m for m in range(len(self.smpc.mode_map)) if self.smpc.mode_map[m][j] == n]
+                                for m_ind in m_inds:
+                                    if type(ca_duals[j][0][t_idx-1]) == list:
+                                        active_ca_dual = (ca_duals[j][m_ind][t_idx-1][0] > 1e-3)
+                                    else:
+                                        active_ca_dual = (ca_duals[j][m_ind][t_idx-1] > 1e-3)
+                                    if active_ca_dual: #Break out of the loop if any ca_dual for mode n is active
+                                        break
+                                color = '#0096c7' if active_ca_dual else '#90e0ef'
+                                if l1_duals:
+                                    if type(l1_duals[j][n][t_idx-1]) == list:
+                                        # hatching = '\\/' if ((min(abs(l1_duals[j][n][t_idx-1][0])) < 1e-3) or (max(abs(l1_duals[j][n][t_idx-1][0])) > (self.smpc.l1_lmbd-1e-3))) else None
+                                        if (((min(abs(l1_duals[j][n][t_idx-1][0])) < 1e-3) or (max(abs(l1_duals[j][n][t_idx-1][0])) > (self.smpc.l1_lmbd-1e-3)))):
+                                            color = 'red' if active_ca_dual else 'yellow'
+                                        else:
+                                            pass    
+                                    else:
+                                        if l1_duals[j][n][t_idx-1]:
+                                            color = 'red' if active_ca_dual else 'yellow'
+                                        else:
+                                            pass
+                                        # hatching = '\\/' if l1_duals[j][n][t_idx-1] else None #l1_duals is in binary (gain_keep in smpc.py)
+                                    ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, facecolor=color,edgecolor='black',linewidth=0.1)
+                                else:
+                                    ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, facecolor=color,edgecolor='black',linewidth=0.1)
                                 ax.add_patch(ellipsoid)
         else:
             if self.config['prediction_method']=='idm':
@@ -885,7 +947,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         angle=heading*180/np.pi, fill=True, color='blue', rotation_point='center'
                     )
                     ax.add_patch(rect)
-            else:
+            else: #wayformer
                 for j, vh in enumerate(observations.tracked_objects.tracked_objects):
                     x, y = vh.center.x, vh.center.y
                     length, width = vh.box.length, vh.box.width
@@ -904,9 +966,8 @@ class SMPCPlanner(AbstractIDMPlanner):
                                 x,y = preds['preds'][j,n,t_idx,0], preds['preds'][j,n,t_idx,1]
                                 length, width = preds['tv_params'][j][0], preds['tv_params'][j][1]
                                 heading = preds['tv_psi'][j,n,t_idx,0]
-
-                                color = 'yellow'
-                                ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, color=color)
+                                color = '#90e0ef'
+                                ellipsoid = patches.Ellipse((x, y), length, width, angle=heading*180/np.pi, fill=True, facecolor=color,edgecolor='black',linewidth=0.1)
                                 ax.add_patch(ellipsoid)
 
         # Plot the planned trajectory, if available
@@ -931,10 +992,27 @@ class SMPCPlanner(AbstractIDMPlanner):
                 vehicle_parameters.width,
                 angle=projected_ego_state.center.heading*180/np.pi,
                 fill=True,
-                color='red' if lead_vehicle_active else 'yellow')
+                facecolor = '#0096c7' if lead_vehicle_active else '#90e0ef',
+                edgecolor='black',linewidth=0.1)
+
+        # Draw the ego vehicle
+        ego_rect = plt.Rectangle(
+            (ego_x - ego_length/2, ego_y - ego_width/2),
+            ego_length,
+            ego_width,
+            angle=ego_heading*180/np.pi,
+            fill=True,
+            color='green',
+            rotation_point='center',
+            label='Ego Vehicle'
+        )
+        ax.add_patch(ego_rect)
 
         plt.axis('equal')
-        plt.legend(loc='upper right')
+        plt.legend(loc='upper left')
+        plt.ylabel('Y (m)')
+        plt.xlabel('X (m)')
+
         # Set axis limits around the ego vehicle
         plt.xlim([ego_x-30, ego_x+30])
         plt.ylim([ego_y-30, ego_y+30])
@@ -1155,7 +1233,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                             print(f"Created directory: {vid_save_dir}")
 
                         out = cv2.VideoWriter(vid_save_dir+self.scenario_id+ '_' + str(self.scenario_num) + '_' +self.scenario_type + '_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
-
+                        
                         for fig in self.figs_w_preds:
                             # Convert the figure to an image
                             fig.canvas.draw()
@@ -1169,15 +1247,15 @@ class SMPCPlanner(AbstractIDMPlanner):
                         # Release the VideoWriter object
                         out.release()
                         print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.smpc.N}_{self.log_iter}.mp4")
-                        # pdb.set_trace()
                     else:
                         #in evaluation mode
-                        save_dir = ''.join(self.config['save_dir'].split('.pkl')[:-1]) + '_eval'+ '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] + '_' + self.config['prediction_method'] +'.pkl'
+                        save_dir = '../nuplan/expert_data/nuplan_evaluation_N' + str(self.config['N']) + '_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method'] + '_' + self.config['prediction_method'] +'.pkl'
                         filepath = save_dir + '.gz'           
                         if not os.path.exists(filepath): 
                             with gzip.open(filepath, 'wb') as f:
                                 pickle.dump({'log_iter':[self.log_iter],
                                             'logname': [logname], 
+                                            'expert_only': [self.config['expert_only']],
                                             'scenario_type':[self.scenario_type],
                                             'scenario_id': [self.scenario_id], 
                                             'ego_opt_sol':[self.ego_opt_sols_full_state], 
@@ -1191,7 +1269,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                                             'expert_l1': [self.expert_l1], 
                                             'expert_optimal_cost': [self.expert_optimal_cost],
                                             'expert_optimal': [self.expert_optimal], 
-                                            'raid_net_classifications': [self.raid_net_classifications], 
+                                            'raid_net_classifications': [self.raidnet_classifications], 
                                             'gap_radius': [self.gap_radius], 
                                             'reduced_computation_time': [self.reduced_computation_time], 
                                             'reduced_smpc_optimal': [self.reduced_smpc_optimal], 
@@ -1202,8 +1280,9 @@ class SMPCPlanner(AbstractIDMPlanner):
                                             'expert_collisions': [self.expert_collisions], 
                                             'reduced_infeasibility': [self.reduced_infeasibility], 
                                             'reduced_collisions': [self.reduced_collisions],
-                                            'figs_w_preds': [self.figs_w_preds]
+                                            'expert_dagger_obs': [self.expert_dagger_obs]
                                             }, f, protocol=pickle.HIGHEST_PROTOCOL)
+                            print('Data saved to', filepath)
                         else:
                             with gzip.open(filepath, 'rb') as f:
                                 data = pickle.load(f)
@@ -1217,12 +1296,13 @@ class SMPCPlanner(AbstractIDMPlanner):
                             data['scenario_type'].append(self.scenario_type)
                             data['log_iter'].append(self.log_iter)
                             data['logname'].append(logname)
+                            data['expert_only'].append(self.config['expert_only'])
                             data['expert_computation_time'].append(self.expert_computation_time)
                             data['expert_ca'].append(self.expert_ca)
                             data['expert_l1'].append(self.expert_l1)
                             data['expert_optimal_cost'].append(self.expert_optimal_cost)
                             data['expert_optimal'].append(self.expert_optimal)
-                            data['raid_net_classifications'].append(self.raid_net_classifications)
+                            data['raid_net_classifications'].append(self.raidnet_classifications)
                             data['gap_radius'].append(self.gap_radius)
                             data['reduced_computation_time'].append(self.reduced_computation_time)
                             data['reduced_smpc_optimal'].append(self.reduced_smpc_optimal)
@@ -1233,32 +1313,71 @@ class SMPCPlanner(AbstractIDMPlanner):
                             data['expert_collisions'].append(self.expert_collisions)
                             data['reduced_infeasibility'].append(self.reduced_infeasibility)
                             data['reduced_collisions'].append(self.reduced_collisions)
-                            data['figs_w_preds'].append(self.figs_w_preds)
+                            data['expert_dagger_obs'].append(self.expert_dagger_obs)
                             with gzip.open(filepath, 'wb') as f:
                                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
                                 f.flush()
-                            
-                            # Save the list of figures as video
-                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                            vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
-                            # check if the directory exists, if not create it
-                            if not os.path.exists(vid_save_dir):
-                                os.makedirs(vid_save_dir) 
-                                print(f"Created directory: {vid_save_dir}")
-                            out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+                            print('Data saved to', filepath)
 
-                            for fig in self.figs_w_preds:
-                                # Convert the figure to an image
-                                fig.canvas.draw()
-                                img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                                img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                        # Save the list of figures as video
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
+                        # check if the directory exists, if not create it
+                        if not os.path.exists(vid_save_dir):
+                            os.makedirs(vid_save_dir) 
+                            print(f"Created directory: {vid_save_dir}")
+                        expert_str = '_expert' if self.config['expert_only'] else ''
+                        out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+ expert_str +'.mp4', fourcc, 20.0, (640, 480))
+                        
+                        for fig in self.figs_w_preds:
+                            # Convert the figure to an image
+                            fig.canvas.draw()
+                            img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                            img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
 
-                                # Write the image to the video file
-                                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                                out.write(img_bgr)
+                            # Write the image to the video file
+                            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                            out.write(img_bgr)
+                        print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: eval_{self.scenario_id}_N{self.smpc.N}_{self.log_iter}{expert_str}.mp4")
+                        # Release the VideoWriter object
+                        out.release()
 
-                            # Release the VideoWriter object
-                            out.release()
+                        # if not self.config['expert_only']:
+                        #     # Save the list of figures as video for the expert
+                        #     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        #     vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+'/'
+                        #     # check if the directory exists, if not create it
+                        #     if not os.path.exists(vid_save_dir):
+                        #         os.makedirs(vid_save_dir) 
+                        #         print(f"Created directory: {vid_save_dir}")
+                        #     out = cv2.VideoWriter(vid_save_dir+'eval/eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'_expert.mp4', fourcc, 20.0, (640, 480))
+
+                        #     for fig in self.figs_w_preds_expert:
+                        #         # Convert the figure to an image
+                        #         fig.canvas.draw()
+                        #         img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                        #         img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+                        #         # Write the image to the video file
+                        #         img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                        #         out.write(img_bgr)
+
+                        #     # Release the VideoWriter object
+                        #     out.release()     
+
+                        if self.config['save_snapshots']:   
+                            # Save the figures as snapshots
+                            expert_str = '_expert' if self.config['expert_only'] else ''
+                            path = vid_save_dir+'eval/snapshots/' + 'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter) + expert_str +'/'
+                            if not os.path.exists(path):
+                                os.makedirs(path) 
+                                print(f"Created directory: {path}")
+                            for i, fig in enumerate(self.figs_w_preds):
+                                fig.savefig(path + 'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'_'+str(i)+expert_str+'.png',dpi=600)
+                            if not self.config['expert_only']:
+                                for i, fig in enumerate(self.figs_w_preds_expert):
+                                    fig.savefig(path + 'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'_'+str(i)+'_expert.png',dpi=600)
+                            print('Snapshots saved to', path)
                 except:
                     pdb.set_trace()    
             else:
@@ -1276,6 +1395,24 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.pred_agent_params = []
         self.ego_opt_sols_full_state = []
         self.figs_w_preds = []
+        self.figs_w_preds_expert = []
+        self.raidnet_classifications = []
+        self.expert_computation_time = []
+        self.expert_ca = []
+        self.expert_l1 = []
+        self.expert_optimal_cost = []
+        self.expert_optimal = []
+        self.expert_infeasibility = []
+        self.expert_collisions = []
+        self.reduced_computation_time = []
+        self.reduced_smpc_optimal = []
+        self.reduced_smpc_optimal_cost = []
+        self.reduced_gain_keep = []
+        self.reduced_constr_keep = []
+        self.reduced_infeasibility = []
+        self.reduced_collisions = []
+        self.ego_traj = []
+        self.gap_radius = []
         self.smpc_params = []
         self.u_prev = 0.0 #initialze previous control input(acceleration) to 0 
         self.x_sol = None

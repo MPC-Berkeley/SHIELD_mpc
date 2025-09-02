@@ -33,17 +33,6 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     expert_data['optimal_duals'] = [acs for acs in expert_data['optimal_duals'] if len(acs)>0]
     expert_data['dual_class'] = [acs for acs in expert_data['dual_class'] if len(acs)>0]
 
-    # #For debugging issue. This issue happened due to some error in smpc_planner.py. I addressed this issue and the new dataset is being collected 
-    # for j in range(len(expert_data['optimal_duals'])):
-    #     if (len(expert_data['optimal_duals'][j]) > len(expert_data['observation'][j])):
-    #         #delete the last element of optimal duals
-    #         expert_data['optimal_duals'][j] = expert_data['optimal_duals'][j][:-1]
-    #     elif (len(expert_data['optimal_duals'][j]) == len(expert_data['observation'][j])):
-    #         pass
-    #     else:
-    #         print('Length mismatch between observation and optimal duals')
-    #         pdb.set_trace()
-
     observation = np.squeeze(np.concatenate([obs for obs in expert_data["observation"]]),axis=1)
     optimal_duals = np.concatenate([acs for acs in expert_data["optimal_duals"]])
 
@@ -54,20 +43,16 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     for data in expert_data["dual_class"]:
         flattened_dual_class.extend(data)
     replay_buffer.dual_classes = np.array(flattened_dual_class)
-    replay_buffer.normalize(l1_num,l1_lmbd=smpc_config['l1_lmbd'],l1_pred_mode=config['l1_pred_mode'])
+    feature_stat = np.load(config['feature_stat_path']) #open npz file
+    feature_mean = feature_stat['feature_mean']
+    feature_cov = feature_stat['feature_cov']
+    replay_buffer.normalize4evaluation(l1_num, feature_mean=feature_mean, feature_cov=feature_cov, target_mean=None, target_cov=None, l1_pred_mode=pred_mode[0])
     replay_buffer.set_weights()
-
-    #Set the observation statistics for the policy for unnormalization
-    if isinstance(policy, list):
-        for pol in policy:
-            pol._set_obs_stats(replay_buffer.feature_mean,replay_buffer.feature_cov)
-    else:
-        policy._set_obs_stats(replay_buffer.feature_mean,replay_buffer.feature_cov)
 
     print('Loading pretrained model...')
     checkpoint = []
-    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11_L1_100.pt'))
-    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11_CA_100.pt'))
+    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42_L1_400.pt'))
+    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42_CA_400.pt'))
     #L1
     policy[0].load_state_dict(checkpoint[0]['model_state_dict'])
     #CA
@@ -313,7 +298,7 @@ def print_and_plot_metrics(metrics: dict):
     ax[0].set_ylabel('#')
     ax[0].set_xlabel(r'Normalized CA $\ell(\pi_{\mu},\tilde{\mu}^\star)$')
     ax[0].set_xlim(0,1)
-    ax[0].set_ylim(0,16000)
+    ax[0].set_ylim(0,18000)
     ax[0].legend()
     metrics['ca_confusion_matrix'].plot(ax=ax[1],cmap='Blues',im_kw={'vmax': 1.})
     plt.show()

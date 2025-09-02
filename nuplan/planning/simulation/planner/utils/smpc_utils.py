@@ -481,8 +481,7 @@ def flatten(xs):
             yield x #creates a generator object
 
 def unflatten_duals(x,l1_dual_dim,ca_dual_dim,data2tar = False):
-    # l1_num=sum(l1_dual_dim[1])*(l1_dual_dim[0])*2
-    l1_num = sum(l1_dual_dim[1])*(l1_dual_dim[0])     
+    l1_num=sum(l1_dual_dim[1])*(l1_dual_dim[0])*2
     l1_dual_arr = x[0,:l1_num].flatten().tolist() 
     ca_dual_arr = x[0,l1_num:].flatten().tolist()
 
@@ -503,25 +502,20 @@ def unflatten_duals(x,l1_dual_dim,ca_dual_dim,data2tar = False):
                     ca_dual[t][k][j]+=list(ca_dual_arr[step:step+1])
                     step+=1     
     else:
-        l1_dual = [[[ [] for t in range(l1_dual_dim[0])] for j in range(l1_dual_dim[1][k])] for k in range(l1_dual_dim[2])]
-        ca_dual = [[[ [] for t in range(ca_dual_dim[0])] for j in range(ca_dual_dim[1])] for k in range(ca_dual_dim[2])]
+        l1_dual = [[[None for t in range(l1_dual_dim[0])] for j in range(l1_dual_dim[1][k])] for k in range(l1_dual_dim[2])]
+        ca_dual = [[[None for t in range(ca_dual_dim[0])] for j in range(ca_dual_dim[1])] for k in range(ca_dual_dim[2])]
     
-
         step=0
-        for t in range(l1_dual_dim[0]):
-            for k in range(l1_dual_dim[2]):
-                for j in range(l1_dual_dim[1][k]):
-
-                    # l1_dual[k][j][t]+=[l1_dual_arr[step:step+2]]
-                    # step+=2
-                    l1_dual[k][j][t]+=list(l1_dual_arr[step:step+1])
-                    step+=1
+        for k in range(l1_dual_dim[2]):
+            for j in range(l1_dual_dim[1][k]):
+                for t in range(l1_dual_dim[0]):
+                    l1_dual[k][j][t]=l1_dual_arr[step:step+2]
+                    step+=2 #l1 gain has 2 elements (position, velocity) see the paper.
         step=0
-        for t in range(ca_dual_dim[0]):
-            for k in range(ca_dual_dim[2]):
-                for j in range(ca_dual_dim[1]):
-
-                    ca_dual[k][j][t]+=list(ca_dual_arr[step:step+1])
+        for k in range(ca_dual_dim[2]):
+            for j in range(ca_dual_dim[1]):
+                for t in range(ca_dual_dim[0]):
+                    ca_dual[k][j][t]=ca_dual_arr[step:step+1]
                     step+=1
 
     return l1_dual, ca_dual
