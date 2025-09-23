@@ -77,20 +77,21 @@ class RAID_NET_V2(nn.Module):
                 inference_mode = False):
         super(RAID_NET_V2 ,self).__init__()
 
+        ### Build the input embedding layer ###
+        self.input_embedding = nn.Linear(observation_dim, embed_dim)
         ### Build the Encoder ###
-
-        self.encoder = Encoder(observation_dim, num_heads=config['num_heads'], feedforward_dim=hidden_size, dropout=config['dropout_prob'])
+        self.encoder = Encoder(embed_dim, num_heads=config['num_heads'], feedforward_dim=hidden_size, dropout=config['dropout_prob'])
 
         ### Build the Decoder ###
-        self.decoder = Decoder(observation_dim, num_heads=config['num_heads'], feedforward_dim=hidden_size, dropout=config['dropout_prob'])
+        self.decoder = Decoder(embed_dim, num_heads=config['num_heads'], feedforward_dim=hidden_size, dropout=config['dropout_prob'])
         
         ### Decoder Output to Dual Class Prediction Projection ###
         if pred_mode[1] == 'binary':
             self.activation_proj = nn.Sigmoid()
-            self.projection = nn.Linear(observation_dim, int(output_dim/(mpc_horizon*num_tv))) #Output dim is always divisible by mpc_horizon. projection output dim is the number of scenarios (M^V)
+            self.projection = nn.Linear(embed_dim, int(output_dim/(mpc_horizon*num_tv))) #Output dim is always divisible by mpc_horizon. projection output dim is the number of scenarios (M^V)
         elif pred_mode[1] == 'tertiary':
             self.activation_proj = nn.LogSoftmax(dim=-1) 
-            self.projection = nn.Linear(observation_dim, int(3*output_dim/(mpc_horizon*num_tv))) #Multiplied by 3 for tertiary classification
+            self.projection = nn.Linear(embed_dim, int(3*output_dim/(mpc_horizon*num_tv))) #Multiplied by 3 for tertiary classification
         else:
             raise NotImplementedError(f"Prediction mode {pred_mode[1]} not implemented.")
 
@@ -118,12 +119,12 @@ class RAID_NET_V2(nn.Module):
             # encoder_outputs.append(self.encoder(th.cat((x[:,:,:2],x[:,:,2+3*(t)*2:2+3*(t+1)*2]),dim=-1)))
         
         #Original
-        encoder_output = self.encoder(x)
-        assert encoder_output.shape == x.shape
+        x_embed = self.input_embedding(x)
+        encoder_output = self.encoder(x_embed)
+        assert encoder_output.shape == x_embed.shape
 
         ##### Recurrent calls of the decoders #####
-        h0    = th.zeros_like(x)
-        # h0 = th.zeros_like(th.cat((x[:,:,:2],x[:,:,2+3*(t)*2:2+3*(t+1)*2]),dim=-1))
+        h0    = x_embed
         h     = h0
         outputs = []
         for t in range(self.N):

@@ -126,7 +126,6 @@ def l1_mask_balanced(
     # If mask ended up empty (degenerate), keep everything to avoid NaNs
     if not mask.any():
         mask = th.ones_like(mask, dtype=th.bool)
-
     return mask.view(B, P)
 
 def l1_mask_majority(targets: th.Tensor, keep_majority: float = 0.15,
@@ -189,7 +188,7 @@ class BC:
                  demonstrations, logger, normalize, normalize_obs,
                  config, ca_dual_dim, l1_dual_dim, batch_size=32,
                  dagger_mode=False, ismlp=False, joint_dual_pred=False,
-                 keep_majority=0.15, num_tvs=3):
+                 keep_majority=0.15, num_tvs=3, policy_type='RAIDNET'):
         self.policy = policy
         self.device = th.device(device)
         self.logger = logger
@@ -202,6 +201,7 @@ class BC:
         self.joint_dual_pred = joint_dual_pred
         self.keep_majority = keep_majority
         self.num_tvs = num_tvs
+        self.policy_type = policy_type
 
         weights = th.DoubleTensor(demonstrations.dataset_weights)
         sampler = th.utils.data.WeightedRandomSampler(weights, demonstrations.max_size)
@@ -291,7 +291,10 @@ class BC:
                 B = ob_batch.shape[0]
                 obs = to_tensor_var(ob_batch, use_cuda=self.use_cuda)
                 acts = to_tensor_var(ac_batch, use_cuda=self.use_cuda)
-                obs_reshaped = obs.reshape(B, self.num_tvs, -1)
+                if 'RAIDNET' in self.policy_type:
+                    obs_reshaped = obs.reshape(B, self.num_tvs, -1)
+                else:
+                    obs_reshaped = obs
 
                 # ----- L1 -----
                 self.optimizer[0].zero_grad()

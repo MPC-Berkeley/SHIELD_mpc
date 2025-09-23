@@ -37,7 +37,7 @@ class ReplayBuffer(th.utils.data.Dataset):
 
         return self.obs[idx], self.acs[idx], self.opt_duals[idx]
     
-    def normalize(self,l1_dim,l1_lmbd,feature_mean=None,feature_cov=None,target_mean=None,target_cov=None,l1_pred_mode='binary'):
+    def normalize(self,l1_dim,l1_lmbd,feature_mean=None,feature_cov=None,target_mean=None,target_cov=None,l1_pred_mode='binary',policy_type='RAIDNET',policy=None):
         self.n = self.obs.shape[1]
         self.d = self.acs.shape[1]
 
@@ -62,8 +62,6 @@ class ReplayBuffer(th.utils.data.Dataset):
         # Regularize the covariance matrices
         reg_value = 4e-5
         self.feature_cov += reg_value * np.eye(self.feature_cov.shape[0])
-        pdb.set_trace()
-        eigs = np.linalg.eigvals(self.target_cov)
         self.target_cov += reg_value * np.eye(self.target_cov.shape[0])
         self.obs = np.real(la.solve(np.real(la.sqrtm(self.feature_cov)), (self.obs - self.feature_mean).T, assume_a='pos').T)
         #For RAIDNET self.acs is categorical variable of shape l1_dim + ca_dim
@@ -82,8 +80,8 @@ class ReplayBuffer(th.utils.data.Dataset):
 
         #Save feature mean and cov for unnormalization in the policy
         if self.training_dataset:
-            np.savez('/home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz', feature_mean=self.feature_mean, feature_cov=self.feature_cov, feature_cov_inv =la.inv(self.feature_cov), target_mean=self.target_mean, target_cov=self.target_cov)
-            print('Normalization done! Feature mean and cov saved to /home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz')
+            np.savez('/home/mpc/nuplan-devkit/nuplan/nn_models/'+policy_type+'_'+'nuplan_expert_data_N14_wayformer_affine_training_stats.npz', feature_mean=self.feature_mean, feature_cov=self.feature_cov, feature_cov_inv =la.inv(self.feature_cov), target_mean=self.target_mean, target_cov=self.target_cov)
+            print('Normalization done! Feature mean and cov saved to /home/mpc/nuplan-devkit/nuplan/nn_models/'+policy_type+'_'+'nuplan_expert_data_N14_wayformer_affine_training_stats.npz')
     
     def normalize4evaluation(self, l1_dim, feature_mean=None, feature_cov=None, target_mean=None, target_cov=None,l1_pred_mode='tertiary'):
         assert feature_mean is not None, 'Feature mean must be provided for evaluation normalization!'

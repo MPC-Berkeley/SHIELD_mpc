@@ -1,0 +1,25 @@
+root_dir: /home/mpc/nuplan-devkit/nuplan/
+training_log_path: nn_training_logs/
+
+lr: 0.0001
+batch_size: 64
+n_epochs: 3000
+num_layers: 4
+hidden_dim: 512
+normalize: True
+optimizer: Adam
+joint_dual_pred: False
+l1_pred_mode: tertiary #['binary', 'tertiary']
+N: 14
+expert_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_training_processed.pkl.gz
+
+max_replay_buffer_size: 100000
+model_save_period: 100
+model_save_dir: nn_models/
+
+#For inference
+l1_model_path: /home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42_L1_400.pt
+ca_model_path: /home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42_CA_400.pt
+feature_stat_path: /home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz
+# eval_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_training_processed.pkl.gz
+eval_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_evaluation_processed_.pkl.gz

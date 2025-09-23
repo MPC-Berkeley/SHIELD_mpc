@@ -1,9 +1,11 @@
-# from tutorials.policies import RAID_NET
-from tutorials.raidnet import RAID_NET_V2 as RAID_NET
+from tutorials.policies import RAID_NET, MLP
+from tutorials.raidnet import RAID_NET_V2
+
 import torch as th
 import argparse
 import yaml
 import numpy as np
+from matplotlib.patches import Rectangle
 import pdb
 import os
 import time
@@ -22,7 +24,38 @@ except ImportError:
         t = th.as_tensor(x)
         return t.cuda(non_blocking=True) if use_cuda and th.cuda.is_available() else t
 
-def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_dim,l1_num,pred_mode):
+import shutil
+from contextlib import contextmanager
+
+def forward_in_batches(model, x, batch_size=1024, device=None, return_device='cpu'):
+    """
+    Run `model(x)` in smaller batches to avoid OOM and concatenate outputs along dim=0.
+    - x: (B, ...) tensor
+    - batch_size: per-chunk size
+    - device: device to run the model on (defaults to model's device)
+    - return_device: 'cpu' (default) or a torch.device string for the final tensor
+    """
+    if device is None:
+        device = next(model.parameters()).device
+
+    was_training = model.training
+    model.eval()
+
+    outs = []
+    with th.inference_mode():
+        for i in range(0, x.shape[0], batch_size):
+            xb = x[i:i+batch_size].to(device, non_blocking=True)
+            yb = model(xb)
+            outs.append(yb.detach().to('cpu'))
+            del xb, yb
+
+    out = th.cat(outs, dim=0)
+    if was_training:
+        model.train()
+    return out.to(return_device)
+
+
+def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_dim,l1_num,pred_mode,other_models):
     #Load expert dataset
     with gzip.open(config['eval_data_dir'],'rb') as file:
         expert_data = pickle.load(file)
@@ -51,8 +84,8 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
 
     print('Loading pretrained model...')
     checkpoint = []
-    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42_L1_400.pt'))
-    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42/RAIDNET_NuPlan_N14_N_TV3_13-08-2025_10-19-42_CA_400.pt'))
+    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_L1_100.pt'))
+    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_CA_100.pt'))
     #L1
     policy[0].load_state_dict(checkpoint[0]['model_state_dict'])
     #CA
@@ -131,7 +164,18 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
         # max_loss_l1 = np.log(logits_l1.shape[-1]) #Cross-entropy loss for a random guess is log(C) where C is the number of classes
         loss = th.nn.functional.cross_entropy(logits_l1.reshape(-1,logits_l1.shape[-1]), targets_l1.flatten().long(),reduction='none').cpu()
         loss_hist_l1, loss_bin_edges_l1 = np.histogram(loss, bins=np.linspace(0, 1, nbins))
+        if other_models:
+            logits_l1_mlp = other_models['mlp'][0](obs)
+            loss_l1_mlp = th.nn.functional.cross_entropy(logits_l1_mlp.reshape(-1,logits_l1_mlp.shape[-1]), targets_l1.flatten().long(),reduction='none').cpu()
+            lost_hist_l1_mlp = np.histogram(loss_l1_mlp, bins=np.linspace(0, 1, nbins))
 
+            #Running out of memory because obs_reshape batch size it too big
+            # --- usage ---
+            logits_l1_raidnet_v1 = forward_in_batches(other_models['RAIDNET_V1'][0], obs_reshaped, batch_size=1024,return_device='cuda:0')
+            # logits_l1_raidnet_v1 = other_models['RAIDNET_V1'][0](obs_reshaped)
+            loss_l1_raidnet_v1 = th.nn.functional.cross_entropy(logits_l1_raidnet_v1.reshape(-1,logits_l1_raidnet_v1.shape[-1]), targets_l1.flatten().long(),reduction='none').cpu()
+            lost_hist_l1_raidnet_v1 = np.histogram(loss_l1_raidnet_v1, bins=np.linspace(0, 1, nbins))
+            
         #Compute max possible loss
         l1_loss_per_sample  = 1
 
@@ -172,6 +216,41 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
         max_loss_ca = th.sum(ca_bce(wrong_pred,sample_target),dim=-1).cpu()
         loss = th.sum(ca_bce(logits_ca, targets_ca.float()),dim=-1).cpu()
         loss_hist_ca, loss_bin_edges_ca = np.histogram((loss/max_loss_ca),bins=np.linspace(0,1,nbins))
+
+        if other_models:
+            logits_ca_mlp = other_models['mlp'][1](obs)
+            loss_ca_mlp = th.sum(ca_bce(logits_ca_mlp, targets_ca.float()),dim=-1).cpu()
+            lost_hist_ca_mlp = np.histogram((loss_ca_mlp/max_loss_ca), bins=np.linspace(0, 1, nbins))
+
+            #recall for mlp
+            preds_ca_mlp = (th.sigmoid(logits_ca_mlp) > 0.5).long()
+            ca_true_pos_mlp = ((preds_ca_mlp == 1) & (targets_ca == 1)).sum().item()
+            ca_targ_pos_mlp = targets_ca.sum().item()
+            ca_recall_mlp = (ca_true_pos_mlp / ca_targ_pos_mlp) if ca_targ_pos_mlp > 0 else 0.0
+
+            # logits_ca_raidnet_v1 = other_models['RAIDNET_V1'][1](obs_reshaped)
+            logits_ca_raidnet_v1 = forward_in_batches(other_models['RAIDNET_V1'][1], obs_reshaped, batch_size=1024, return_device='cuda:0')
+            loss_ca_raidnet_v1 = th.sum(ca_bce(logits_ca_raidnet_v1, targets_ca.float()),dim=-1).cpu()
+            lost_hist_ca_raidnet_v1 = np.histogram((loss_ca_raidnet_v1/max_loss_ca), bins=np.linspace(0, 1, nbins))
+            #recall for v1
+            preds_ca_v1 = (th.sigmoid(logits_ca_raidnet_v1) > 0.5).long()
+            ca_true_pos_v1 = ((preds_ca_v1 == 1) & (targets_ca == 1)).sum().item()
+            ca_targ_pos_v1 = targets_ca.sum().item()
+            ca_recall_v1 = (ca_true_pos_v1 / ca_targ_pos_v1) if ca_targ_pos_v1 > 0 else 0.0
+
+            #CA precision
+            ca_pred_pos_mlp = preds_ca_mlp.sum().item()
+            ca_precision_mlp = (ca_true_pos_mlp / ca_pred_pos_mlp) if ca_pred_pos_mlp > 0 else 0.0
+            ca_pred_pos_v1 = preds_ca_v1.sum().item()
+            ca_precision_v1 = (ca_true_pos_v1 / ca_pred_pos_v1) if ca_pred_pos_v1 > 0 else 0.0
+
+           # accuracty
+            ca_total_correct_mlp = (preds_ca_mlp == targets_ca).sum().item()
+            ca_total_mlp = targets_ca.numel()
+            ca_acc_mlp = (ca_total_correct_mlp / ca_total_mlp) if ca_total_mlp > 0 else 0.0
+            ca_total_correct_v1 = (preds_ca_v1 == targets_ca).sum().item()
+            ca_total_v1 = targets_ca.numel()
+            ca_acc_v1 = (ca_total_correct_v1 / ca_total_v1) if ca_total_v1 > 0 else 0.0
 
         preds_ca = (th.sigmoid(logits_ca) > 0.5).long()
         ca_total_correct += (preds_ca == targets_ca).sum().item()
@@ -230,8 +309,8 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
             batch_targ_pos = int(targets_ca.sum().item())
 
     # Compute confusion matrices
-    l1_confusion_matrix = ConfusionMatrixDisplay.from_predictions(targets_l1.cpu().ravel(), preds_l1.cpu().ravel(),labels=[0,1,2],normalize='true',cmap='Blues',im_kw={'vmax': 1.})
-    ca_confusion_matrix = ConfusionMatrixDisplay.from_predictions(targets_ca.cpu().ravel(), preds_ca.cpu().ravel(),labels=[0,1],normalize='true',cmap='Blues',im_kw={'vmax': 1.})
+    l1_confusion_matrix = ConfusionMatrixDisplay.from_predictions(targets_l1.cpu().ravel(), preds_l1.cpu().ravel(),labels=[0,1,2],normalize='true',cmap='Blues',im_kw={'vmax': 1.},values_format='.3g')
+    ca_confusion_matrix = ConfusionMatrixDisplay.from_predictions(targets_ca.cpu().ravel(), preds_ca.cpu().ravel(),labels=[0,1],normalize='true',cmap='Blues',im_kw={'vmax': 1.},values_format='.3g')
 
     # Package metrics
     metrics = {
@@ -256,59 +335,205 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
         'ca_f1': ca_f1,
         'ca_class_names': ['CA_0', 'CA_1'],
     }
-    return metrics
+    if other_models:
+        baseline_metrics = {}
+        baseline_metrics['l1_loss_hist_mlp'] = lost_hist_l1_mlp[0]
+        baseline_metrics['l1_loss_hist_raidnet_v1'] = lost_hist_l1_raidnet_v1[0]
+        baseline_metrics['l1_loss_bin_edges_mlp'] = lost_hist_l1_mlp[1]
+        baseline_metrics['l1_loss_bin_edges_raidnet_v1'] = lost_hist_l1_raidnet_v1[1]
+        baseline_metrics['ca_loss_hist_mlp'] = lost_hist_ca_mlp[0]
+        baseline_metrics['ca_loss_hist_raidnet_v1'] = lost_hist_ca_raidnet_v1[0]
+        baseline_metrics['ca_loss_bin_edges_mlp'] = lost_hist_ca_mlp[1]
+        baseline_metrics['ca_loss_bin_edges_raidnet_v1'] = lost_hist_ca_raidnet_v1[1]
+        baseline_metrics['ca_recall_mlp'] = ca_recall_mlp
+        baseline_metrics['ca_recall_raidnet_v1'] = ca_recall_v1
+        baseline_metrics['ca_precision_mlp'] = ca_precision_mlp
+        baseline_metrics['ca_precision_raidnet_v1'] = ca_precision_v1
+        baseline_metrics['ca_acc_mlp'] = ca_acc_mlp
+        baseline_metrics['ca_acc_raidnet_v1'] = ca_acc_v1
+    else:
+        baseline_metrics = None
+    return metrics, baseline_metrics
 
-def print_and_plot_metrics(metrics: dict):
+def overlay_histograms(ax, bin_edges, series, labels, colors,
+                       alpha=0.65, edgecolor='black', linewidth=0.6,
+                       jitter_frac=0.05,  # small x-offset so bars don't perfectly coincide
+                       zbase=10, draw_outlines=True):
     """
-    Print and plot the evaluation metrics.
-    :param metrics: Dictionary containing evaluation metrics.
+    Overplot multiple histograms (same bins) so all bars remain visible.
+    Draws largest bars first and smallest last (front-most per bin).
     """
-    # Print metrics
+    assert all(len(s) == len(bin_edges) - 1 for s in series), "All hist series must share the same bins."
+
+    n_models = len(series)
+    widths = np.diff(bin_edges)
+    lefts = bin_edges[:-1]
+
+    # Draw per-bin in order: largest -> smallest
+    for left, width, i in zip(lefts, widths, range(len(widths))):
+        heights = [s[i] for s in series]
+        order = np.argsort(heights)[::-1]  # largest first
+        for rank, m in enumerate(order):
+            h = heights[m]
+            if h <= 0:
+                continue
+            # small symmetric jitter so edges are visible
+            offset = (rank - (n_models - 1) / 2.0) * jitter_frac * width
+            rect = Rectangle((left + offset, 0.0), width, h,
+                             facecolor=colors[m], edgecolor=edgecolor,
+                             linewidth=linewidth, alpha=alpha,
+                             zorder=zbase + rank)
+            ax.add_patch(rect)
+
+    # thin line at the top of bars so overlapping heights are readable
+    if draw_outlines:
+        xs = np.repeat(bin_edges, 2)[1:-1]
+        for m, (lab, col, hist) in enumerate(zip(labels, colors, series)):
+            ys = np.repeat(hist, 2)
+            ax.plot(xs, ys, lw=1.0, color=col, alpha=0.95, label=lab, zorder=zbase + n_models + m + 1)
+    else:
+        for lab, col in zip(labels, colors):
+            ax.bar([], [], color=col, alpha=alpha, edgecolor=edgecolor, linewidth=linewidth, label=lab)
+
+
+
+@contextmanager
+def classy_mathtext():
+    """Use mathtext with a clean sans-serif style (no LaTeX dependency)."""
+    with plt.rc_context({
+        "text.usetex": False,            # don't call external LaTeX
+        "mathtext.fontset": "stixsans",  # nice sans-serif math
+        "font.family": "sans-serif",
+        "font.sans-serif": ["DejaVu Sans"],  # bundled font
+        "axes.unicode_minus": False,     # fix minus sign with sans fonts
+    }):
+        yield
+
+
+def print_and_plot_metrics(metrics: dict, baselines: dict = None):
+    """
+    Print metrics (unchanged) and overlay histograms for RAID-Net V2 + baselines.
+    """
+    # ----------------- PRINTS -----------------
     print("L1 Loss:", metrics['l1_loss'].item())
     print("L1 Per-Class Accuracy:", metrics['l1_per_class_accuracy'])
     print("L1 Overall Accuracy:", metrics['l1_overall_accuracy'])
-    print('-'* 40)
+    print('-' * 40)
     print("CA Loss:", metrics['ca_loss'].item())
     print("CA Precision:", metrics['ca_precision'])
     print("CA Recall:", metrics['ca_recall'])
     print("CA F1 Score:", metrics['ca_f1'])
     print("CA Overprediction Rate:", metrics['ca_overprediction_avg'])
 
-    # Plot confusion matrices    
-    _ = metrics['l1_confusion_matrix'].figure_.savefig('l1_confusion_matrix.png')    
-    _ = metrics['ca_confusion_matrix'].figure_.savefig('ca_confusion_matrix.png')
+    if baselines:
+        print('MLP Baseline CA Recall:', baselines['ca_recall_mlp'])
+        print('MLP Baseline CA Precision:', baselines['ca_precision_mlp'])
+        print('MLP Baseline CA Accuracy:', baselines['ca_acc_mlp'])
+        print('RAID-Net V1 Baseline CA Recall:', baselines['ca_recall_raidnet_v1'])
+        print('RAID-Net V1 Baseline CA Precision:', baselines['ca_precision_raidnet_v1'])
+        print('RAID-Net V1 Baseline CA Accuracy:', baselines['ca_acc_raidnet_v1'])
 
-    #Plot normalized loss
-    fig, ax = plt.subplots(2,1, gridspec_kw={'height_ratios': [1, 3]})
-    fig.set_figheight(8)
-    fig.set_figwidth(6.8)
-    ax[0].bar(metrics['l1_loss_bin_edges'][:-1], metrics['l1_loss_hist'], width=np.diff(metrics['l1_loss_bin_edges']), edgecolor="black", align="edge",label=r'$\pi^{\text{RAIDN}}$')
-    ax[0].set_ylabel('#')
-    ax[0].set_xlabel(r'CrossEntropy$(\pi_g,\tilde{g}^\star)$')
-    ax[0].set_xlim(0,1)
-    ax[0].set_ylim(0,400000)
-    ax[0].legend()
-    metrics['l1_confusion_matrix'].plot(ax=ax[1],cmap='Blues',im_kw={'vmax': 1.}) #color scale is Blues
-    plt.show()
+    # Save confusion matrices
+    _ = metrics['l1_confusion_matrix'].figure_.savefig('../nuplan/evaluation/l1_confusion_matrix.png')
+    _ = metrics['ca_confusion_matrix'].figure_.savefig('../nuplan/evaluation/ca_confusion_matrix.png')
 
-    fig, ax = plt.subplots(2,1, gridspec_kw={'height_ratios': [1, 3]})
-    fig.set_figheight(8)
-    fig.set_figwidth(6.8)
-    ax[0].bar(metrics['ca_loss_bin_edges'][:-1], metrics['ca_loss_hist'], width=np.diff(metrics['ca_loss_bin_edges']), edgecolor="black", align="edge",label=r'$\pi^{\text{RAIDN}}$')
-    ax[0].set_ylabel('#')
-    ax[0].set_xlabel(r'Normalized CA $\ell(\pi_{\mu},\tilde{\mu}^\star)$')
-    ax[0].set_xlim(0,1)
-    ax[0].set_ylim(0,18000)
-    ax[0].legend()
-    metrics['ca_confusion_matrix'].plot(ax=ax[1],cmap='Blues',im_kw={'vmax': 1.})
-    plt.show()
+    # ----------------- L1 HISTOGRAM -----------------
+    with classy_mathtext():
+        fig, ax = plt.subplots(2, 1, gridspec_kw={'height_ratios': [1, 3]},
+                               figsize=(6.8, 8))
 
-    # if compare_w_mlp:
-    if False:
-        ax[0].bar(loss_bin_edges_mlp[:-1], loss_hist_mlp, width=np.diff(loss_bin_edges_mlp), edgecolor="black", alpha=0.5,align="edge",color='orange',label=r'$\pi^{\text{MLP}}$')
+        l1_series = [metrics['l1_loss_hist']]
+        l1_labels = [r'$\pi^{\text{RAIDN V2}}$']
+        l1_colors = ['#355C7D']
+
+        if baselines:
+            if 'l1_loss_hist_mlp' in baselines:
+                l1_series.append(baselines['l1_loss_hist_mlp'])
+                l1_labels.append(r'$\pi^{\text{MLP}}$')
+                l1_colors.append('#E67E22')
+            if 'l1_loss_hist_raidnet_v1' in baselines:
+                l1_series.append(baselines['l1_loss_hist_raidnet_v1'])
+                l1_labels.append(r'$\pi^{\text{RAIDN V1}}$')
+                l1_colors.append('#27AE60')
+
+        overlay_histograms(
+            ax=ax[0],
+            bin_edges=metrics['l1_loss_bin_edges'],
+            series=l1_series, labels=l1_labels, colors=l1_colors,
+            alpha=0.65, jitter_frac=0.05, draw_outlines=True
+        )
+        ax[0].set_ylabel(r'#')
+        ax[0].set_xlabel(r'$\mathrm{CE}(\pi_g,\tilde{g}^{\star})$')
+        ax[0].set_xlim(metrics['l1_loss_bin_edges'][0],
+                       metrics['l1_loss_bin_edges'][-1])
+        ymax_l1 = max(s.max() for s in l1_series)
+        ax[0].set_ylim(0, max(1, int(ymax_l1 * 1.12)))
+        ax[0].legend(frameon=False)
+
+        metrics['l1_confusion_matrix'].plot(ax=ax[1], cmap='Blues',
+                                            im_kw={'vmax': 1.},
+                                            values_format='.3g')
+        plt.tight_layout()
+        plt.savefig('../nuplan/evaluation/l1_metrics.png')
+        plt.show()
+
+    # ----------------- CA HISTOGRAM -----------------
+    with classy_mathtext():
+        fig, ax = plt.subplots(2, 1, gridspec_kw={'height_ratios': [1, 3]},
+                               figsize=(6.8, 8))
+
+        ca_series = [metrics['ca_loss_hist']]
+        ca_labels = [r'$\pi^{\text{RAIDN V2}}$']
+        ca_colors = ['#355C7D']
+
+        if baselines:
+            if 'ca_loss_hist_mlp' in baselines:
+                ca_series.append(baselines['ca_loss_hist_mlp'])
+                ca_labels.append(r'$\pi^{\text{MLP}}$')
+                ca_colors.append('#E67E22')
+            if 'ca_loss_hist_raidnet_v1' in baselines:
+                ca_series.append(baselines['ca_loss_hist_raidnet_v1'])
+                ca_labels.append(r'$\pi^{\text{RAIDN V1}}$')
+                ca_colors.append('#27AE60')
+
+        overlay_histograms(
+            ax=ax[0],
+            bin_edges=metrics['ca_loss_bin_edges'],
+            series=ca_series, labels=ca_labels, colors=ca_colors,
+            alpha=0.65, jitter_frac=0.05, draw_outlines=True
+        )
+        ax[0].set_ylabel(r'#')
+        ax[0].set_xlabel(
+            r'$\text{Normalized CA }\ell(\pi_{\mu},\tilde{\mu}^{\star})$'
+        )
+        if baselines:
+            #Find the last bin edge that contains any non-zero value from baselines
+            last_nonzero_bin = 0
+            for s in ca_series[1:]:
+                nonzero_bins = np.where(s > 0)[0]
+                if len(nonzero_bins) > 0:
+                    last_nonzero_bin = max(last_nonzero_bin, nonzero_bins[-1])
+            ax[0].set_xlim(metrics['ca_loss_bin_edges'][0],
+                           metrics['ca_loss_bin_edges'][last_nonzero_bin + 1] + 1e-3)
+        else:
+            ax[0].set_xlim(metrics['ca_loss_bin_edges'][0],
+                           metrics['ca_loss_bin_edges'][-1])
+        ymax_ca = max(s.max() for s in ca_series)
+        ax[0].set_ylim(0, max(1, int(ymax_ca * 1.12)))
+        ax[0].legend(frameon=False)
+
+        metrics['ca_confusion_matrix'].plot(ax=ax[1], cmap='Blues',
+                                            im_kw={'vmax': 1.},
+                                            values_format='.3g')
+        plt.tight_layout()
+        plt.savefig('../nuplan/evaluation/ca_metrics.png')
+        plt.show()
+
+
 
 def main(smpc_config,config):
     #Define the configuration for RAIDNET
+    eval_other_models = True
     n_modes = [smpc_config['num_modes'] for _ in range(smpc_config['num_tvs'])]
     mode_map = dict(enumerate(product(*[range(n_modes[k]) for k in range(smpc_config['num_tvs'])])))
     observation_dim = smpc_config['num_tvs'] * (smpc_config['num_modes'] * (3*config['N']) + 2)
@@ -325,11 +550,41 @@ def main(smpc_config,config):
     
     #Initialize RAIDNET
     pred_mode = ['both duals','tertiary','binary']
-    l1_policy = RAID_NET(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, l1_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
-    ca_policy = RAID_NET(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, ca_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
+    l1_policy = RAID_NET_V2(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, l1_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
+    ca_policy = RAID_NET_V2(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, ca_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
 
-    device=th.device("cuda:0" if th.cuda.is_available() else "cpu")
+    if eval_other_models: 
+        with open('/home/mpc/nuplan-devkit/tutorials/mlp_training_config.yaml', 'r') as f:
+            mlp_config = yaml.load(f,Loader=yaml.FullLoader)
+        l1_policy_mlp = MLP(observation_dim, l1_num, hidden_layers=mlp_config['num_layers'], hidden_size=mlp_config['hidden_dim'],device=device,tertiary=True)
+        ca_policy_mlp = MLP(observation_dim, ca_num, hidden_layers=mlp_config['num_layers'], hidden_size=mlp_config['hidden_dim'],device=device)
+        l1_policy_mlp.to(device)
+        ca_policy_mlp.to(device)
 
+        checkpoint = []
+        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_L1_100.pt'))
+        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_CA_100.pt'))
+        #L1
+        l1_policy_mlp.load_state_dict(checkpoint[0]['model_state_dict'])
+        #CA
+        ca_policy_mlp.load_state_dict(checkpoint[1]['model_state_dict'])
+
+        l1_policy_raidnet_v1 = RAID_NET(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, l1_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
+        ca_policy_raidnet_v1 = RAID_NET(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, ca_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
+        l1_policy_raidnet_v1.to(device)
+        ca_policy_raidnet_v1.to(device)
+
+        checkpoint = []
+        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_L1_4.pt'))
+        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_CA_4.pt'))
+        #L1
+        l1_policy_raidnet_v1.load_state_dict(checkpoint[0]['model_state_dict'])
+        #CA
+        ca_policy_raidnet_v1.load_state_dict(checkpoint[1]['model_state_dict'])
+
+        other_models = {'mlp':[l1_policy_mlp,ca_policy_mlp],'RAIDNET_V1': [l1_policy_raidnet_v1,ca_policy_raidnet_v1]}
+    else:
+        other_models = None
     l1_policy.to(device)
     ca_policy.to(device)
     policy = [l1_policy, ca_policy]
@@ -337,8 +592,8 @@ def main(smpc_config,config):
     policy_type = 'RAIDNET'
     checkpoint = None
 
-    metrics = evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim=l1_dual_dim,ca_dual_dim=ca_dual_dim,l1_num=l1_num,pred_mode=pred_mode)
-    print_and_plot_metrics(metrics)
+    metrics, baseline_metrics = evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim=l1_dual_dim,ca_dual_dim=ca_dual_dim,l1_num=l1_num,pred_mode=pred_mode,other_models=other_models)
+    print_and_plot_metrics(metrics,baseline_metrics)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
