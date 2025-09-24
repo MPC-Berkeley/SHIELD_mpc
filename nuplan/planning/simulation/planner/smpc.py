@@ -806,7 +806,6 @@ class SMPC():
             self.Q, self.L, self.F,self.C, self.p, self.f,self.c,
             np.repeat(ca_duals, self.mu_dim), l1_duals
         )
-        pdb.set_trace()
         self.gap = self._compute_gap_radius(mu, eta, g1)
         print(f"[smpc.py]: Gap Radius is {self.gap:.5f}")
 
@@ -1258,7 +1257,8 @@ class SMPC():
         u_z = z / (nz + 1e-16)
         u_y = -1.0 
         dot = float(np.dot(mu_zy[:-1], u_z) + mu_zy[-1] * u_y) # ⟨μ, u⟩ 
-        # Ray projection: μ̂ = max(0, ⟨μ,u⟩) / ||u||^2 * u, ||u||^2 = 2 tau = max(0.0, dot) * 0.5 
+        # Ray projection: μ̂ = max(0, ⟨μ,u⟩) / ||u||^2 * u, ||u||^2 = 2 
+        tau = max(0.0, dot) * 0.5 
         mu_hat = np.empty_like(mu_zy) 
         mu_hat[:-1] = tau * u_z 
         mu_hat[-1] = tau * u_y 
