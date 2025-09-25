@@ -393,8 +393,8 @@ class SMPC():
                             # z (random part) and y (deterministic part) 
                             z = ( (oa_ref - self.pos_tvs[k][m][:, t]).T @ self.Qs[k][m][t-1] @ ca.horzcat( self.dpos[t-1] @ (B[2*t, :] @ M + E[2*t, :]), *[ self.dpos[t-1] @ B[2*t, :] @ K[l][self.mode_map[j][l]] @ E_tv[l][self.mode_map[j][l]][:2*self.N, :] - (int(l == k)) * self.dpos_tvs[k][m][t-1] @ E_tv[k][m][2*t, :] for l in range(self.N_TV) ] ) ).T 
                             z_norm = self.tight * ca.sqrt(ca.sumsqr(z) + 1e-10) 
-                            
                             y = ( (oa_ref - self.pos_tvs[k][m][:, t]).T @ self.Qs[k][m][t-1] @ (self.x_pos[:, t] - oa_ref + self.dpos[t-1] * (A[2*t, :] @ self.z_curr + B[2*t, :] @ h - (self.z_lin[0, t] - self.s0))) ) 
+                            
                             if self.offline: 
                                 self.ca_ineq.append(ca.vertcat(z,y)) 
                                 self.lin_ineq_l1+=[K[k][m][t,2*t:2*(t+1)]-self.gain_l1[k][m][t-1]] #only the first constraint: g1 
@@ -477,31 +477,96 @@ class SMPC():
                 self.nonzero_inds = np.nonzero(np.ravel(C,order='F'))[0] 
                 # Get the row and column indices of the non-zero elements in the sparse matrix 
                 self.row_indices, self.col_indices = np.unravel_index(self.nonzero_inds, self.C_shape,order='F') 
-                nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds] 
-                self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[nonzero_vec]) 
+                self.nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds] 
+                self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[self.nonzero_vec]) 
                 self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))]) 
                 Q, p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape)) 
+                #Q is constant, p is affine in params
+                Q_num, _ = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,ca.DM.ones(*self.params.shape),ca.DM.zeros(*self.slack_vec.shape))
+                Q_csc = sp.csc_matrix(Q_num + 1e-8*sp.eye(Q_num.shape[0])) 
+                solve_Q = spla.factorized(Q_csc) # closure: solve_Q(b) solves Q x = b (expects np.ndarray) 
+                self._solve_Q = solve_Q 
+        
+                self.Q = sp.csr_matrix(np.asarray(Q_num, dtype=float))
                 Q_inv = ca.inv(Q) 
                 L = self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape)) 
-                F, f = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX)) 
-                L_Q_inv = L @ Q_inv 
-                F_Q_inv = F @ Q_inv # Constuct functions for the least squares problem 
-                self.L_Q_inv_fn = ca.Function('L_Q_inv_fn', [self.params], [L_Q_inv]) 
-                self.F_Q_inv_fn = ca.Function('F_Q_inv_fn', [self.params, self.V_MAX], [F_Q_inv]) 
-                self.Q_inv_fn = ca.Function('Q_inv_fn', [self.params], [Q_inv]) 
+                self.L = sp.csr_matrix(np.asarray(L, dtype=float)) 
                 
+                ### ------------------- Accelerate p and f computation ------------------- ###
+                # Select only the nonzero entries you care about (you already have these):
+                p_sym = p
+                _, p_nz = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,ca.DM.ones(*self.params.shape),ca.DM.zeros(*self.slack_vec.shape)) 
+                self.p_nonzero_inds = np.nonzero(np.ravel(p_nz,order='F'))[0] 
+                idx = self.p_nonzero_inds
+
+                # Affine decomposition: p(params) = p_0 + Jp * params
+                Jp_sym = ca.jacobian(p_sym, self.params)
+
+                p_0_fn = ca.Function('p_0_fn', [self.params], [p_sym])
+                Jp_fn  = ca.Function('Jp_fn',  [self.params], [Jp_sym])
+
+                p_0_dm = p_0_fn(ca.DM.zeros(self.params.shape))
+                Jp_dm  = Jp_fn(ca.DM.zeros(self.params.shape))
+
+                # Evaluate and cache as NumPy/SciPy once
+                self._p_0  = np.asarray(p_0_dm).ravel() 
+                self._Jp   = sp.csr_matrix(np.asarray(Jp_dm))
+
+                # Preallocate the full p buffer once
+                self._p_full = np.zeros(int(self.vars_pol4screening.shape[0]), dtype=float)
+                self._p_idx  = np.array(idx, dtype=int)    
+                
+                f = -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX))                   
+                f_nz = -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),ca.DM.ones(*self.params.shape),1))
+                self.f_nonzero_inds = np.nonzero(np.ravel(f_nz,order='F'))[0]
+                idx = self.f_nonzero_inds
+                Jf_sym = ca.jacobian(f, ca.vertcat(*[self.params, self.V_MAX]))
+                Jf_sym_param = ca.jacobian(f, self.params)
+                Jf_sym_vmax = ca.jacobian(f, self.V_MAX)
+
+                f_0_fn = ca.Function('f_0_fn', [self.params, self.V_MAX], [f])
+                Jf_param_fn = ca.Function('Jf_parama_fn', [self.params,self.V_MAX], [Jf_sym_param])
+                Jf_vmax_fn = ca.Function('Jf_Vmax_fn', [self.params,self.V_MAX], [Jf_sym_vmax])
+                f_0_dm = f_0_fn(ca.DM.zeros(self.params.shape), 0)
+                Jf_param_dm = Jf_param_fn(ca.DM.zeros(self.params.shape), 0)
+                Jf_vmax_dm = Jf_vmax_fn(ca.DM.zeros(self.params.shape), 0)
+                self._f_0 = np.asarray(f_0_dm).ravel()
+                self._Jf_param = sp.csr_matrix(np.asarray(Jf_param_dm))
+                self._Jf_vmax = sp.csr_matrix(np.asarray(Jf_vmax_dm))
+                
+                self._f_full = np.zeros(int(f_0_dm.shape[0]), dtype=float)
+                self._f_idx = np.array(idx, dtype=int)
+              
+              
     def _set_canon_form_mats(self): 
         #In online mode, vars_epi is not defined. So, set it to zero 
-        self.F, self.f = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX)), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX))) 
-        self.L = self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape)) 
-        C = self.C_fn_nonzero(self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape)) # Evaluate C_fn to get the non-zero elements 
+        par_val = self.opti.value(self.params)
+        # self.F, self.f = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),par_val,self.opti.value(self.V_MAX)), -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),self.opti.value(self.params),self.opti.value(self.V_MAX))) 
+        # self.f = np.array(self.f).ravel()
+        st = time.time()
+        self.F = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),par_val,self.opti.value(self.V_MAX))
+        self.F = sp.csr_matrix(np.array(self.F))
+        print(f"computing F time: {time.time()-st:.4f} seconds")
+        st = time.time()
+        self.f = self._f_full
+        self.f = (self._f_0
+                + (self._Jf_param @ par_val)
+                + (self._Jf_vmax.toarray().ravel() * self.opti.value(self.V_MAX)))
+        self.f = np.array(self.f).ravel()
+        print(f"computing f time: {time.time()-st:.4f} seconds")
         
         #construct sparse C matrix 
+        st = time.time()           
+        C = self.C_fn_nonzero(par_val, ca.DM.zeros(*self.slack_vec.shape))
         self.C = sp.csr_matrix((np.array(C).reshape(-1), (self.row_indices, self.col_indices)), shape=self.C_shape) 
-        self.c = self.c_fn(self.opti.value(self.params)) 
+        self.c = self.c_fn(par_val) 
+        print(f"computing C,c time: {time.time()-st:.4f} seconds")
             
         #Here, ca.hessian outputs hessian, J_grad. #J_grad = Q*theta + p. Thus, if we evaluate J_grad with theta = 0, we get p. Note that hessian is not dependent on theta 
-        self.Q, self.p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1),self.opti.value(self.params),ca.DM.zeros(*self.slack_vec.shape)) 
+        st = time.time()
+        self.p = self._p_full
+        self.p[self._p_idx] = self._p_0[self._p_idx] + (self._Jp @ par_val)[self._p_idx]
+        print(f"computing p time: {time.time()-st:.4f} seconds")
         
     def solve(self,first_solve=False): 
         try: 
@@ -802,10 +867,7 @@ class SMPC():
         self.num_ca_duals = len(ca_duals)
 
         # Recover feasible duals (unchanged call)
-        mu, eta, g1 = self.solve_dual_approximation(
-            self.Q, self.L, self.F,self.C, self.p, self.f,self.c,
-            np.repeat(ca_duals, self.mu_dim), l1_duals
-        )
+        mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F,self.C, self.p, self.f,self.c,np.repeat(ca_duals, self.mu_dim), l1_duals)
         self.gap = self._compute_gap_radius(mu, eta, g1)
         print(f"[smpc.py]: Gap Radius is {self.gap:.5f}")
 
@@ -923,16 +985,15 @@ class SMPC():
         with H = F Q^{-1} F^T, b = F Q^{-1}(p + C^T mu + L^T(2g-1)) + f
         Uses either Cholesky of H+rho I (preferred) or PGD if iters>0. 
         """ 
-        solve_Q = self._solve_Q # cached 
         F = self._F; C = self._C; L = self._L 
         p = np.asarray(self._p).ravel() 
         f = np.asarray(self._f).ravel() 
         a = p + (C.T @ mu).ravel() + (L.T @ (2.0*g.ravel() - 1.0))
-        b = (F @ solve_Q(a)) + f 
+        b = (F @ self._solve_Q(a)) + f 
         # b = F Q^{-1} a + f 
         # Linear operators for H 
         def H_mv(x): 
-            return F @ solve_Q(F.T @ x) 
+            return F @ self._solve_Q(F.T @ x) 
         n = F.shape[0] 
         
         if iters <= 0:
@@ -983,26 +1044,15 @@ class SMPC():
         
         # --------------------------- # Dimensions & quick logging # --------------------------- 
         st_first = time.time() 
-        # Ensure C,F,L are scipy sparse (avoid any CasADi types) 
-        C = C if sp.issparse(C) else sp.csr_matrix(np.asarray(C, dtype=float))
-        F = F if sp.issparse(F) else sp.csr_matrix(np.asarray(F, dtype=float)) 
-        L = L if sp.issparse(L) else sp.csr_matrix(np.asarray(L, dtype=float)) 
+        # Ensure C,F,L are scipy sparse (avoid any CasADi types)         
         n_mu = C.shape[0] 
         n_eta = F.shape[0] 
         n_g1 = L.shape[0] 
         m = n_mu + n_eta + n_g1 
         print(f"[Dual Approx] Dimensions: n_mu={n_mu}, n_eta={n_eta}, n_g1={n_g1}, total={m}") 
         
-        # --------------------------- # Factorize Q once, reuse solve # ---------------------------
-        t0 = time.time() 
-        # Q_csc = sp.csc_matrix(Q) # factorization expects CSC 
-        Q_csc = sp.csc_matrix(Q + 1e-8*sp.eye(Q.shape[0])) 
-        solve_Q = spla.factorized(Q_csc) # closure: solve_Q(b) solves Q x = b (expects np.ndarray) 
-        t_fac = time.time() - t0 
-        print(f"[Dual Approx] Factorized Q in {t_fac:.3f}s")
-        
         # Store for gap computation later 
-        self._solve_Q = solve_Q 
+
         self._C, self._F, self._L = C, F, L 
         self._p, self._c, self._f = p, c, f 
         self.blocks = [self.mu_dim - 1] * self.num_ca_duals
@@ -1015,15 +1065,15 @@ class SMPC():
         # --------------------------- # Helper ops: C Q^{-1} v, etc. (always 1‑D in/out) # --------------------------- 
         
         def CQinv(v): 
-            w = solve_Q(_np1d(v))
+            w = self._solve_Q(_np1d(v))
             return _np1d(C @ w) 
         
         def FQinv(v): 
-            w = solve_Q(_np1d(v)) 
+            w = self._solve_Q(_np1d(v)) 
             return _np1d(F @ w) 
         
         def LQinv(v): 
-            w = solve_Q(_np1d(v)) 
+            w = self._solve_Q(_np1d(v)) 
             return _np1d(L @ w) 
         # --------------------------- # Build RHS b = [b1; b2; b3] without materializing Q^{-1} # ---------------------------
         ones_ng1 = np.ones((n_g1, 1))
@@ -1057,7 +1107,7 @@ class SMPC():
             y3 = y[n_mu+n_eta:] 
             # one Q^{-1} application for the adjoint 
             s = _np1d(C.T @ y1 + F.T @ y2 + 2.0 * L.T @ y3) 
-            z = _np1d(solve_Q(s)) 
+            z = _np1d(self._solve_Q(s)) 
             
             out = np.empty(m, dtype=float) 
             out[:n_mu] = _np1d(C @ z) 
