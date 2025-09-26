@@ -925,200 +925,304 @@ class SMPC():
         print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
         return mu, eta, g1, self.gap         
 
-    def _eta_best_response_fast(self, mu, g, *, rho_scale=1e-4, iters=0): 
-        """ 
-        Solve min_{eta >= 0} 0.5 eta^T H eta + b^T eta 
-        with H = F Q^{-1} F^T, b = F Q^{-1}(p + C^T mu + L^T(2g-1)) + f
-        Uses either Cholesky of H+rho I (preferred) or PGD if iters>0. 
-        """ 
-        F = self.F; C = self.C; L = self.L 
-        p = np.asarray(self.p).ravel() 
-        f = np.asarray(self.f).ravel() 
-        a = p + (C.T @ mu).ravel() + (L.T @ (2.0*g.ravel() - 1.0))
-        b = (F @ self._solve_Q(a)) + f 
-        # b = F Q^{-1} a + f 
-        # Linear operators for H 
-        def H_mv(x): 
-            return F @ self._solve_Q(F.T @ x) 
-        n = F.shape[0] 
-        
-        if iters <= 0:
-            # Factorize H + rho I (cheap & robust)
-            # Estimate diag(H) for rho via a few probes (or use Hutchinson, §3) # Here: one cheap diagonal estimate 
-            z = np.random.randn(n) 
-            diagH_est = np.maximum(1e-10, (H_mv(z)*z).sum() / (z*z).sum()) * np.ones(n) 
-            rho = rho_scale * np.median(diagH_est) 
-            # Cholesky of (H + rho I) by CG-precompute columns via lsq_linear on R? Use sla.cg on normal eq? 
-            # We just use 'lsq_linear' on R form like your original function did: 
-            # Build R,y s.t. 1/2||R eta + y||^2 equivalent (factorization via sla.cholesky on a small n) 
-            # Dense path (small n): materialize H approx for robustness 
-            # If n is large, consider switching to PGD below (iters>0). 
-            import scipy.linalg as sla 
-            # Build dense H̃ once (small n case) 
-            # If n is large, call with iters>0 instead. 
-            H_dense = np.zeros((n,n)) 
-            E = np.eye(n)
-            for j in range(n): 
-                H_dense[:,j] = H_mv(E[:,j]) 
-            H_tilde = H_dense + rho*np.eye(n) 
-            R = sla.cholesky(H_tilde, lower=False, check_finite=False) 
-            y = sla.solve_triangular(R.T, b, lower=True, check_finite=False) 
-            from scipy.optimize import lsq_linear 
-            sol = lsq_linear(R, -y, bounds=(0.0, np.inf), lsmr_tol=1e-4, max_iter=200)
-            return sol.x.reshape(-1,1) 
-        
-        # PGD alternative (no factorization), with diagonal preconditioning 
-        # # Approx diag(H) by Hutchinson (see §3) 
-        diagH = self._diag_Hutchinson(H_mv, n, probes=6) 
-        invD = 1.0 / np.maximum(1e-9, diagH) 
-        tau = 0.95 # precond step 
-        eta = np.zeros(n) if not hasattr(self, "_eta_ws") else self._eta_ws.copy() 
-        for _ in range(iters): 
-            gk = H_mv(eta) + b 
-            eta = np.maximum(0.0, eta - tau * invD * gk)
-        self._eta_ws = eta.copy() 
-        return eta.reshape(-1,1) 
-            
-    def solve_dual_approximation(self, Q, L, F, C, p, f, c, ca_dual, l1_dual): 
-        """ 
-        Solves regularized dual problem via least squares with constraint projection using LinearOperators (no explicit Q^{-1} or dense A). 
-        Keeps verbose prints and stores timing/metadata on self. Returns feasible (mu, eta, g1) approximation. 
+    def _eta_best_response_fast(
+        self, mu, g, *,
+        iters: int = 12,
+        tol: float = 8e-4,
+        rho: float = 1e-4,             # small proximal ridge on H
+        precond_probes: int = 4,
+        precond_decay: float = 0.8,
+        use_nesterov: bool = True,
+        armijo_beta: float = 0.5,      # backtracking shrink
+        armijo_sigma: float = 1e-4,    # sufficient decrease
+    ):
         """
-        # -------- small helper to force 1-D numpy -------- 
-        def _np1d(v): 
-            return np.asarray(v, dtype=float).ravel() 
-        
-        # --------------------------- # Dimensions & quick logging # --------------------------- 
-        st_first = time.time() 
-        # Ensure C,F,L are scipy sparse (avoid any CasADi types)         
-        n_mu = C.shape[0] 
-        n_eta = F.shape[0] 
-        n_g1 = L.shape[0] 
-        m = n_mu + n_eta + n_g1 
-        print(f"[Dual Approx] Dimensions: n_mu={n_mu}, n_eta={n_eta}, n_g1={n_g1}, total={m}") 
-        
-        # Store for gap computation later 
+        Safe, fast operator-PGD for: min_{eta>=0} 0.5*eta^T H eta + b^T eta,
+        with H = F Q^{-1} F^T, b = F Q^{-1}(p + C^T mu + L^T(2g-1)) + f.
+        """
+        F = self.F; C = self.C; L = self.L
+
+        # --- build b once ---
+        p = np.asarray(self.p).ravel()
+        f = np.asarray(self.f).ravel()
+        a = p + (C.T @ mu).ravel() + (L.T @ (2.0*g.ravel() - 1.0))
+        b = (F @ self._solve_Q(a)) + f
+
+        # H*x = F Q^{-1} F^T x (+ rho x)
+        def H_mv(x):
+            return F @ self._solve_Q(F.T @ x) + rho * x
+
+        n = F.shape[0]
+
+        # --- Hutchinson diag preconditioner (EMA cached) ---
+        if not hasattr(self, "_diagH") or getattr(self, "_diagH_age", 1e9) > 20:
+            diag_est = np.zeros(n)
+            for _ in range(precond_probes):
+                z = np.random.randn(n)
+                Hz = H_mv(z)
+                diag_est += Hz * z
+            diag_est = np.abs(diag_est) / max(1, precond_probes)
+            self._diagH = np.maximum(diag_est, 1e-9)
+            self._diagH_age = 0
+        else:
+            z = np.random.randn(n)
+            Hz = H_mv(z)
+            refresh = np.maximum(np.abs(Hz * z), 1e-9)
+            self._diagH = precond_decay * self._diagH + (1 - precond_decay) * refresh
+            self._diagH_age += 1
+
+        # Variable change: eta = D^{-1/2} y  (D = diag(H))
+        D = self._diagH
+        inv_sqrtD = 1.0 / np.sqrt(D)
+
+        def grad_y(y):
+            # grad wrt y after variable change:
+            # ∇_y = D^{-1/2} (H eta + b),  with eta = D^{-1/2} y
+            eta = inv_sqrtD * y
+            return inv_sqrtD * (H_mv(eta) + b)
+
+        # Lipschitz estimate in y-coordinates ~ median(diag of normalized H)
+        L_est = 1.0  # after normalization, use ~1 as default
+        tau = 1.0 / L_est
+
+        # warm start (in y-space)
+        y = np.zeros(n)
+
+        y_prev = y.copy()
+        t_mom = 1.0
+
+        # objective in y (for Armijo check)
+        def phi_y(yv):
+            eta = inv_sqrtD * yv
+            # 0.5*eta^T H eta + b^T eta, cheap via one H_mv
+            Heta = H_mv(eta)
+            return 0.5 * float(eta @ Heta) + float(b @ eta)
+
+        phi_prev = phi_y(y)
+
+        for k in range(iters):
+            # Nesterov extrapolation
+            if use_nesterov:
+                t_new = 0.5 * (1 + np.sqrt(1 + 4 * t_mom * t_mom))
+                beta = (t_mom - 1) / t_new
+                y_extr = y + beta * (y - y_prev)
+            else:
+                y_extr = y
+
+            gk = grad_y(y_extr)
+
+            # projected direction in y-space (nonnegativity in eta-space):
+            # take step in y, then project eta = D^{-1/2}y to R_+^n
+            # Armijo backtracking on phi_y with model decrease
+            tau_k = tau
+            while True:
+                y_trial = y_extr - tau_k * gk
+                eta_trial = np.maximum(0.0, inv_sqrtD * y_trial)
+                y_proj = np.sqrt(D) * eta_trial
+
+                phi_trial = phi_y(y_proj)
+                # sufficient decrease: phi(y_proj) <= phi(y_extr) - sigma * ||proj_step||^2 / tau_k
+                step_norm2 = np.sum((y_proj - y_extr) ** 2)
+                if phi_trial <= phi_y(y_extr) - armijo_sigma * step_norm2 / max(tau_k, 1e-12):
+                    y_next = y_proj
+                    phi_next = phi_trial
+                    break
+                tau_k *= armijo_beta  # shrink step
+
+                # very small step → bail
+                if tau_k < 1e-6:
+                    y_next = y_proj
+                    phi_next = phi_trial
+                    break
+
+            # Adaptive restart: if ⟨y_next - y, y - y_prev⟩ > 0, reset momentum
+            if use_nesterov and np.dot(y_next - y, y - y_prev) > 0:
+                t_mom = 1.0
+                y_prev = y.copy()
+            else:
+                y_prev = y.copy()
+                if use_nesterov:
+                    t_mom = t_new
+
+            y = y_next
+            phi_prev = phi_next
+
+            # projected gradient norm in eta-space
+            eta = inv_sqrtD * y
+            pg = np.minimum(H_mv(eta) + b, 0.0)  # proj-grad for R_+^n
+            if np.linalg.norm(pg, ord=np.inf) <= tol:
+                break
+
+        eta = inv_sqrtD * y
+        # --- tiny polish on top violations (optional, cheap) ---
+        eta = self._polish_eta_active_set(eta, b, H_mv, k_top=48, cg_iters=6)
+        return eta
+
+        return eta.reshape(-1, 1)
+    
+    def _polish_eta_active_set(self, eta, b, H_mv, *,
+                            k_top: int = 48,  # keep it small: 32–64
+                            cg_iters: int = 6):
+        """
+        Small NNLS polish on the most violated coordinates.
+        Solves (H_AA eta_A = -b_A) on active/violated set A with CG,
+        clamping to eta_A >= 0 each step. Uses H_mv only (no dense H).
+        """
+        eta = np.asarray(eta, float).ravel()
+        g = H_mv(eta) + b               # KKT grad
+        viol = np.maximum(-g, 0.0)      # only negative-grad violate nonnegativity
+
+        # Build tiny active set: positive eta OR large violation
+        A = np.flatnonzero((eta > 1e-10) | (viol > 1e-3))
+        if A.size == 0:
+            return eta.reshape(-1, 1)
+
+        # Focus on top-k most violated to cap cost
+        A = A[np.argsort(-viol[A])[:k_top]]
+
+        # Subspace operator: gather/scatter around H_mv
+        def H_sub_mv(xA):
+            x = np.zeros_like(eta)
+            x[A] = xA
+            y = H_mv(x)
+            return y[A]
+
+        bA = b[A]
+        x  = eta[A].copy()
+
+        # CG on normal equations: H_AA x = -b_A
+        r = -bA - H_sub_mv(x)
+        p = r.copy()
+        rr = float(np.dot(r, r))
+        for _ in range(cg_iters):
+            if rr < 1e-12:
+                break
+            Hp = H_sub_mv(p)
+            denom = float(np.dot(p, Hp)) + 1e-12
+            alpha = rr / denom
+            x_new = x + alpha * p
+            x_new = np.maximum(x_new, 0.0)  # project
+            r = r - alpha * Hp
+            rr_new = float(np.dot(r, r))
+            beta = rr_new / (rr + 1e-12)
+            p = r + beta * p
+            x = x_new
+            rr = rr_new
+
+        eta_out = eta.copy()
+        eta_out[A] = x
+        return eta_out.reshape(-1, 1)
+
+    def solve_dual_approximation(self, Q, L, F, C, p, f, c, ca_dual, l1_dual):
+        """
+        Dual LS solve using LinearOperators with ONE Q^{-1} per matvec.
+        Column reduction via RAID-Net on μ only (keep η, g1).
+        Neutral g1 warm start (0.5). No right-preconditioning by default.
+        Returns (mu, eta, g1).
+        """
+        def _np1d(v): return np.asarray(v, dtype=float).ravel()
+
+        st_first = time.time()
+        n_mu, n_eta, n_g1 = C.shape[0], F.shape[0], L.shape[0]
+        m = n_mu + n_eta + n_g1
+        print(f"[Dual Approx] Dimensions: n_mu={n_mu}, n_eta={n_eta}, n_g1={n_g1}, total={m}")
+
+        # keep block sizes for SOC projection later
         self.blocks = [self.mu_dim - 1] * self.num_ca_duals
-        
-        # Ensure p,c,f are 1-D numpy 
-        p = _np1d(p)
-        c = _np1d(c) 
-        f = _np1d(f) 
-        
-        # --------------------------- # Helper ops: C Q^{-1} v, etc. (always 1‑D in/out) # --------------------------- 
-        
-        def CQinv(v): 
-            w = self._solve_Q(_np1d(v))
-            return _np1d(C @ w) 
-        
-        def FQinv(v): 
-            w = self._solve_Q(_np1d(v)) 
-            return _np1d(F @ w) 
-        
-        def LQinv(v): 
-            w = self._solve_Q(_np1d(v)) 
-            return _np1d(L @ w) 
-        # --------------------------- # Build RHS b = [b1; b2; b3] without materializing Q^{-1} # ---------------------------
+
+        # ensure vectors
+        p = _np1d(p); c = _np1d(c); f = _np1d(f)
+
+        # ---- build b with ONE Q^{-1} ----
         ones_ng1 = np.ones((n_g1, 1))
-        pmvec = p.reshape(-1, 1) - (L.T @ ones_ng1) # (n_vars, 1) 
-        pmvec = _np1d(pmvec) # -> (n_vars,) 
-        
-        b1 = _np1d(-c - CQinv(pmvec)) 
-        b2 = _np1d(-f - FQinv(pmvec)) 
-        b3 = _np1d(-2.0*LQinv(pmvec)) 
-        b = _np1d(np.concatenate([b1, b2, b3])) 
-        
-        self.time_least_squares_formulation = time.time() - st_first 
-        print(f"[Dual Approximation] Least Squares Formulation Time: " f"{self.time_least_squares_formulation:.6f} s (Depends on the Hessian/cost)")
-        
-        # --------------------------- # LinearOperator for A (symmetric): # y = A * [x1; x2; x3] via block matvec and Q-solves # Preallocate and fill slices instead of concatenate (shape‑safe). # ---------------------------
-        def A_mv(x): 
-            x = _np1d(x) 
-            x1 = x[:n_mu] 
-            x2 = x[n_mu:n_mu+n_eta] 
-            x3 = x[n_mu+n_eta:] 
-            y = np.empty(m, dtype=float) # three Q^{-1} applications 
-            y[:n_mu] = _np1d(CQinv(C.T @ x1) + CQinv(F.T @ x2) + 2.0 * CQinv(L.T @ x3)) 
-            y[n_mu:n_mu+n_eta]= _np1d(FQinv(C.T @ x1) + FQinv(F.T @ x2) + 2.0 * FQinv(L.T @ x3)) 
-            y[n_mu+n_eta:] = _np1d(2.0 * LQinv(C.T @ x1) + 2.0 * LQinv(F.T @ x2) + 4.0 * LQinv(L.T @ x3)) 
-            return y 
-        
+        pmvec = _np1d(p.reshape(-1, 1) - (L.T @ ones_ng1))
+        w_b = _np1d(self._solve_Q(pmvec))       # one Q-solve
+        b = np.concatenate([-c - _np1d(C @ w_b),
+                            -f - _np1d(F @ w_b),
+                            -2.0 * _np1d(L @ w_b)])
+
+        self.time_least_squares_formulation = time.time() - st_first
+        print(f"[Dual Approximation] Least Squares Formulation Time: {self.time_least_squares_formulation:.6f} s")
+
+        # ---- A with ONE Q^{-1} per matvec/rmatvec ----
+        def A_mv(x):
+            x = _np1d(x)
+            x1, x2, x3 = x[:n_mu], x[n_mu:n_mu+n_eta], x[n_mu+n_eta:]
+            s = _np1d(C.T @ x1 + F.T @ x2 + 2.0 * L.T @ x3)
+            w = _np1d(self._solve_Q(s))          # one Q-solve
+            return np.concatenate([_np1d(C @ w), _np1d(F @ w), _np1d(2.0 * L @ w)])
+
         def A_rmv(y):
-            y = _np1d(y) 
-            y1 = y[:n_mu] 
-            y2 = y[n_mu:n_mu+n_eta] 
-            y3 = y[n_mu+n_eta:] 
-            # one Q^{-1} application for the adjoint 
-            s = _np1d(C.T @ y1 + F.T @ y2 + 2.0 * L.T @ y3) 
-            z = _np1d(self._solve_Q(s)) 
-            
-            out = np.empty(m, dtype=float) 
-            out[:n_mu] = _np1d(C @ z) 
-            out[n_mu:n_mu+n_eta] = _np1d(F @ z) 
-            out[n_mu+n_eta:] = _np1d(2.0 * L @ z) 
-            return out 
+            y = _np1d(y)
+            y1, y2, y3 = y[:n_mu], y[n_mu:n_mu+n_eta], y[n_mu+n_eta:]
+            s = _np1d(C.T @ y1 + F.T @ y2 + 2.0 * L.T @ y3)
+            z = _np1d(self._solve_Q(s))          # one Q-solve
+            out = np.empty(m, dtype=float)
+            out[:n_mu] = _np1d(C @ z)
+            out[n_mu:n_mu+n_eta] = _np1d(F @ z)
+            out[n_mu+n_eta:] = _np1d(2.0 * L @ z)
+            return out
+
         A_op = spla.LinearOperator((m, m), matvec=A_mv, rmatvec=A_rmv, dtype=float)
-        
-        # --------------------------- # RAID‑Net column reduction # (masks are already expanded to exact lengths) # --------------------------- 
-        reduced_ls = self.config['reduced_ls'] 
-        print(f"[Dual Approx] Reduced LS: {reduced_ls}") 
-        if reduced_ls: 
-            keep_mu = np.asarray(ca_dual, dtype=bool) # length n_mu 
-            keep_eta = np.ones(n_eta, dtype=bool) # keep all eta 
-            keep_g1 = np.asarray(l1_dual, dtype=bool) # length n_g1 
-            keep = np.concatenate([keep_mu, keep_eta, keep_g1]) 
-            idx = np.flatnonzero(keep) 
-        else: 
-            keep = np.ones(m, dtype=bool) 
-            idx = np.arange(m, dtype=int) 
+
+        # ---- RAID-Net reduction: keep μ as predicted, keep all η, keep all g1 ----
+        reduced_ls = bool(self.config.get('reduced_ls', False))
+        print(f"[Dual Approx] Reduced LS: {reduced_ls}")
+        if reduced_ls:
+            keep_mu  = np.asarray(ca_dual, dtype=bool)            # length n_mu
+            keep_eta = np.ones(n_eta, dtype=bool)                 # keep all η
+            keep_g1  = np.ones(n_g1, dtype=bool)                 # keep all g1 (stability)
+            keep = np.concatenate([keep_mu, keep_eta, keep_g1])
+            idx = np.flatnonzero(keep)
+        else:
+            keep = np.ones(m, dtype=bool)
+            idx = np.arange(m, dtype=int)
+
         self.dual_dims = {"n_mu": int(n_mu), "n_eta": int(n_eta), "n_g1": int(n_g1), "m_total": int(m)}
-        self.reduced_cols = int(idx.size) 
-        self.total_cols = int(m)
-        self.keep_mask = keep.copy() 
-        self.keep_idx = idx.copy() 
-        print(f"[Dual Approx] Kept {self.reduced_cols} / {self.total_cols} dual columns after RAID‑Net reduction") 
-        
-        # Selection operator S: x_full = S @ x_red 
-        S = sp.csr_matrix((np.ones(idx.size), (idx, np.arange(idx.size))), shape=(m, idx.size)) # Reduced operator Ar(xr) = A(S xr), Ar^T(y) = S^T A(y)
-        # Bind A_op and S as default args to avoid late‑binding issues. 
-        # reduced operator 
-        def Ar_mv(xr, A_op=A_op, S=S): 
-            return _np1d(A_op.matvec(_np1d(S @ xr))) 
-        
-        def Ar_rmv(y, A_op=A_op, S=S): 
-            # Ar^T y = S^T A^T y 
-            return _np1d(S.T @ _np1d(A_op.rmatvec(_np1d(y))))
-        
-        Ar = spla.LinearOperator((m, idx.size), matvec=Ar_mv, rmatvec=Ar_rmv, dtype=float) 
-        
-        # --------------------------- # LSQR solve on reduced system # --------------------------- 
-        ls_tol = 1e-6 
-        ls_max_iter = 5000 
-        # warm start (seed g1 part with 0.5)
-        ls_init_guess = np.zeros(Ar.shape[1], dtype=float) 
-        if reduced_ls: 
-            start_idx = int(np.sum(keep_mu)) + n_eta # kept mu + all eta 
-            ls_init_guess[start_idx:] = 0.5 # g1 region 
-        else: 
-            ls_init_guess[n_mu+n_eta:] = 0.5 #0.5 
-        # quick asserts before lsqr: 
-        assert b.ndim == 1 and b.shape[0] == Ar.shape[0]
-        assert ls_init_guess.ndim == 1 and ls_init_guess.shape[0] == Ar.shape[1] 
-        st = time.time() 
-        # lsqr returns (x, istop, itn, r1norm, r2norm, anorm, acond, arnorm, xnorm) 
-        x_red, istop, itn, r1norm, r2norm, anorm, acond, arnorm, xnorm, var = lsqr( Ar, b, atol=ls_tol, btol=ls_tol, iter_lim=ls_max_iter, x0=ls_init_guess ) 
-        self.time_least_squares_solve = time.time() - st 
-        print(f"[Dual Approximation] LSQR finished in {self.time_least_squares_solve:.6f} s " f"with system {Ar.shape}, iters={itn}, istop={istop}") 
-        print(f"[Dual Approximation] Residuals: r1norm={r1norm:.3e}, r2norm={r2norm:.3e}, " f"||A||≈{anorm:.3e}, cond≈{acond:.3e}, arnorm={arnorm:.3e}, ||x||={xnorm:.3e}") 
-        
-        # --------------------------- # Scatter back, split, and project # --------------------------- 
-        x_full = np.zeros(m, dtype=float) 
-        x_full[idx] = x_red 
-        x = x_full 
-        
-        mu = self._proj_soc_dual_stacked_np(x[:n_mu], self.blocks).flatten()
-        eta, g1 = x[n_mu:n_mu+n_eta], x[n_mu+n_eta:] 
-        return mu, eta, g1 
+        self.reduced_cols = int(idx.size); self.total_cols = int(m)
+        self.keep_mask = keep.copy(); self.keep_idx = idx.copy()
+        print(f"[Dual Approx] Kept {self.reduced_cols} / {self.total_cols} dual columns after RAID-Net reduction")
+
+        # Selection
+        S = sp.csr_matrix((np.ones(idx.size), (idx, np.arange(idx.size))), shape=(m, idx.size))
+        def Ar_mv(xr, A_op=A_op, S=S):  return _np1d(A_op.matvec(_np1d(S @ xr)))
+        def Ar_rmv(y,  A_op=A_op, S=S): return _np1d(S.T @ _np1d(A_op.rmatvec(_np1d(y))))
+        Ar = spla.LinearOperator((m, idx.size), matvec=Ar_mv, rmatvec=Ar_rmv, dtype=float)
+
+        # ---- NO right-preconditioning and NO damp by default (stability first) ----
+        ls_tol = float(self.config.get('ls_tol', 1e-5))
+        ls_max_iter = int(self.config.get('ls_max_iter', 5000))
+        damp = float(self.config.get('lsqr_damp', 0.0))  # 0 by default
+
+        # neutral warm-start for g1
+        x0 = np.zeros(Ar.shape[1], dtype=float)
+        if reduced_ls:
+            start_idx = int(np.sum(keep[:n_mu]) + np.sum(keep[n_mu:n_mu+n_eta]))
+            g1_len_kept = int(np.sum(keep[n_mu+n_eta:]))
+            if g1_len_kept > 0:
+                x0[start_idx:start_idx+g1_len_kept] = 0.5
+        else:
+            x0[n_mu+n_eta:] = 0.5
+
+        st = time.time()
+        x_red, istop, itn, r1norm, r2norm, anorm, acond, arnorm, xnorm, var = lsqr(
+            Ar, b, atol=ls_tol, btol=ls_tol, iter_lim=ls_max_iter, x0=x0, damp=damp
+        )
+        self.time_least_squares_solve = time.time() - st
+        print(f"[Dual Approximation] LSQR finished in {self.time_least_squares_solve:.6f} s "
+            f"with system {Ar.shape}, iters={itn}, istop={istop}")
+        print(f"[Dual Approximation] Residuals: r1norm={r1norm:.3e}, r2norm={r2norm:.3e}, "
+            f"||A||≈{anorm:.3e}, cond≈{acond:.3e}, arnorm={arnorm:.3e}, ||x||={xnorm:.3e}")
+
+        # Scatter back
+        x_full = np.zeros(m, dtype=float)
+        x_full[idx] = x_red
+
+        # If you later reduce g1, remember to set dropped entries to 0.5 (neutral).
+        mu = self._proj_soc_dual_stacked_np(x_full[:n_mu], self.blocks).flatten()
+        eta, g1 = x_full[n_mu:n_mu+n_eta], x_full[n_mu+n_eta:]
+        return mu, eta, g1
+
         
     def _compute_gap_radius(self, f_mu, f_nu, f_g): 
         """ gap_radius = ||dual - Proj(dual - grad_d)|| * (1+sigma)/eta 
@@ -1131,8 +1235,9 @@ class SMPC():
         
         # ---- inputs as 1-D numpy ---- 
         f_mu = _np1d(f_mu) 
+        pdb.set_trace()
         st = time.time() 
-        eta_br = self._eta_best_response_fast(f_mu.reshape(-1,1), f_g.reshape(-1,1), rho_scale=1e-4, iters=0) # or iters=10 for PGD 
+        eta_br = self._eta_best_response_fast(f_mu.reshape(-1,1), f_g.reshape(-1,1)) # or iters=10 for PGD 
         print(f'[smpc.py]: Best Response Time: {time.time()-st:.6f} s') 
         f_nu = eta_br.ravel() 
         f_nu = _np1d(f_nu) 

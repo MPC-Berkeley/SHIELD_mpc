@@ -459,7 +459,6 @@ class SMPCPlanner(AbstractIDMPlanner):
                 if self.smpc_expert.solver == 'ipopt':
                     self.expert_ca.append(np.fromiter(flatten(expert_sol["ca_duals"]),float))
                     self.expert_l1.append(np.fromiter(flatten(expert_sol["l1_duals"]),float))
-                    print(np.sum(np.fromiter(flatten(expert_sol["ca_duals"]),float) > 1e-3))
                 else:
                     self.expert_ca.append(None)
                     self.expert_l1.append(None)
