@@ -927,35 +927,43 @@ class SMPC():
 
     def _eta_best_response_fast(
         self, mu, g, *,
-        iters: int = 12,
+        iters: int = 3,            # tiny; usually enough with warm-start
         tol: float = 8e-4,
-        rho: float = 1e-4,             # small proximal ridge on H
-        precond_probes: int = 4,
+        rho: float = 3e-3,         # small proximal ridge on H
+        precond_probes: int = 4,   # Hutchinson probes for diag(H)
         precond_decay: float = 0.8,
-        use_nesterov: bool = True,
-        armijo_beta: float = 0.5,      # backtracking shrink
-        armijo_sigma: float = 1e-4,    # sufficient decrease
+        use_nesterov: bool = False,
+        armijo_beta: float = 0.6,  # backtracking shrink
+        armijo_sigma: float = 5e-5,# sufficient decrease
+        polish: bool = True,       # tiny active-set NNLS polish
     ):
         """
-        Safe, fast operator-PGD for: min_{eta>=0} 0.5*eta^T H eta + b^T eta,
-        with H = F Q^{-1} F^T, b = F Q^{-1}(p + C^T mu + L^T(2g-1)) + f.
-        """
-        F = self.F; C = self.C; L = self.L
+        Fast projected solver for:  min_{eta >= 0} 0.5*eta^T H eta + b^T eta,
+        where H = F Q^{-1} F^T (+ rho I),  b = F Q^{-1}(p + C^T mu + L^T(2g-1)) + f.
 
-        # --- build b once ---
+        Returns:
+            eta : (n_eta, 1) nonnegative vector (column)
+        """
+        # --- handles / inputs as 1-D numpy ---
+        F = self.F; C = self.C; L = self.L
         p = np.asarray(self.p).ravel()
         f = np.asarray(self.f).ravel()
-        a = p + (C.T @ mu).ravel() + (L.T @ (2.0*g.ravel() - 1.0))
-        b = (F @ self._solve_Q(a)) + f
+        mu = np.asarray(mu).ravel()
+        g  = np.asarray(g).ravel()
 
-        # H*x = F Q^{-1} F^T x (+ rho x)
+        # --- build b once ---
+        a = p + (C.T @ mu).ravel() + (L.T @ (2.0 * g - 1.0))
+        b = (F @ self._solve_Q(a)) + f
+        n = F.shape[0]
+
+        # --- H*x = F Q^{-1} F^T x (+ rho x) ---
         def H_mv(x):
             return F @ self._solve_Q(F.T @ x) + rho * x
 
-        n = F.shape[0]
-
         # --- Hutchinson diag preconditioner (EMA cached) ---
-        if not hasattr(self, "_diagH") or getattr(self, "_diagH_age", 1e9) > 20:
+        need_reset = (not hasattr(self, "_diagH")) or (getattr(self, "_diagH", None) is None) \
+                    or (self._diagH.shape[0] != n) or (getattr(self, "_diagH_age", 1e9) > 20)
+        if need_reset:
             diag_est = np.zeros(n)
             for _ in range(precond_probes):
                 z = np.random.randn(n)
@@ -968,75 +976,78 @@ class SMPC():
             z = np.random.randn(n)
             Hz = H_mv(z)
             refresh = np.maximum(np.abs(Hz * z), 1e-9)
-            self._diagH = precond_decay * self._diagH + (1 - precond_decay) * refresh
+            self._diagH = precond_decay * self._diagH + (1.0 - precond_decay) * refresh
             self._diagH_age += 1
 
-        # Variable change: eta = D^{-1/2} y  (D = diag(H))
         D = self._diagH
         inv_sqrtD = 1.0 / np.sqrt(D)
+        sqrtD     = 1.0 / inv_sqrtD
 
-        def grad_y(y):
-            # grad wrt y after variable change:
-            # ∇_y = D^{-1/2} (H eta + b),  with eta = D^{-1/2} y
-            eta = inv_sqrtD * y
-            return inv_sqrtD * (H_mv(eta) + b)
+        # --- Diagonal NNLS warm-start: eta0 = max(0, -b / diag(H)) ---
+        eta = np.maximum(0.0, -b / np.maximum(D, 1e-12))
 
-        # Lipschitz estimate in y-coordinates ~ median(diag of normalized H)
-        L_est = 1.0  # after normalization, use ~1 as default
-        tau = 1.0 / L_est
-
-        # warm start (in y-space)
-        y = np.zeros(n)
-
+        # map to y-space: eta = D^{-1/2} y  <=>  y = D^{1/2} eta
+        y = sqrtD * eta
         y_prev = y.copy()
         t_mom = 1.0
 
-        # objective in y (for Armijo check)
+        # objective in y for Armijo
         def phi_y(yv):
-            eta = inv_sqrtD * yv
-            # 0.5*eta^T H eta + b^T eta, cheap via one H_mv
-            Heta = H_mv(eta)
-            return 0.5 * float(eta @ Heta) + float(b @ eta)
+            et = inv_sqrtD * yv
+            Het = H_mv(et)
+            return 0.5 * float(et @ Het) + float(b @ et)
 
-        phi_prev = phi_y(y)
+        # gradient in y-space
+        def grad_y(yv):
+            et = inv_sqrtD * yv
+            return inv_sqrtD * (H_mv(et) + b)
 
-        for k in range(iters):
-            # Nesterov extrapolation
+        # try a slightly aggressive initial step; backtracking will fix if too big
+        tau = 1.25
+
+        # quick early-exit check
+        gk0 = grad_y(y)
+        # projected direction in eta-space (R_+^n)
+        eta_proj0 = np.maximum(0.0, inv_sqrtD * (y - tau * gk0))
+        pg0 = np.minimum(H_mv(eta_proj0) + b, 0.0)
+        if np.linalg.norm(pg0, ord=np.inf) <= tol:
+            return eta_proj0.reshape(-1, 1)
+
+        # main loop
+        for _ in range(iters):
+            # Nesterov extrapolation (optional)
             if use_nesterov:
-                t_new = 0.5 * (1 + np.sqrt(1 + 4 * t_mom * t_mom))
-                beta = (t_mom - 1) / t_new
-                y_extr = y + beta * (y - y_prev)
+                t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_mom * t_mom))
+                beta  = (t_mom - 1.0) / t_new
+                y_ex  = y + beta * (y - y_prev)
             else:
-                y_extr = y
+                y_ex  = y
 
-            gk = grad_y(y_extr)
+            gk = grad_y(y_ex)
 
-            # projected direction in y-space (nonnegativity in eta-space):
-            # take step in y, then project eta = D^{-1/2}y to R_+^n
-            # Armijo backtracking on phi_y with model decrease
+            # Armijo backtracking with projection to eta >= 0
             tau_k = tau
             while True:
-                y_trial = y_extr - tau_k * gk
-                eta_trial = np.maximum(0.0, inv_sqrtD * y_trial)
-                y_proj = np.sqrt(D) * eta_trial
+                y_trial  = y_ex - tau_k * gk
+                eta_tr   = np.maximum(0.0, inv_sqrtD * y_trial)
+                y_proj   = sqrtD * eta_tr
 
-                phi_trial = phi_y(y_proj)
-                # sufficient decrease: phi(y_proj) <= phi(y_extr) - sigma * ||proj_step||^2 / tau_k
-                step_norm2 = np.sum((y_proj - y_extr) ** 2)
-                if phi_trial <= phi_y(y_extr) - armijo_sigma * step_norm2 / max(tau_k, 1e-12):
+                # sufficient decrease on phi_y
+                # phi(y_proj) <= phi(y_ex) - sigma * ||y_proj - y_ex||^2 / tau_k
+                dy = y_proj - y_ex
+                phi_ex = phi_y(y_ex)
+                phi_tr = phi_y(y_proj)
+                if phi_tr <= (phi_ex - armijo_sigma * float(dy @ dy) / max(tau_k, 1e-12)):
                     y_next = y_proj
-                    phi_next = phi_trial
-                    break
-                tau_k *= armijo_beta  # shrink step
-
-                # very small step → bail
-                if tau_k < 1e-6:
-                    y_next = y_proj
-                    phi_next = phi_trial
                     break
 
-            # Adaptive restart: if ⟨y_next - y, y - y_prev⟩ > 0, reset momentum
-            if use_nesterov and np.dot(y_next - y, y - y_prev) > 0:
+                tau_k *= armijo_beta
+                if tau_k < 1e-6:  # bail out if step gets too tiny
+                    y_next = y_proj
+                    break
+
+            # momentum update
+            if use_nesterov and np.dot(y_next - y, y - y_prev) > 0.0:
                 t_mom = 1.0
                 y_prev = y.copy()
             else:
@@ -1045,20 +1056,23 @@ class SMPC():
                     t_mom = t_new
 
             y = y_next
-            phi_prev = phi_next
 
-            # projected gradient norm in eta-space
+            # projected gradient in eta-space
             eta = inv_sqrtD * y
-            pg = np.minimum(H_mv(eta) + b, 0.0)  # proj-grad for R_+^n
+            pg = np.minimum(H_mv(eta) + b, 0.0)
             if np.linalg.norm(pg, ord=np.inf) <= tol:
                 break
 
-        eta = inv_sqrtD * y
-        # --- tiny polish on top violations (optional, cheap) ---
-        eta = self._polish_eta_active_set(eta, b, H_mv, k_top=48, cg_iters=6)
-        return eta
+        # final eta (ensure nonnegativity numerically)
+        eta = np.maximum(0.0, inv_sqrtD * y)
+
+        # tiny active-set NNLS polish (very cheap)
+        if polish:
+            eta = self._polish_eta_active_set(eta, b, H_mv, k_top=24, cg_iters=3).ravel()
+            eta = np.maximum(0.0, eta)
 
         return eta.reshape(-1, 1)
+
     
     def _polish_eta_active_set(self, eta, b, H_mv, *,
                             k_top: int = 48,  # keep it small: 32–64
@@ -1237,7 +1251,17 @@ class SMPC():
         f_mu = _np1d(f_mu) 
         pdb.set_trace()
         st = time.time() 
-        eta_br = self._eta_best_response_fast(f_mu.reshape(-1,1), f_g.reshape(-1,1)) # or iters=10 for PGD 
+        # eta_br = self._eta_best_response_fast(f_mu.reshape(-1,1), f_g.reshape(-1,1)) # or iters=10 for PGD 
+        # inside your call site
+        eta_br = self._eta_best_response_fast(
+            f_mu.reshape(-1,1), f_g.reshape(-1,1),
+            iters=3,          # keep small
+            tol=2e-3,
+            rho=1e-3,
+            use_nesterov=False,
+            polish=True,      # <— enable
+        )
+
         print(f'[smpc.py]: Best Response Time: {time.time()-st:.6f} s') 
         f_nu = eta_br.ravel() 
         f_nu = _np1d(f_nu) 
