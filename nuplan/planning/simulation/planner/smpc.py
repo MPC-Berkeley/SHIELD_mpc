@@ -66,12 +66,9 @@ class SMPC():
             self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles 
         # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3) 
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
-        if self.config['collision_avoidance_method'] == 'obca': 
-            self.tight=2.1
-        elif self.config['collision_avoidance_method'] == 'affine': 
-            self.tight=2.3 
-        else: 
-            raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}") 
+
+        self.tight=2.3 
+
         self.ev_n_std = EV_NOISE_STD 
         self.tv_n_std = [TV_NOISE_STD for _ in range(self.N_TV)] 
         self.Q_cost = ca.diag(Q) 
@@ -165,9 +162,6 @@ class SMPC():
         """
         EV Affine disturbance feedback + TV state feedback policies from https://arxiv.org/abs/2109.09792
         """ 
-        if self.config['collision_avoidance_method'] == 'obca':
-            self.obca_lmbd = [[self.opti.variable(4, self.N-1) for _ in range(self.N_modes[k])] for k in range(self.N_TV)] #Assuming rectangular obstacles
-            self.obca_lmbd_redlight = self.opti.variable(4, self.N-1)
         self.slack = [[[self.opti.variable(1) for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)]
         self.slack_vec = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[self.slack[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
 
@@ -195,19 +189,12 @@ class SMPC():
         M_stack=ca.vertcat(*[ca.horzcat(*[M[t][n] for n in range(t)], ca.DM(1,2*(self.N-t))) for t in range(self.N)])
         K_stack=[[ca.diagcat(ca.DM(1,2),*[K[k][j][t] for t in range(self.N-1)]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] #Gains for the first time step is set to zero
 
-        if self.config['collision_avoidance_method'] == 'obca':
-            self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
-        else:
-            #Affine
-            self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
+        self.vars_pol = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
 
         if self.offline:
             self.vars_epi = ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(self.gain_l1[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)])
         else:
-            if self.config['collision_avoidance_method'] == 'obca':
-                self.vars_pol4screening = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K4screening[k][j][t]) for t in range(self.N-1)], ca.vec(self.obca_lmbd[k][j])) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
-            else:
-                self.vars_pol4screening = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K4screening[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
+            self.vars_pol4screening = ca.vertcat(h_stack, ca.vertcat(*[ca.vertcat(*[ca.vertcat(*[ca.vec(K4screening[k][j][t]) for t in range(self.N-1)]) for j in range(self.N_modes[k])]) for k in range(self.N_TV)]))
         
         #Variables for warmstart
         self.vars_ws, self.vars_epi_ws  = None, None 
@@ -319,33 +306,8 @@ class SMPC():
         '''
         Red light related constraints 
         ''' 
-        if self.config['collision_avoidance_method'] == 'obca': 
-            # OBCA for redlight 
-            redlight_obca_lmbd = self.obca_lmbd_redlight
-            d_min_red = 0 
-            obca_lmbd = self.obca_lmbd 
-            d_min = 0.8*(self.ev_length/2) 
-            # d_min = 0.8 
-            for t in range(1,self.N): 
-                ego_psi = self.route(nom_s[t] + self.s0)[2] 
-                Rev = ca.vertcat( 
-                                    ca.horzcat(ca.cos(ego_psi), -ca.sin(ego_psi)),
-                                    ca.horzcat(ca.sin(ego_psi), ca.cos(ego_psi)) )
-                #Rotation matrix 
-                R_mk = Rev 
-                A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T 
-                tv_nom = self.redlight #(2x1) 
-                b_m = ca.vertcat(0.5/2, 0.5/2,2/2,2/2) + A_m @ tv_nom #Artibrary length = 0.5 m, width = 4 m to represent a stop line 
-                pt = self.route(nom_s[t] + self.s0)[:2] 
-                y = -d_min_red + (A_m @ pt - b_m).T @ redlight_obca_lmbd[:,t-1] 
-                self.opti.subject_to(0<=y) 
-                self.opti.subject_to((A_m.T @ redlight_obca_lmbd[:,t-1]).T @(A_m.T @ redlight_obca_lmbd[:,t-1]) <= 1) 
-                self.opti.subject_to(redlight_obca_lmbd[:,t-1] >= 0) 
-        elif self.config['collision_avoidance_method'] == 'affine': 
-            for t in range(1,self.N): 
-                self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-self.s0)) 
-        else: 
-            raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}") 
+        for t in range(1,self.N): 
+            self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-self.s0)) 
                 
         '''
         Collision avoidance constraints
@@ -604,7 +566,6 @@ class SMPC():
                                 self.opti.set_initial(self.opti.lam_g, self.sol.value(self.opti.lam_g)) 
                             except: 
                                 pass 
-            # self.plot_obca_obstacles_and_ego_path(self.pos_tvs, self.psi_tvs, self.tv_params ) 
             st = time.time() 
             self.sol = self.opti.solve() 
             solve_time = time.time() - st 
@@ -774,18 +735,11 @@ class SMPC():
             self.opti.set_value(self.V_MAX, min(speed_limit,self.config['v_max']))
 
     def _update_red_light(self, red_light_agent = None,ego_sim_init_state=None):
-        if self.config['collision_avoidance_method'] == 'obca':
-            if red_light_agent is None:
-                self.opti.set_value(self.redlight, [1000,1000]) #default red light positon (x,y), really far away from ego
-            else:
-                red_light = [red_light_agent.x-ego_sim_init_state.center.point.x,red_light_agent.y-ego_sim_init_state.center.point.y] #global x and y of red light agent
-                self.opti.set_value(self.redlight, red_light)
-        elif self.config['collision_avoidance_method'] == 'affine':
-            if red_light_agent is None:
-                self.opti.set_value(self.redlight, [1e6,0]) #[s,v]
-            else:
-                red_light = [red_light_agent.progress,0] #s and v of red light agent
-                self.opti.set_value(self.redlight, red_light) #[s,v]
+        if red_light_agent is None:
+            self.opti.set_value(self.redlight, [1e6,0]) #[s,v]
+        else:
+            red_light = [red_light_agent.progress,0] #s and v of red light agent
+            self.opti.set_value(self.redlight, red_light) #[s,v]
 
     def _update_ev_initial_condition(self, x0, u_prev):
         self.x0 = x0
@@ -969,35 +923,7 @@ class SMPC():
 
         solve_time = time.time() - st_first
         print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
-        return mu, eta, g1, self.gap
-    
-    def clarkson_woodruff_transform(self,A, s):
-        """ 
-        Applies a Clarkson-Woodruff transform (CountSketch) to matrix A.
-        
-        Parameters:
-        A (ndarray or sparse matrix): An m x n matrix.
-        s (int): Target number of rows (s << m).
-        
-        Returns:
-        A_sketch: The sketched matrix of size s x n.
-        """
-        m, n = A.shape
-        # Define a hash function mapping each row of A to one of s rows.
-        # Here we simply assign a random index in 0...s-1 for each of m rows.
-        h = np.random.randint(low=0, high=s, size=m)
-        # Random sign flips: +1 or -1 for each row.
-        xi = np.random.choice([-1, 1], size=m)
-        
-        # Build sparse sketching matrix S (of shape s x m) in CSR format.
-        rows = h              # row indices in S where each original row i goes to S[h[i], i]
-        cols = np.arange(m)   # original row indices become column indices in S.
-        data = xi.astype(float)
-        S = sp.csr_matrix((data, (rows, cols)), shape=(s, m))
-        
-        # Multiply S * A to get the sketched matrix.
-        A_sketch = S.dot(A)
-        return A_sketch           
+        return mu, eta, g1, self.gap         
 
     def _eta_best_response_fast(self, mu, g, *, rho_scale=1e-4, iters=0): 
         """ 
@@ -1005,9 +931,9 @@ class SMPC():
         with H = F Q^{-1} F^T, b = F Q^{-1}(p + C^T mu + L^T(2g-1)) + f
         Uses either Cholesky of H+rho I (preferred) or PGD if iters>0. 
         """ 
-        F = self._F; C = self._C; L = self._L 
-        p = np.asarray(self._p).ravel() 
-        f = np.asarray(self._f).ravel() 
+        F = self.F; C = self.C; L = self.L 
+        p = np.asarray(self.p).ravel() 
+        f = np.asarray(self.f).ravel() 
         a = p + (C.T @ mu).ravel() + (L.T @ (2.0*g.ravel() - 1.0))
         b = (F @ self._solve_Q(a)) + f 
         # b = F Q^{-1} a + f 
@@ -1072,9 +998,6 @@ class SMPC():
         print(f"[Dual Approx] Dimensions: n_mu={n_mu}, n_eta={n_eta}, n_g1={n_g1}, total={m}") 
         
         # Store for gap computation later 
-
-        self._C, self._F, self._L = C, F, L 
-        self._p, self._c, self._f = p, c, f 
         self.blocks = [self.mu_dim - 1] * self.num_ca_duals
         
         # Ensure p,c,f are 1-D numpy 
@@ -1196,7 +1119,7 @@ class SMPC():
         mu = self._proj_soc_dual_stacked_np(x[:n_mu], self.blocks).flatten()
         eta, g1 = x[n_mu:n_mu+n_eta], x[n_mu+n_eta:] 
         return mu, eta, g1 
-    
+        
     def _compute_gap_radius(self, f_mu, f_nu, f_g): 
         """ gap_radius = ||dual - Proj(dual - grad_d)|| * (1+sigma)/eta 
         where 
@@ -1216,12 +1139,12 @@ class SMPC():
         f_g = _np1d(f_g)
         
         # ---- sparse handles (set by solve_dual_approximation) ---- 
-        C = self._C # scipy.sparse 
-        F = self._F 
-        L = self._L 
-        p = _np1d(self._p) 
-        c = _np1d(self._c) 
-        f = _np1d(self._f) # ---- eigenvalues of Q (cache & print timing like before) ---- 
+        C = self.C # scipy.sparse 
+        F = self.F 
+        L = self.L 
+        p = _np1d(self.p) 
+        c = _np1d(self.c) 
+        f = _np1d(self.f) # ---- eigenvalues of Q (cache & print timing like before) ---- 
         st = time.time() 
         Q = sp.csr_matrix(self.Q) 
         # largest 
