@@ -316,226 +316,246 @@ class SMPC():
             self.soc_constr_online = [[[ [] for _ in range(self.N-1)] for _ in range(len(self.mode_map))] for _ in range(self.N_TV)] 
             self.l1_constr = [[[ [] for _ in range(self.N-1)] for _ in range(self.N_modes[k])] for k in range(self.N_TV)] 
             
-            '''
-            Red light related constraints 
-            ''' 
-            if self.config['collision_avoidance_method'] == 'obca': 
-                # OBCA for redlight 
-                redlight_obca_lmbd = self.obca_lmbd_redlight
-                d_min_red = 0 
-                obca_lmbd = self.obca_lmbd 
-                d_min = 0.8*(self.ev_length/2) 
-                # d_min = 0.8 
-                for t in range(1,self.N): 
-                    ego_psi = self.route(nom_s[t] + self.s0)[2] 
-                    Rev = ca.vertcat( 
-                                     ca.horzcat(ca.cos(ego_psi), -ca.sin(ego_psi)),
-                                     ca.horzcat(ca.sin(ego_psi), ca.cos(ego_psi)) )
-                    #Rotation matrix 
-                    R_mk = Rev 
-                    A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T 
-                    tv_nom = self.redlight #(2x1) 
-                    b_m = ca.vertcat(0.5/2, 0.5/2,2/2,2/2) + A_m @ tv_nom #Artibrary length = 0.5 m, width = 4 m to represent a stop line 
-                    pt = self.route(nom_s[t] + self.s0)[:2] 
-                    y = -d_min_red + (A_m @ pt - b_m).T @ redlight_obca_lmbd[:,t-1] 
-                    self.opti.subject_to(0<=y) 
-                    self.opti.subject_to((A_m.T @ redlight_obca_lmbd[:,t-1]).T @(A_m.T @ redlight_obca_lmbd[:,t-1]) <= 1) 
-                    self.opti.subject_to(redlight_obca_lmbd[:,t-1] >= 0) 
-            elif self.config['collision_avoidance_method'] == 'affine': 
-                for t in range(1,self.N): 
-                    self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-self.s0)) 
-            else: 
-                raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}") 
+        '''
+        Red light related constraints 
+        ''' 
+        if self.config['collision_avoidance_method'] == 'obca': 
+            # OBCA for redlight 
+            redlight_obca_lmbd = self.obca_lmbd_redlight
+            d_min_red = 0 
+            obca_lmbd = self.obca_lmbd 
+            d_min = 0.8*(self.ev_length/2) 
+            # d_min = 0.8 
+            for t in range(1,self.N): 
+                ego_psi = self.route(nom_s[t] + self.s0)[2] 
+                Rev = ca.vertcat( 
+                                    ca.horzcat(ca.cos(ego_psi), -ca.sin(ego_psi)),
+                                    ca.horzcat(ca.sin(ego_psi), ca.cos(ego_psi)) )
+                #Rotation matrix 
+                R_mk = Rev 
+                A_m = ca.DM([[1,0],[-1,0],[0,1],[0,-1]]) @ R_mk.T 
+                tv_nom = self.redlight #(2x1) 
+                b_m = ca.vertcat(0.5/2, 0.5/2,2/2,2/2) + A_m @ tv_nom #Artibrary length = 0.5 m, width = 4 m to represent a stop line 
+                pt = self.route(nom_s[t] + self.s0)[:2] 
+                y = -d_min_red + (A_m @ pt - b_m).T @ redlight_obca_lmbd[:,t-1] 
+                self.opti.subject_to(0<=y) 
+                self.opti.subject_to((A_m.T @ redlight_obca_lmbd[:,t-1]).T @(A_m.T @ redlight_obca_lmbd[:,t-1]) <= 1) 
+                self.opti.subject_to(redlight_obca_lmbd[:,t-1] >= 0) 
+        elif self.config['collision_avoidance_method'] == 'affine': 
+            for t in range(1,self.N): 
+                self.opti.subject_to(self.opti.bounded(0,nom_s[t],self.redlight[0]-self.s0)) 
+        else: 
+            raise ValueError(f"Unknown collision avoidance method: {self.config['collision_avoidance_method']}") 
                 
-            ''' 
-            Collision avoidance constraints 
-            ''' 
-            for k in range(self.N_TV): 
-                for j in range(len(self.mode_map)): 
-                    m = self.mode_map[j][k] 
-                    
-                    # (unchanged) gain regularizer 
-                    cost += self.multiplier * 0.019 * 1.5 * ca.trace( K[k][m] @ E_tv[k][m][:2*self.N, :] @ E_tv[k][m][:2*self.N, :].T @ K[k][m].T )
-                    
-                    # --------- AFFINE collision-avoidance: batch all t constraints ---------- 
-                    if self.config['collision_avoidance_method'] == 'affine': 
-                        soc_rows = [] # holds [ y+slack - z_norm ; y+slack ] for all t 
-                        soc_rows_online = [] # masked rows for online screening (same length) 
-                        soc_rows_gurobi = [] # masked rows for gurobi (same length) 
-                        soc_rows_gurobi_online = [] # masked rows for gurobi online (same length) 
-                        # Also batch L1 constraints: stack K entries and gains once 
-                        if len(self.l1_constr[k][m][0]) == 0: 
-                            # # Build stacked vectors: shape (2*(N-1), 1) 
-                            K_stack_vec = ca.vertcat(*[ 
-                                                       ca.vec(K[k][m][t, 2*t:2*(t+1)].T) # (2x1) 
-                                                       for t in range(1, self.N) 
-                                                       ]) 
-                            gain_l1_stack = ca.vertcat(*[ 
-                                                         ca.vec(self.gain_l1[k][m][t-1].T) # (2x1)
-                                                         for t in range(1, self.N) 
-                                                         ]) 
-                            # # Single pair of inequalities for all t 
-                            if self.solver == 'gurobi' or not self.offline: #evaluation only. Don't use for data collection
-                                self.opti.subject_to(K_stack_vec - gain_l1_stack <= 0) 
-                                self.opti.subject_to(-K_stack_vec - gain_l1_stack <= 0) 
-                                self.l1_constr[k][m][0]+=[1] 
-                                
-                            # Single cost term for all t 
-                            cost += self.l1_lmbd * ca.sum1(gain_l1_stack) 
-                            
-                        # Loop t only builds expressions; we impose them once after the loop 
-                        for t in range(1, self.N): 
-                            # EV–TV geometry 
-                            diff = self.x_pos[:, t] - self.pos_tvs[k][m][:, t] 
-                            mahalanobis_norm = ca.sqrt(diff.T @ self.Qs[k][m][t-1] @ diff) 
-                            oa_ref = self.pos_tvs[k][m][:, t] + diff / (mahalanobis_norm + 1e-12) 
-                            
-                            # z (random part) and y (deterministic part) 
-                            z = ( (oa_ref - self.pos_tvs[k][m][:, t]).T @ self.Qs[k][m][t-1] @ ca.horzcat( self.dpos[t-1] @ (B[2*t, :] @ M + E[2*t, :]), *[ self.dpos[t-1] @ B[2*t, :] @ K[l][self.mode_map[j][l]] @ E_tv[l][self.mode_map[j][l]][:2*self.N, :] - (int(l == k)) * self.dpos_tvs[k][m][t-1] @ E_tv[k][m][2*t, :] for l in range(self.N_TV) ] ) ).T 
-                            z_norm = self.tight * ca.sqrt(ca.sumsqr(z) + 1e-10) 
-                            y = ( (oa_ref - self.pos_tvs[k][m][:, t]).T @ self.Qs[k][m][t-1] @ (self.x_pos[:, t] - oa_ref + self.dpos[t-1] * (A[2*t, :] @ self.z_curr + B[2*t, :] @ h - (self.z_lin[0, t] - self.s0))) ) 
-                            
-                            if self.offline: 
-                                self.ca_ineq.append(ca.vertcat(z,y)) 
-                                self.lin_ineq_l1+=[K[k][m][t,2*t:2*(t+1)]-self.gain_l1[k][m][t-1]] #only the first constraint: g1 
-                                self.ca_constr[k][j][t-1]+=[z_norm<=y+self.slack[k][m][t-1],0<=y+self.slack[k][m][t-1]] 
-                                if self.solver == 'ipopt': 
-                                    self.opti.subject_to(self.ca_constr[k][j][t-1][0]) 
-                                    self.opti.subject_to(self.ca_constr[k][j][t-1][1]) 
-                                    if len(self.l1_constr[k][m][t-1])==0: 
-                                        self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]] 
-                                        self.opti.subject_to(self.l1_constr[k][m][t-1][0]) 
-                                        self.opti.subject_to(self.l1_constr[k][m][t-1][1]) 
-                            # Collect the two scalar rows for this t 
-                            soc_rows.append(y + self.slack[k][m][t-1] - z_norm) 
-                            soc_rows.append(y + self.slack[k][m][t-1]) 
-                            soc_rows_gurobi.append(ca.soc(z,y+self.slack[k][m][t-1])) 
-                            
-                            if not self.offline: 
-                                # Masked version (avoid if_else): keep*row + (1-keep)*1 
-                                soc_rows_online.append(self.constr_keep[k][j][t-1]*(y + self.slack[k][m][t-1] - z_norm) + (1-self.constr_keep[k][j][t-1])*1e1) 
-                                soc_rows_online.append(self.constr_keep[k][j][t-1]*(y + self.slack[k][m][t-1]) + (1-self.constr_keep[k][j][t-1])*1e1) 
-                                soc_rows_gurobi_online.append(ca.soc(self.constr_keep[k][j][t-1]*z, (1-self.constr_keep[k][j][t-1])*1e1 + self.constr_keep[k][j][t-1]*(y+self.slack[k][m][t-1]))) 
-                                if self.solver == 'gurobi': 
-                                    self.opti.subject_to(soc_rows_gurobi_online[-1] > 0) 
-                            else: 
-                                # soc_rows_online.append((y - z_norm)* self.constr_keep[k][j][t-1] + self.slack[k][m][t-1])
-                                # soc_rows_online.append(y*self.constr_keep[k][j][t-1] + self.slack[k][m][t-1] ) 
-                                # self.soc_constr_online[k][j][t-1]+=[y + self.slack[k][m][t-1] - z_norm, y + self.slack[k][m][t-1]] 
-                                if self.solver == 'gurobi': 
-                                    self.opti.subject_to(soc_rows_gurobi[-1] > 0) 
-                                
-                        # Impose all CA constraints at once for ipopt 
-                        if self.solver == "ipopt":
-                            if self.offline: 
-                                pass # already imposed inside t-loop 
-                            else: 
-                                self.opti.subject_to(ca.vertcat(*soc_rows_online) >= 0)
-                    else: 
-                        NotImplementedError("Only 'affine' collision avoidance is implemented for now.")
-            cost += 1e4*self.slack_vec.T@self.slack_vec 
-            self.opti.minimize( cost ) 
-            self.cost = cost 
+        '''
+        Collision avoidance constraints
+        '''
+        for k in range(self.N_TV):
+            for j in range(len(self.mode_map)):
+                m = self.mode_map[j][k]
+                # (unchanged) gain regularizer
+                cost += self.multiplier * 0.019 * 1.5 * ca.trace(
+                    K[k][m] @ E_tv[k][m][:2*self.N, :] @ E_tv[k][m][:2*self.N, :].T @ K[k][m].T
+                )
+
+                # --------- AFFINE collision-avoidance: batch all t constraints ----------
+                if self.config['collision_avoidance_method'] == 'affine':
+
+                    soc_rows = []         # holds [ y+slack - z_norm ; y+slack ] for all t
+                    soc_rows_online = []  # masked rows for online screening (same length)
+                    soc_rows_gurobi = []  # masked rows for gurobi (same length)
+                    soc_rows_gurobi_online = []  # masked rows for gurobi online (same length)
+                    # Also batch L1 constraints: stack K entries and gains once
+                    if len(self.l1_constr[k][m][0]) == 0:
+                        # # Build stacked vectors: shape (2*(N-1), 1)
+                        K_stack_vec = ca.vertcat(*[
+                            ca.vec(K[k][m][t, 2*t:2*(t+1)].T)  # (2x1)
+                            for t in range(1, self.N)
+                        ])
+                        gain_l1_stack = ca.vertcat(*[
+                            ca.vec(self.gain_l1[k][m][t-1].T)  # (2x1)
+                            for t in range(1, self.N)
+                        ])
+    
+                        # # Single pair of inequalities for all t
+                        if self.solver == 'gurobi' or not self.offline: #evaluation only. Don't use for data collection
+                            self.opti.subject_to(K_stack_vec - gain_l1_stack <= 0)
+                            self.opti.subject_to(-K_stack_vec - gain_l1_stack <= 0)
+                            self.l1_constr[k][m][0]+=[1]
+
+                        # Single cost term for all t
+                        cost += self.l1_lmbd * ca.sum1(gain_l1_stack)
+
+                    # Loop t only builds expressions; we impose them once after the loop
+                    for t in range(1, self.N):
+                        # EV–TV geometry
+                        diff = self.x_pos[:, t] - self.pos_tvs[k][m][:, t]
+                        mahalanobis_norm = ca.sqrt(diff.T @ self.Qs[k][m][t-1] @ diff)
+                        oa_ref = self.pos_tvs[k][m][:, t] + diff / (mahalanobis_norm + 1e-12)
+
+                        # z (random part) and y (deterministic part)
+                        z = (
+                            (oa_ref - self.pos_tvs[k][m][:, t]).T
+                            @ self.Qs[k][m][t-1]
+                            @ ca.horzcat(
+                                self.dpos[t-1] @ (B[2*t, :] @ M + E[2*t, :]),
+                                *[
+                                    self.dpos[t-1] @ B[2*t, :] @ K[l][self.mode_map[j][l]] @ E_tv[l][self.mode_map[j][l]][:2*self.N, :]
+                                    - (int(l == k)) * self.dpos_tvs[k][m][t-1] @ E_tv[k][m][2*t, :]
+                                    for l in range(self.N_TV)
+                                ]
+                            )
+                        ).T
+
+                        z_norm = self.tight * ca.sqrt(ca.sumsqr(z) + 1e-10)
+
+                        y = (
+                            (oa_ref - self.pos_tvs[k][m][:, t]).T
+                            @ self.Qs[k][m][t-1]
+                            @ (self.x_pos[:, t] - oa_ref
+                            + self.dpos[t-1] * (A[2*t, :] @ self.z_curr + B[2*t, :] @ h - (self.z_lin[0, t] - self.s0)))
+                        )
+                        if self.offline:
+                            self.ca_ineq.append(ca.vertcat(z,y))
+                            self.ca_constr[k][j][t-1]+=[z_norm<=y+self.slack[k][m][t-1],0<=y+self.slack[k][m][t-1]]
+                            if self.solver == 'ipopt':
+                                self.opti.subject_to(self.ca_constr[k][j][t-1][0])
+                                self.opti.subject_to(self.ca_constr[k][j][t-1][1])
+                                if len(self.l1_constr[k][m][t-1])==0:
+                                    self.lin_ineq_l1+=[K[k][m][t,2*t:2*(t+1)]-self.gain_l1[k][m][t-1]] #only the first constraint: g1
+                                    self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]]
+                                    self.opti.subject_to(self.l1_constr[k][m][t-1][0])
+                                    self.opti.subject_to(self.l1_constr[k][m][t-1][1])
+                        # Collect the two scalar rows for this t
+                        soc_rows.append(y + self.slack[k][m][t-1] - z_norm)
+                        soc_rows.append(y + self.slack[k][m][t-1])
+                        soc_rows_gurobi.append(ca.soc(z,y+self.slack[k][m][t-1]))
+
+                        if not self.offline:
+                            # Masked version (avoid if_else): keep*row + (1-keep)*1
+                            soc_rows_online.append(self.constr_keep[k][j][t-1]*(y + self.slack[k][m][t-1] - z_norm) + (1-self.constr_keep[k][j][t-1])*1e1) 
+                            soc_rows_online.append(self.constr_keep[k][j][t-1]*(y + self.slack[k][m][t-1]) + (1-self.constr_keep[k][j][t-1])*1e1)
+                            soc_rows_gurobi_online.append(ca.soc(self.constr_keep[k][j][t-1]*z, (1-self.constr_keep[k][j][t-1])*1e1 + self.constr_keep[k][j][t-1]*(y+self.slack[k][m][t-1])))
+                            if self.solver == 'gurobi':
+                                self.opti.subject_to(soc_rows_gurobi_online[-1] > 0)
+                        else:
+                            # soc_rows_online.append((y - z_norm)* self.constr_keep[k][j][t-1] + self.slack[k][m][t-1]) 
+                            # soc_rows_online.append(y*self.constr_keep[k][j][t-1] + self.slack[k][m][t-1] )
+                            # self.soc_constr_online[k][j][t-1]+=[y + self.slack[k][m][t-1] - z_norm, y + self.slack[k][m][t-1]]
+                            if self.solver == 'gurobi':
+                                self.opti.subject_to(soc_rows_gurobi[-1] > 0)
+                    # Impose all CA constraints at once for ipopt
+                    if self.solver == "ipopt":
+                        if self.offline:
+                            pass # already imposed inside t-loop
+                        else:
+                            self.opti.subject_to(ca.vertcat(*soc_rows_online) >= 0)
+                else:
+                    NotImplementedError("Only 'affine' collision avoidance is implemented for now.")
+
+        cost += 1e4*self.slack_vec.T@self.slack_vec
+        self.opti.minimize( cost ) 
+        self.cost = cost
             
-            #Canonical Form Computations 
-            if self.offline: 
-                #g(theta) <= 0 
-                self.lin_ineq_constr =[] 
-                self.lin_ineq_constr+=[A[t*2+1,:]@self.z_curr+B[t*2+1,:]@h-self.V_MAX for t in range(1,self.N+1)] 
-                self.lin_ineq_constr+=[-A[t*2+1,:]@self.z_curr-B[t*2+1,:]@h + self.V_MIN for t in range(1,self.N+1)] 
-                self.lin_ineq_constr+=[h[t]-self.A_MAX for t in range(self.N)] 
-                self.lin_ineq_constr+=[-h[t] + self.A_MIN for t in range(self.N)] 
-                self.f_l_i_c = ca.Function("lin_ineq", [self.vars_pol,self.params, self.V_MAX], self.lin_ineq_constr) 
-                
-                # F\theta <= f 
-                self.F, self.f = ca.jacobian(ca.vertcat(*self.f_l_i_c(self.vars_pol,self.params,self.V_MAX)),self.vars_pol), -ca.vertcat(*self.f_l_i_c(ca.DM.zeros(*self.vars_pol.shape),self.params, self.V_MAX)) 
-                
-                # L\theta <= psi 
-                self.f_l_i_l1 =ca.Function("l1_ineq", [self.vars_pol,self.vars_epi],self.lin_ineq_l1)
-                self.L = ca.jacobian(ca.vertcat(*self.f_l_i_l1(self.vars_pol,self.vars_epi)), self.vars_pol)
-                
-                self.f_ca_i = ca.Function("ca_ineq", [self.vars_pol, self.params], self.ca_ineq) 
-                
-                # C\theta + c \in K_1 x K_2 x ................. 
-                self.C = (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params)) 
-                self.c = self.f_ca_i(ca.DM.zeros(*self.vars_pol.shape), self.params) 
-                
-                self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params, self.slack_vec], [cost])
-                
-                #Here, ca.hessian outputs hessian, J_grad. 
-                self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params, ca.DM.zeros(*self.slack_vec.shape)), self.vars_pol) 
-                self.f_hessian = ca.Function("hessian", [self.vars_pol, self.vars_epi, self.params, self.slack_vec], [self.Q, self.p]) 
-                self.d = self.f_cost(ca.DM.zeros(*self.vars_pol.shape),ca.DM.zeros(*self.vars_epi.shape),self.params,ca.DM.zeros(*self.slack_vec.shape))
-            else: 
-                #Precompute functions for constraints and variable screening 
-                vars_epi = ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1) 
-                self.F_fn = ca.Function('F_fn', [self.vars_pol4screening, self.params, self.V_MAX], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_c'](self.vars_pol4screening,self.params,self.V_MAX)),self.vars_pol4screening)]) 
-                self.L_fn = ca.Function('L_fn', [self.vars_pol4screening], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_l1'](self.vars_pol4screening,vars_epi)), self.vars_pol4screening)]) 
-                self.C_fn = ca.Function('C_fn',[self.params, self.slack_vec],[ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape))]) 
-                C = self.C_fn(np.ones(self.params.shape),ca.DM.zeros(*self.slack_vec.shape)) # Evaluate C_fn to get the shape and non-zero indices 
-                self.C_shape = C.shape 
-                self.nonzero_inds = np.nonzero(np.ravel(C,order='F'))[0] 
-                # Get the row and column indices of the non-zero elements in the sparse matrix 
-                self.row_indices, self.col_indices = np.unravel_index(self.nonzero_inds, self.C_shape,order='F') 
-                self.nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds] 
-                self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[self.nonzero_vec]) 
-                self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))]) 
-                Q, p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape)) 
-                #Q is constant, p is affine in params
-                Q_num, _ = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,ca.DM.ones(*self.params.shape),ca.DM.zeros(*self.slack_vec.shape))
-                Q_csc = sp.csc_matrix(Q_num + 1e-8*sp.eye(Q_num.shape[0])) 
-                solve_Q = spla.factorized(Q_csc) # closure: solve_Q(b) solves Q x = b (expects np.ndarray) 
-                self._solve_Q = solve_Q 
-        
-                self.Q = sp.csr_matrix(np.asarray(Q_num, dtype=float))
-                Q_inv = ca.inv(Q) 
-                L = self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape)) 
-                self.L = sp.csr_matrix(np.asarray(L, dtype=float)) 
-                
-                ### ------------------- Accelerate p and f computation ------------------- ###
-                # Select only the nonzero entries you care about (you already have these):
-                p_sym = p
-                _, p_nz = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,ca.DM.ones(*self.params.shape),ca.DM.zeros(*self.slack_vec.shape)) 
-                self.p_nonzero_inds = np.nonzero(np.ravel(p_nz,order='F'))[0] 
-                idx = self.p_nonzero_inds
+        #Canonical Form Computations 
+        if self.offline: 
+            #g(theta) <= 0 
+            self.lin_ineq_constr =[] 
+            self.lin_ineq_constr+=[A[t*2+1,:]@self.z_curr+B[t*2+1,:]@h-self.V_MAX for t in range(1,self.N+1)] 
+            self.lin_ineq_constr+=[-A[t*2+1,:]@self.z_curr-B[t*2+1,:]@h + self.V_MIN for t in range(1,self.N+1)] 
+            self.lin_ineq_constr+=[h[t]-self.A_MAX for t in range(self.N)] 
+            self.lin_ineq_constr+=[-h[t] + self.A_MIN for t in range(self.N)] 
+            self.f_l_i_c = ca.Function("lin_ineq", [self.vars_pol,self.params, self.V_MAX], self.lin_ineq_constr) 
+            
+            # F\theta <= f 
+            self.F, self.f = ca.jacobian(ca.vertcat(*self.f_l_i_c(self.vars_pol,self.params,self.V_MAX)),self.vars_pol), -ca.vertcat(*self.f_l_i_c(ca.DM.zeros(*self.vars_pol.shape),self.params, self.V_MAX)) 
+            
+            # L\theta <= psi 
+            self.f_l_i_l1 =ca.Function("l1_ineq", [self.vars_pol,self.vars_epi],self.lin_ineq_l1)
+            self.L = ca.jacobian(ca.vertcat(*self.f_l_i_l1(self.vars_pol,self.vars_epi)), self.vars_pol)
+            
+            self.f_ca_i = ca.Function("ca_ineq", [self.vars_pol, self.params], self.ca_ineq) 
+            
+            # C\theta + c \in K_1 x K_2 x ................. 
+            self.C = (ca.jacobian(ca_constr, self.vars_pol) for ca_constr in self.f_ca_i(self.vars_pol, self.params)) 
+            self.c = self.f_ca_i(ca.DM.zeros(*self.vars_pol.shape), self.params) 
+            
+            self.f_cost = ca.Function("cost", [self.vars_pol, self.vars_epi, self.params, self.slack_vec], [cost])
+            
+            #Here, ca.hessian outputs hessian, J_grad. 
+            self.Q, self.p = ca.hessian(self.f_cost(self.vars_pol, self.vars_epi,self.params, ca.DM.zeros(*self.slack_vec.shape)), self.vars_pol) 
+            self.f_hessian = ca.Function("hessian", [self.vars_pol, self.vars_epi, self.params, self.slack_vec], [self.Q, self.p]) 
+            self.d = self.f_cost(ca.DM.zeros(*self.vars_pol.shape),ca.DM.zeros(*self.vars_epi.shape),self.params,ca.DM.zeros(*self.slack_vec.shape))
+        else: 
+            #Precompute functions for constraints and variable screening 
+            vars_epi = ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1) 
+            self.F_fn = ca.Function('F_fn', [self.vars_pol4screening, self.params, self.V_MAX], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_c'](self.vars_pol4screening,self.params,self.V_MAX)),self.vars_pol4screening)]) 
+            self.L_fn = ca.Function('L_fn', [self.vars_pol4screening], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_l1'](self.vars_pol4screening,vars_epi)), self.vars_pol4screening)]) 
+            self.C_fn = ca.Function('C_fn',[self.params, self.slack_vec],[ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape))]) 
+            C = self.C_fn(np.ones(self.params.shape),ca.DM.zeros(*self.slack_vec.shape)) # Evaluate C_fn to get the shape and non-zero indices 
+            self.C_shape = C.shape 
+            self.nonzero_inds = np.nonzero(np.ravel(C,order='F'))[0] 
+            # Get the row and column indices of the non-zero elements in the sparse matrix 
+            self.row_indices, self.col_indices = np.unravel_index(self.nonzero_inds, self.C_shape,order='F') 
+            self.nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds] 
+            self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[self.nonzero_vec]) 
+            self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))]) 
+            Q, p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape)) 
+            #Q is constant, p is affine in params
+            Q_num, _ = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,ca.DM.ones(*self.params.shape),ca.DM.zeros(*self.slack_vec.shape))
+            Q_csc = sp.csc_matrix(Q_num + 1e-8*sp.eye(Q_num.shape[0])) 
+            solve_Q = spla.factorized(Q_csc) # closure: solve_Q(b) solves Q x = b (expects np.ndarray) 
+            self._solve_Q = solve_Q 
+    
+            self.Q = sp.csr_matrix(np.asarray(Q_num, dtype=float))
+            Q_inv = ca.inv(Q) 
+            L = self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape)) 
+            self.L = sp.csr_matrix(np.asarray(L, dtype=float)) 
+            
+            ### ------------------- Accelerate p and f computation ------------------- ###
+            # Select only the nonzero entries you care about (you already have these):
+            p_sym = p
+            _, p_nz = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,ca.DM.ones(*self.params.shape),ca.DM.zeros(*self.slack_vec.shape)) 
+            self.p_nonzero_inds = np.nonzero(np.ravel(p_nz,order='F'))[0] 
+            idx = self.p_nonzero_inds
 
-                # Affine decomposition: p(params) = p_0 + Jp * params
-                Jp_sym = ca.jacobian(p_sym, self.params)
+            # Affine decomposition: p(params) = p_0 + Jp * params
+            Jp_sym = ca.jacobian(p_sym, self.params)
 
-                p_0_fn = ca.Function('p_0_fn', [self.params], [p_sym])
-                Jp_fn  = ca.Function('Jp_fn',  [self.params], [Jp_sym])
+            p_0_fn = ca.Function('p_0_fn', [self.params], [p_sym])
+            Jp_fn  = ca.Function('Jp_fn',  [self.params], [Jp_sym])
 
-                p_0_dm = p_0_fn(ca.DM.zeros(self.params.shape))
-                Jp_dm  = Jp_fn(ca.DM.zeros(self.params.shape))
+            p_0_dm = p_0_fn(ca.DM.zeros(self.params.shape))
+            Jp_dm  = Jp_fn(ca.DM.zeros(self.params.shape))
 
-                # Evaluate and cache as NumPy/SciPy once
-                self._p_0  = np.asarray(p_0_dm).ravel() 
-                self._Jp   = sp.csr_matrix(np.asarray(Jp_dm))
+            # Evaluate and cache as NumPy/SciPy once
+            self._p_0  = np.asarray(p_0_dm).ravel() 
+            self._Jp   = sp.csr_matrix(np.asarray(Jp_dm))
 
-                # Preallocate the full p buffer once
-                self._p_full = np.zeros(int(self.vars_pol4screening.shape[0]), dtype=float)
-                self._p_idx  = np.array(idx, dtype=int)    
-                
-                f = -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX))                   
-                f_nz = -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),ca.DM.ones(*self.params.shape),1))
-                self.f_nonzero_inds = np.nonzero(np.ravel(f_nz,order='F'))[0]
-                idx = self.f_nonzero_inds
-                Jf_sym = ca.jacobian(f, ca.vertcat(*[self.params, self.V_MAX]))
-                Jf_sym_param = ca.jacobian(f, self.params)
-                Jf_sym_vmax = ca.jacobian(f, self.V_MAX)
+            # Preallocate the full p buffer once
+            self._p_full = np.zeros(int(self.vars_pol4screening.shape[0]), dtype=float)
+            self._p_idx  = np.array(idx, dtype=int)    
+            
+            f = -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),self.params,self.V_MAX))                   
+            f_nz = -ca.vertcat(*self.canon_prob_fn['f_l_i_c'](ca.DM.zeros(*self.vars_pol4screening.shape),ca.DM.ones(*self.params.shape),1))
+            self.f_nonzero_inds = np.nonzero(np.ravel(f_nz,order='F'))[0]
+            idx = self.f_nonzero_inds
+            Jf_sym = ca.jacobian(f, ca.vertcat(*[self.params, self.V_MAX]))
+            Jf_sym_param = ca.jacobian(f, self.params)
+            Jf_sym_vmax = ca.jacobian(f, self.V_MAX)
 
-                f_0_fn = ca.Function('f_0_fn', [self.params, self.V_MAX], [f])
-                Jf_param_fn = ca.Function('Jf_parama_fn', [self.params,self.V_MAX], [Jf_sym_param])
-                Jf_vmax_fn = ca.Function('Jf_Vmax_fn', [self.params,self.V_MAX], [Jf_sym_vmax])
-                f_0_dm = f_0_fn(ca.DM.zeros(self.params.shape), 0)
-                Jf_param_dm = Jf_param_fn(ca.DM.zeros(self.params.shape), 0)
-                Jf_vmax_dm = Jf_vmax_fn(ca.DM.zeros(self.params.shape), 0)
-                self._f_0 = np.asarray(f_0_dm).ravel()
-                self._Jf_param = sp.csr_matrix(np.asarray(Jf_param_dm))
-                self._Jf_vmax = sp.csr_matrix(np.asarray(Jf_vmax_dm))
-                
-                self._f_full = np.zeros(int(f_0_dm.shape[0]), dtype=float)
-                self._f_idx = np.array(idx, dtype=int)
+            f_0_fn = ca.Function('f_0_fn', [self.params, self.V_MAX], [f])
+            Jf_param_fn = ca.Function('Jf_parama_fn', [self.params,self.V_MAX], [Jf_sym_param])
+            Jf_vmax_fn = ca.Function('Jf_Vmax_fn', [self.params,self.V_MAX], [Jf_sym_vmax])
+            f_0_dm = f_0_fn(ca.DM.zeros(self.params.shape), 0)
+            Jf_param_dm = Jf_param_fn(ca.DM.zeros(self.params.shape), 0)
+            Jf_vmax_dm = Jf_vmax_fn(ca.DM.zeros(self.params.shape), 0)
+            self._f_0 = np.asarray(f_0_dm).ravel()
+            self._Jf_param = sp.csr_matrix(np.asarray(Jf_param_dm))
+            self._Jf_vmax = sp.csr_matrix(np.asarray(Jf_vmax_dm))
+            
+            self._f_full = np.zeros(int(f_0_dm.shape[0]), dtype=float)
+            self._f_idx = np.array(idx, dtype=int)
               
               
     def _set_canon_form_mats(self): 
