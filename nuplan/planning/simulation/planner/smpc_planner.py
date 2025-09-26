@@ -145,6 +145,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.t = 0
         self.time_thresh = 5
         self.scenario_num = 0
+        self.mu_dim = 2*self.config['N'] * (self.config['num_tvs']+1) + 1
         print('SMPC Planner Instantiated')
 
     def initialize(self, initialization: PlannerInitialization) -> None:
@@ -435,7 +436,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 ca_duals_raidnet = None
 
             #update l1 and ca duals
-            update_dict.update({'l1_duals':l1_duals_raidnet, 'ca_duals':ca_duals_raidnet})
+            update_dict.update({'l1_duals':l1_duals_raidnet, 'ca_duals':np.repeat(ca_duals_raidnet, self.mu_dim) if ca_duals_raidnet is not None else None})
         self.prev_update_dict = update_dict
         self.smpc.update(update_dict) 
         sol = self.smpc.solve()

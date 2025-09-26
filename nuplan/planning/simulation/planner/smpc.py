@@ -17,7 +17,12 @@ import scipy.sparse as sp
 import torch 
 import matplotlib.pyplot as plt 
 import matplotlib.patches as patches 
-
+try:
+    from numba import njit
+    _HAS_NUMBA = True
+except Exception:
+    _HAS_NUMBA = False
+    
 logger = logging.getLogger(__name__) 
 class SMPC(): 
     def __init__(self, 
@@ -152,11 +157,11 @@ class SMPC():
         if not self.offline: 
             _,_,_,_ = self.update_gain_and_constr_keeps() 
         self.solve(first_solve=True) 
-        # if not self.offline: 
-        # # self.opti_copy = self.opti.copy() 
-        # #Used in online mode for faster replanning 
-        # # self.opti_copy.solver("ipopt", self.p_opts, self.s_opts) 
-        # 
+
+        self._constr_keep_buf = None
+        self._gain_keep_buf = None
+        self._prev_constr_keep = None
+        self._prev_gain_keep = None
     def _return_policy_class(self):
 
         """
@@ -356,18 +361,6 @@ class SMPC():
                         oa_ref = self.pos_tvs[k][m][:, t] + diff / (mahalanobis_norm + 1e-12)
                         base = (oa_ref - self.pos_tvs[k][m][:, t]).T @ self.Qs[k][m][t-1]
 
-                        # z (random part) and y (deterministic part)
-                        # z = (
-                        #     base
-                        #     @ ca.horzcat(
-                        #         self.dpos[t-1] @ (B[2*t, :] @ M + E[2*t, :]),
-                        #         *[
-                        #             self.dpos[t-1] @ B[2*t, :] @ K[l][self.mode_map[j][l]] @ E_tv[l][self.mode_map[j][l]][:2*self.N, :]
-                        #             - (int(l == k)) * self.dpos_tvs[k][m][t-1] @ E_tv[k][m][2*t, :]
-                        #             for l in range(self.N_TV)
-                        #         ]
-                        #     )
-                        # ).T
                         # z parts
                         ev_rand = self.dpos[t-1] @ (B[2*t, :] @ M + E[2*t, :])
                         tv_rand = []
@@ -380,8 +373,7 @@ class SMPC():
                         z_norm = self.tight * ca.sqrt(ca.sumsqr(z) + 1e-10)
 
                         y = (
-                            (oa_ref - self.pos_tvs[k][m][:, t]).T
-                            @ self.Qs[k][m][t-1]
+                            base
                             @ (self.x_pos[:, t] - oa_ref
                             + self.dpos[t-1] * (A[2*t, :] @ self.z_curr + B[2*t, :] @ h - (self.z_lin[0, t] - self.s0)))
                         )
@@ -409,9 +401,6 @@ class SMPC():
                             if self.solver == 'gurobi':
                                 self.opti.subject_to(soc_rows_gurobi_online[-1] > 0)
                         else:
-                            # soc_rows_online.append((y - z_norm)* self.constr_keep[k][j][t-1] + self.slack[k][m][t-1]) 
-                            # soc_rows_online.append(y*self.constr_keep[k][j][t-1] + self.slack[k][m][t-1] )
-                            # self.soc_constr_online[k][j][t-1]+=[y + self.slack[k][m][t-1] - z_norm, y + self.slack[k][m][t-1]]
                             if self.solver == 'gurobi':
                                 self.opti.subject_to(soc_rows_gurobi[-1] > 0)
                     # Impose all CA constraints at once for ipopt
@@ -502,6 +491,15 @@ class SMPC():
             self._solve_Q = solve_Q 
     
             self.Q = sp.csr_matrix(np.asarray(Q_num, dtype=float))
+
+            # -----------------------------------------
+            # Cache spectral bounds once (Q is constant across replans)
+            if not hasattr(self, "_eta_inv"):
+                eval_max = spla.eigsh(self.Q, k=1, which='LM', return_eigenvectors=False)[0]
+                eval_min = spla.eigsh(self.Q, k=1, which='LM', sigma=0, return_eigenvectors=False)[0]
+                self._eta_inv = 1.0 / float(eval_max)   # = 1 / λ_max(Q)
+                self._sigma   = 1.0 / float(eval_min)   # = 1 / λ_min(Q)
+
             Q_inv = ca.inv(Q) 
             L = self.l1_lmbd * self.L_fn(ca.DM.zeros(*self.vars_pol4screening.shape)) 
             self.L = sp.csr_matrix(np.asarray(L, dtype=float)) 
@@ -592,6 +590,9 @@ class SMPC():
         st = time.time()
         self.p = self._p_full
         self.p[self._p_idx] = self._p_0[self._p_idx] + (self._Jp @ par_val)[self._p_idx]
+        
+        self.p = self._np1d(self.p)
+        self.c = self._np1d(self.c)
         print(f"computing p time: {time.time()-st:.4f} seconds")
         
     def solve(self,first_solve=False): 
@@ -880,14 +881,17 @@ class SMPC():
             return None, None, None, self.gap
 
         # --- With screening (original behavior) ---
-        st_first = time.time()
         self.mu_dim = 2*self.N * (self.N_TV+1) + 1
-        self.num_ca_duals = len(ca_duals)
+        self.num_ca_duals = int(len(ca_duals)/self.mu_dim)
 
         # Recover feasible duals (unchanged call)
-        mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F,self.C, self.p, self.f,self.c,np.repeat(ca_duals, self.mu_dim), l1_duals)
+        st = time.time()
+        mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F,self.C, self.p, self.f,self.c,ca_duals, l1_duals)
+        print('[smpc.py]: Dual Approximation Time: ', time.time() - st, ' s')
+        st = time.time()
         self.gap = self._compute_gap_radius(mu, eta, g1)
         print(f"[smpc.py]: Gap Radius is {self.gap:.5f}")
+        print('[smpc.py]: Gap Radius Computation Time: ', time.time() - st, ' s')
 
         st = time.time()
         # Unflatten once (existing utility)
@@ -897,7 +901,6 @@ class SMPC():
             np.expand_dims(np.concatenate([l1_duals, ca_duals]), axis=0),
             l1_dual_dim=l1_dual_dim, ca_dual_dim=ca_dual_dim
         )
-
         # Buffers to batch-set into CasADi (avoid per-scalar set_value)
         gain_keep_buf = [
             [np.zeros((self.N-1, 1), dtype=float) for _ in range(self.N_modes[k])]
@@ -910,7 +913,6 @@ class SMPC():
 
         
         # Screening thresholds (keep logic unchanged)
-        TOL = 0.3
         M = len(self.mode_map)
         vars_kept = 0
         constr_kept = 0
@@ -991,20 +993,17 @@ class SMPC():
             eta : (n_eta, 1) nonnegative vector (column)
         """
         # --- handles / inputs as 1-D numpy ---
-        F = self.F; C = self.C; L = self.L
-        p = np.asarray(self.p).ravel()
-        f = np.asarray(self.f).ravel()
-        mu = np.asarray(mu).ravel()
-        g  = np.asarray(g).ravel()
+        mu = mu
+        g  = g
 
         # --- build b once ---
-        a = p + (C.T @ mu).ravel() + (L.T @ (2.0 * g - 1.0))
-        b = (F @ self._solve_Q(a)) + f
-        n = F.shape[0]
+        a = self.p + (self.C.T @ mu) + (self.L.T @ (2.0 * g - 1.0))
+        b = (self.F @ self._solve_Q(a)) + self.f
+        n = self.F.shape[0]
 
         # --- H*x = F Q^{-1} F^T x (+ rho x) ---
         def H_mv(x):
-            return F @ self._solve_Q(F.T @ x) + rho * x
+            return self.F @ self._solve_Q(self.F.T @ x) + rho * x
 
         # --- Hutchinson diag preconditioner (EMA cached) ---
         need_reset = (not hasattr(self, "_diagH")) or (getattr(self, "_diagH", None) is None) \
@@ -1117,7 +1116,7 @@ class SMPC():
             eta = self._polish_eta_active_set(eta, b, H_mv, k_top=24, cg_iters=3).ravel()
             eta = np.maximum(0.0, eta)
 
-        return eta.reshape(-1, 1)
+        return eta
 
     
     def _polish_eta_active_set(self, eta, b, H_mv, *,
@@ -1172,7 +1171,9 @@ class SMPC():
         eta_out = eta.copy()
         eta_out[A] = x
         return eta_out.reshape(-1, 1)
-
+    
+    def _np1d(self, v): return np.asarray(v, dtype=float).ravel()
+    
     def solve_dual_approximation(self, Q, L, F, C, p, f, c, ca_dual, l1_dual):
         """
         Dual LS solve using LinearOperators with ONE Q^{-1} per matvec.
@@ -1180,7 +1181,7 @@ class SMPC():
         Neutral g1 warm start (0.5). No right-preconditioning by default.
         Returns (mu, eta, g1).
         """
-        def _np1d(v): return np.asarray(v, dtype=float).ravel()
+
 
         st_first = time.time()
         n_mu, n_eta, n_g1 = C.shape[0], F.shape[0], L.shape[0]
@@ -1190,37 +1191,34 @@ class SMPC():
         # keep block sizes for SOC projection later
         self.blocks = [self.mu_dim - 1] * self.num_ca_duals
 
-        # ensure vectors
-        p = _np1d(p); c = _np1d(c); f = _np1d(f)
-
         # ---- build b with ONE Q^{-1} ----
         ones_ng1 = np.ones((n_g1, 1))
-        pmvec = _np1d(p.reshape(-1, 1) - (L.T @ ones_ng1))
-        w_b = _np1d(self._solve_Q(pmvec))       # one Q-solve
-        b = np.concatenate([-c - _np1d(C @ w_b),
-                            -f - _np1d(F @ w_b),
-                            -2.0 * _np1d(L @ w_b)])
+        pmvec = self._np1d(p.reshape(-1, 1) - (L.T @ ones_ng1))
+        w_b = self._np1d(self._solve_Q(pmvec))       # one Q-solve
+        b = np.concatenate([-c - self._np1d(C @ w_b),
+                            -f - self._np1d(F @ w_b),
+                            -2.0 * self._np1d(L @ w_b)])
 
         self.time_least_squares_formulation = time.time() - st_first
         print(f"[Dual Approximation] Least Squares Formulation Time: {self.time_least_squares_formulation:.6f} s")
-
+        st = time.time()
         # ---- A with ONE Q^{-1} per matvec/rmatvec ----
         def A_mv(x):
-            x = _np1d(x)
+            x = self._np1d(x)
             x1, x2, x3 = x[:n_mu], x[n_mu:n_mu+n_eta], x[n_mu+n_eta:]
-            s = _np1d(C.T @ x1 + F.T @ x2 + 2.0 * L.T @ x3)
-            w = _np1d(self._solve_Q(s))          # one Q-solve
-            return np.concatenate([_np1d(C @ w), _np1d(F @ w), _np1d(2.0 * L @ w)])
+            s = self._np1d(C.T @ x1 + F.T @ x2 + 2.0 * L.T @ x3)
+            w = self._np1d(self._solve_Q(s))          # one Q-solve
+            return np.concatenate([self._np1d(C @ w), self._np1d(F @ w), self._np1d(2.0 * L @ w)])
 
         def A_rmv(y):
-            y = _np1d(y)
+            y = self._np1d(y)
             y1, y2, y3 = y[:n_mu], y[n_mu:n_mu+n_eta], y[n_mu+n_eta:]
-            s = _np1d(C.T @ y1 + F.T @ y2 + 2.0 * L.T @ y3)
-            z = _np1d(self._solve_Q(s))          # one Q-solve
+            s = self._np1d(C.T @ y1 + F.T @ y2 + 2.0 * L.T @ y3)
+            z = self._np1d(self._solve_Q(s))          # one Q-solve
             out = np.empty(m, dtype=float)
-            out[:n_mu] = _np1d(C @ z)
-            out[n_mu:n_mu+n_eta] = _np1d(F @ z)
-            out[n_mu+n_eta:] = _np1d(2.0 * L @ z)
+            out[:n_mu] = self._np1d(C @ z)
+            out[n_mu:n_mu+n_eta] = self._np1d(F @ z)
+            out[n_mu+n_eta:] = self._np1d(2.0 * L @ z)
             return out
 
         A_op = spla.LinearOperator((m, m), matvec=A_mv, rmatvec=A_rmv, dtype=float)
@@ -1245,8 +1243,8 @@ class SMPC():
 
         # Selection
         S = sp.csr_matrix((np.ones(idx.size), (idx, np.arange(idx.size))), shape=(m, idx.size))
-        def Ar_mv(xr, A_op=A_op, S=S):  return _np1d(A_op.matvec(_np1d(S @ xr)))
-        def Ar_rmv(y,  A_op=A_op, S=S): return _np1d(S.T @ _np1d(A_op.rmatvec(_np1d(y))))
+        def Ar_mv(xr, A_op=A_op, S=S):  return self._np1d(A_op.matvec(self._np1d(S @ xr)))
+        def Ar_rmv(y,  A_op=A_op, S=S): return self._np1d(S.T @ self._np1d(A_op.rmatvec(self._np1d(y))))
         Ar = spla.LinearOperator((m, idx.size), matvec=Ar_mv, rmatvec=Ar_rmv, dtype=float)
 
         # ---- NO right-preconditioning and NO damp by default (stability first) ----
@@ -1264,6 +1262,8 @@ class SMPC():
         else:
             x0[n_mu+n_eta:] = 0.5
 
+        print(f"[Dual Approx] Time to build A: {time.time() - st:.6f} s")
+        
         st = time.time()
         x_red, istop, itn, r1norm, r2norm, anorm, acond, arnorm, xnorm, var = lsqr(
             Ar, b, atol=ls_tol, btol=ls_tol, iter_lim=ls_max_iter, x0=x0, damp=damp
@@ -1290,74 +1290,57 @@ class SMPC():
         grad_d = [C; F; 2L] Q^{-1} (C^T μ + F^T η + L^T(2g-1) + p) + [-c; f; 0] 
         with eta = 1/largest_eig(Q), sigma = 1/smallest_eig(Q). 
         """ 
-        st = time.time()
-        # ---- tiny helper: force 1-D numpy ---- 
-        _np1d = lambda v: np.asarray(v, dtype=float).ravel() 
-        
+        st_first = time.time()
         # ---- inputs as 1-D numpy ---- 
-        f_mu = _np1d(f_mu) 
         st = time.time() 
-        # eta_br = self._eta_best_response_fast(f_mu.reshape(-1,1), f_g.reshape(-1,1)) # or iters=10 for PGD 
         # inside your call site
         eta_br = self._eta_best_response_fast(
-            f_mu.reshape(-1,1), f_g.reshape(-1,1),
+            f_mu, f_g,
             iters=3,          # keep small
             tol=2e-3,
             rho=1e-3,
             use_nesterov=False,
             polish=True,      # <— enable
         )
-
+        f_nu = eta_br
         print(f'[smpc.py]: Best Response Time: {time.time()-st:.6f} s') 
-        f_nu = eta_br.ravel() 
-        f_nu = _np1d(f_nu) 
-        f_g = _np1d(f_g)
-        
-        # ---- sparse handles (set by solve_dual_approximation) ---- 
-        C = self.C # scipy.sparse 
-        F = self.F 
-        L = self.L 
-        p = _np1d(self.p) 
-        c = _np1d(self.c) 
-        f = _np1d(self.f) # ---- eigenvalues of Q (cache & print timing like before) ---- 
-        st = time.time() 
-        Q = sp.csr_matrix(self.Q) 
-        # largest 
-        self.largest_eig = spla.eigsh( Q, k=1, which='LM', v0=(self.largest_eig*np.ones(Q.shape[0]) if hasattr(self, 'largest_eig') else None), return_eigenvectors=False )[0] 
-        # smallest (shift-invert around 0) 
-        self.smallest_eig = spla.eigsh( Q, k=1, which='LM', sigma=0, v0=(self.smallest_eig*np.ones(Q.shape[0]) if hasattr(self, 'smallest_eig') else None), return_eigenvectors=False )[0]
-        solve_time = time.time() - st 
-        # print(f'[smpc.py]: Hessian Eigenvalue Computation Time: {solve_time:.6f} s')
-        eta, sigma = self.largest_eig**(-1), self.smallest_eig**(-1) 
-        
+                
         # ---- gradient of dual objective (no explicit stacks, use Q^{-1} apply) ---- 
         st = time.time() 
         ones_fg = np.ones_like(f_g)
-        temp = (C.T @ f_mu) + p + (F.T @ f_nu) + (L.T @ (2.0*f_g - ones_fg))
-        temp = _np1d(temp)
+        temp = (self.C.T @ f_mu) + self.p + (self.F.T @ f_nu) + (self.L.T @ (2.0*f_g - ones_fg))
         # Solve Q u = temp (uses cached factorization)
-        u = _np1d(self._solve_Q(temp)) 
+        u = self._solve_Q(temp)
         # grad_d blockwise: 
-        g1 = _np1d((C @ u)) 
-        g2 = _np1d(F @ u) 
-        g3 = _np1d(2*(L @ u)) 
-        grad_d = np.concatenate([g1 + c, g2 + f, g3])
+        g1 = (self.C @ u)
+        g2 = self.F @ u
+        g3 = 2*(self.L @ u)
+        grad_d = np.concatenate([g1 + self.c, g2 + self.f, g3])
         self.gradient_computation_time = time.time() - st 
         print(f'[smpc.py]: Dual gradient build time: {self.gradient_computation_time:.6f} s') 
         
         # ---- one projected step (alpha=1; equivalent to your proj_dual = dual - grad_d) ---- 
-        dual = np.concatenate([f_mu, f_nu, f_g])
-        #CHEATING 
-        # grad_d[C.shape[0]:C.shape[0]+F.shape[0]] = np.maximum(grad_d[C.shape[0]:C.shape[0]+F.shape[0]],0) 
+        dual = np.concatenate([f_mu, f_nu, f_g]) 
         proj_dual = dual - grad_d 
         
         # ---- projection to dual feasible set ---- 
-        n_mu = C.shape[0] 
-        n_eta = F.shape[0] 
+        n_mu = self.C.shape[0] 
+        n_eta = self.F.shape[0] 
         # μ ∈ SOC* (blockwise) 
         # self.blocks should be [self.mu_dim - 1] * self.num_ca_duals (set earlier). 
         # proj_dual[:n_mu] = self._proj_soc_dual_stacked_np(proj_dual[:n_mu], self.blocks).flatten() 
-        proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(proj_dual[:n_mu], -(g1-c), self.blocks, tol=1e-9).flatten() 
+        st = time.time()
+        # proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(proj_dual[:n_mu], -(g1-self.c), self.blocks, tol=1e-9).flatten() 
+        # proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(
+        #     proj_dual[:n_mu],
+        #     -(g1 - self.c),
+        #     self.blocks,
+        #     tol=1e-9
+        # ).ravel()
+
+        proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(proj_dual[:n_mu],-(g1 - self.c),self.blocks,tol=1e-9).ravel()
+
+        print(f'[smpc.py]: SOC dual projection time: {time.time()-st:.6f} s')
         # η ≥ 0 
         proj_dual[n_mu:n_mu+n_eta] = np.maximum(proj_dual[n_mu:n_mu+n_eta], 0.0) 
         # 0 ≤ g ≤ 1
@@ -1365,13 +1348,14 @@ class SMPC():
         
         # ---- gap radius ---- 
         st = time.time() 
-        gap = np.linalg.norm(dual - proj_dual) * (1.0 + sigma) / eta 
-        solve_time_norm = time.time() - st
-        print(f'[smpc.py]: Gap norm time: {solve_time_norm:.6f} s') 
+        # gap = np.linalg.norm(dual - proj_dual) * (1.0 + self._sigma) / self._eta_inv
+        gap = self._norm2_diff_inbuf(dual, proj_dual) * (1.0 + self._sigma) / self._eta_inv
+
+        print(f'[smpc.py]: Gap norm time: {time.time() - st:.6f} s') 
+        
         print(np.linalg.norm((dual - proj_dual)[:n_mu]))
         print(np.linalg.norm((dual - proj_dual)[n_mu:n_mu+n_eta]))
         print(np.linalg.norm((dual - proj_dual)[n_mu+n_eta:])) 
-        print('[smpc.py]: Gap radius Computation Time: ', time.time()-st)
         return gap 
 
     def _split_slack_vecfirst(self, s_stack, blocks): 
@@ -1388,23 +1372,102 @@ class SMPC():
             y_list.append(float(y_i)) 
             idx += n + 1 
         return y_list, z_list    
-                                  
-    def _proj_normal_soc_stacked_vecfirst(self, mu_stack, s_stack, blocks, tol=1e-10): 
-        """ 
-        Project stacked μ (z,y per block) onto ⨅_i N_K(s_i),
-        where 
-        s_stack supplies current slacks (z,y per block) in the same order. 
-        """ 
-        mu = np.asarray(mu_stack, float).ravel()
-        y_list, z_list = self._split_slack_vecfirst(s_stack, blocks) 
-        out = [] 
-        idx = 0 
-        for n, y_i, z_i in zip(blocks, y_list, z_list): 
-            mu_i = mu[idx: idx+n+1] 
-            mu_hat = self._proj_normal_soc_block_vecfirst(mu_i, y_i, z_i, tol=tol) 
-            out.append(mu_hat) 
-            idx += n + 1 
-        return np.concatenate(out)[:, None] 
+
+    def _proj_normal_soc_stacked_vecfirst(self, mu_stack, s_stack, blocks, tol=1e-10):
+        mu = np.asarray(mu_stack, dtype=np.float64).ravel(order="C")
+        s  = np.asarray(s_stack,  dtype=np.float64).ravel(order="C")
+        blk = np.asarray(blocks,  dtype=np.int64)
+        if _HAS_NUMBA:
+            out = _proj_normal_soc_stacked_vecfirst_numba(mu, s, blk, tol)
+            return out[:, None]
+        # ---- NumPy fallback (no generators) ----
+        out = np.empty_like(mu)
+        if blk.size == 0:
+            return out[:, None]
+        # prefix sums for starts
+        starts = np.empty(blk.size, dtype=np.int64)
+        starts[0] = 0
+        for i in range(1, blk.size):
+            starts[i] = starts[i-1] + (blk[i-1] + 1)
+        for i in range(blk.size):
+            n_i = int(blk[i]); s0 = int(starts[i])
+            z_i = s[s0:s0+n_i]; y_i = float(s[s0+n_i])
+            mu_i = mu[s0:s0+n_i+1]
+            nz = float(np.linalg.norm(z_i, 2))
+            phi = nz - y_i
+            if phi < -tol:
+                out[s0:s0+n_i+1] = 0.0
+                continue
+            if nz < tol and abs(y_i) < tol:
+                t = float(mu_i[-1]); x = mu_i[:-1]
+                tK, xK = self._proj_soc_np(-t, -x)  # onto K
+                out[s0:s0+n_i] = -xK; out[s0+n_i] = -tK
+                continue
+            u_z = z_i / (nz + 1e-16); u_y = -1.0
+            dot = float(np.dot(mu_i[:-1], u_z) + mu_i[-1] * u_y)
+            tau = 0.5 * max(0.0, dot)
+            out[s0:s0+n_i] = tau * u_z
+            out[s0+n_i]    = -tau
+        return out[:, None]
+
+
+    def _ensure_buf(self, n: int):
+        """Make sure we have a float64, C-contiguous buffer of length n."""
+        if not hasattr(self, "_buf_diff") or self._buf_diff is None or self._buf_diff.size != n:
+            self._buf_diff = np.empty(n, dtype=np.float64)
+
+    def _norm2_diff_inbuf(self, a, b):
+        """
+        Fast ‖a−b‖₂ using a reusable buffer (no allocation of (a-b)).
+        Requires 1D float64, C-contiguous; casts if needed.
+        """
+        a = np.asarray(a, dtype=np.float64).ravel(order="C")
+        b = np.asarray(b, dtype=np.float64).ravel(order="C")
+        assert a.shape == b.shape
+        self._ensure_buf(a.size)
+        buf = self._buf_diff
+        # buf = a - b  (in-place)
+        np.copyto(buf, a)
+        np.subtract(buf, b, out=buf)
+        # return sqrt(buf·buf) via BLAS-backed dot
+        return float(np.sqrt(np.dot(buf, buf)))
+
+    def _norm2_diff_chunked(self, a, b, chunk: int = 1 << 14):
+        """
+        Chunked version to keep working set small; also uses the same buffer.
+        """
+        a = np.asarray(a, dtype=np.float64).ravel(order="C")
+        b = np.asarray(b, dtype=np.float64).ravel(order="C")
+        assert a.shape == b.shape
+        self._ensure_buf(min(chunk, a.size))
+        buf = self._buf_diff
+        ss = 0.0
+        n = a.size
+        for i in range(0, n, chunk):
+            j = min(i + chunk, n)
+            np.subtract(a[i:j], b[i:j], out=buf[: (j - i)])
+            ss += float(np.dot(buf[: (j - i)], buf[: (j - i)]))
+        return float(np.sqrt(ss))
+
+    try:
+        from numba import njit, objmode
+        _HAS_NUMBA = True
+    except Exception:
+        _HAS_NUMBA = False
+    if _HAS_NUMBA:
+        # JIT just the chunked accumulator (keeps Python out of the loop)
+        @njit(cache=True, fastmath=True)
+        def _acc_ss_numba(a, b):
+            ss = 0.0
+            for i in range(a.size):
+                d = a[i] - b[i]
+                ss += d * d
+            return ss
+        def _norm2_diff_numba(self, a, b):
+            a = np.asarray(a, np.float64).ravel()
+            b = np.asarray(b, np.float64).ravel()
+            return float(np.sqrt(_acc_ss_numba(a, b)))
+
         
     def _proj_normal_soc_block_vecfirst(self, mu_zy, y, z, tol=1e-10): 
         """ 
@@ -1476,9 +1539,6 @@ class SMPC():
     
     def _safe_screen(self,dual, gap_radius, dual_type = "ca_dual"):
         keep = 1 
-        # if hasattr(self, 'cost_wo_slack'): 
-        # TOL = abs(self.cost_wo_slack)*0.20 #TODO: should it be dynamic? optimal cost changes as states and scenario change 
-        # # else: 
         TOL = 0.3 
         
         if dual_type == "ca_dual": 
@@ -1492,3 +1552,187 @@ class SMPC():
             if gap_radius < TOL and (np.linalg.norm(dual,ord=np.inf) + gap_radius < 1) and (min(abs(dual)) - gap_radius > 1e-3):
                 keep = 0
         return keep #output 1 or 0 
+
+
+'''
+Numba-accelerated Functions
+'''
+if _HAS_NUMBA:
+    @njit(cache=True)
+    def _proj_soc_K_numba(t, x):  # project (t, x) onto K = { (tau, y): ||y|| <= tau }
+        nx = 0.0
+        for i in range(x.size):
+            nx += x[i] * x[i]
+        nx = math.sqrt(nx)
+        if nx <= t:
+            # already in the cone
+            return t, x.copy()
+        if nx <= -t:
+            # projects to zero
+            return 0.0, np.zeros_like(x)
+        alpha = 0.5 * (nx + t)
+        scale = alpha / max(nx, 1e-12)
+        y = np.empty_like(x)
+        for i in range(x.size):
+            y[i] = scale * x[i]
+        return alpha, y
+
+    @njit(cache=True)
+    def _proj_normal_soc_stacked_vecfirst_numba(mu, s, blocks, tol):
+        """
+        Numba version. All inputs 1D np.float64 (mu,s) and 1D np.int64 (blocks).
+        Layout per block: (z[0:n], y)
+        Returns 1D np.float64 (same layout).
+        """
+        n_blocks = blocks.size
+        # prefix sums for block starts (each block length = n_i + 1)
+        starts = np.empty(n_blocks, np.int64)
+        if n_blocks > 0:
+            starts[0] = 0
+        for i in range(1, n_blocks):
+            starts[i] = starts[i-1] + (blocks[i-1] + 1)
+
+        out = np.empty_like(mu)
+
+        for i in range(n_blocks):
+            n_i = int(blocks[i])
+            s0  = int(starts[i])
+
+            # z_i view
+            # (Numba supports slicing, but we’ll loop for clarity/speed)
+            # compute nz = ||z_i||
+            nz = 0.0
+            for k in range(n_i):
+                v = s[s0 + k]
+                nz += v * v
+            nz = math.sqrt(nz)
+            y_i = float(s[s0 + n_i])
+            phi = nz - y_i
+
+            # Interior: normal cone is {0}
+            if phi < -tol:
+                for k in range(n_i + 1):
+                    out[s0 + k] = 0.0
+                continue
+
+            # Apex: s ~ 0 ⇒ N_K(0) = -K  (project mu onto -K)
+            if nz < tol and abs(y_i) < tol:
+                # project (-t, -x) onto K, then negate
+                t = float(mu[s0 + n_i])
+                # build -x
+                xm = np.empty(n_i, np.float64)
+                for k in range(n_i):
+                    xm[k] = -mu[s0 + k]
+                tK, xK = _proj_soc_K_numba(-t, xm)
+                # negate back to -K
+                for k in range(n_i):
+                    out[s0 + k] = -xK[k]
+                out[s0 + n_i] = -tK
+                continue
+
+            # Boundary (or slight infeasibility): project onto ray u = (z/nz, -1)
+            # dot = <mu, u> = mu_z · (z/nz) + mu_y * (-1)
+            dot = 0.0
+            for k in range(n_i):
+                dot += mu[s0 + k] * (s[s0 + k] / (nz + 1e-16))
+            dot += mu[s0 + n_i] * (-1.0)
+            tau = 0.5 * (dot if dot > 0.0 else 0.0)
+
+            # out_z = tau * z/nz, out_y = tau * (-1)
+            inv = 1.0 / (nz + 1e-16)
+            for k in range(n_i):
+                out[s0 + k] = tau * s[s0 + k] * inv
+            out[s0 + n_i] = -tau
+
+        return out
+    @njit(cache=True, fastmath=True)
+    def _pbb_loop_numba(H_mv_obj, b, D, inv_sqrtD, sqrtD, iters, tol, y0):
+        """
+        Projected BB in y-space for: min_{eta>=0} 0.5*eta^T H eta + b^T eta.
+        H is accessed via H_mv_obj (Python) inside small objmode blocks.
+        """
+        n = b.size
+        y = y0.copy()
+        invD = inv_sqrtD * inv_sqrtD  # 1/D
+
+        # grad_y(y) = inv_sqrtD * (H*eta + b), eta = inv_sqrtD * y
+        def grad_y(yv):
+            eta = inv_sqrtD * yv
+            with objmode(Heta='float64[:]'):
+                Heta = H_mv_obj(eta)
+            g = Heta + b
+            return inv_sqrtD * g
+
+        # PG norm at eta (∞-norm of min(H*eta + b, 0))
+        def pg_inf(eta):
+            with objmode(Heta='float64[:]'):
+                Heta = H_mv_obj(eta)
+            pg = Heta + b
+            infn = 0.0
+            for i in range(n):
+                if pg[i] > 0.0:
+                    pg[i] = 0.0
+                v = abs(pg[i])
+                if v > infn:
+                    infn = v
+            return infn
+
+        # init
+        g_prev = grad_y(y)
+        # fixed initial BB step: 1 / max(D)
+        Lest = 0.0
+        for i in range(n):
+            if D[i] > Lest:
+                Lest = D[i]
+        if Lest <= 1e-12:
+            Lest = 1.0
+        alpha = 1.0 / Lest
+
+        # early exit
+        eta0 = inv_sqrtD * y
+        if pg_inf(eta0) <= tol:
+            return eta0
+
+        for _ in range(iters):
+            # plain gradient step in y
+            y_trial = y - alpha * g_prev
+            # project to eta >= 0, back to y
+            eta = inv_sqrtD * y_trial
+            for i in range(n):
+                if eta[i] < 0.0:
+                    eta[i] = 0.0
+            y_new = sqrtD * eta
+
+            # new grad
+            g_new = grad_y(y_new)
+
+            # BB2 step: alpha = (s^T y)/(y^T y), with s = y_new - y, y = g_new - g_prev
+            s_dot = 0.0
+            ydiff_dot = 0.0
+            for i in range(n):
+                ds = y_new[i] - y[i]
+                dy = g_new[i] - g_prev[i]
+                s_dot += ds * ds
+                ydiff_dot += ds * dy
+            # safeguard
+            if ydiff_dot <= 1e-16:
+                # fallback to diagonal step 1/max(D)
+                alpha = 1.0 / Lest
+            else:
+                alpha = s_dot / ydiff_dot
+
+            # clamp alpha
+            if alpha < 1e-8:
+                alpha = 1e-8
+            elif alpha > 1e8:
+                alpha = 1e8
+
+            y = y_new
+            g_prev = g_new
+
+            # PG stop
+            eta_chk = inv_sqrtD * y
+            if pg_inf(eta_chk) <= tol:
+                break
+
+        return inv_sqrtD * y
