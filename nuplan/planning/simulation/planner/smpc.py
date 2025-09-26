@@ -354,21 +354,29 @@ class SMPC():
                         diff = self.x_pos[:, t] - self.pos_tvs[k][m][:, t]
                         mahalanobis_norm = ca.sqrt(diff.T @ self.Qs[k][m][t-1] @ diff)
                         oa_ref = self.pos_tvs[k][m][:, t] + diff / (mahalanobis_norm + 1e-12)
+                        base = (oa_ref - self.pos_tvs[k][m][:, t]).T @ self.Qs[k][m][t-1]
 
                         # z (random part) and y (deterministic part)
-                        z = (
-                            (oa_ref - self.pos_tvs[k][m][:, t]).T
-                            @ self.Qs[k][m][t-1]
-                            @ ca.horzcat(
-                                self.dpos[t-1] @ (B[2*t, :] @ M + E[2*t, :]),
-                                *[
-                                    self.dpos[t-1] @ B[2*t, :] @ K[l][self.mode_map[j][l]] @ E_tv[l][self.mode_map[j][l]][:2*self.N, :]
-                                    - (int(l == k)) * self.dpos_tvs[k][m][t-1] @ E_tv[k][m][2*t, :]
-                                    for l in range(self.N_TV)
-                                ]
-                            )
-                        ).T
-
+                        # z = (
+                        #     base
+                        #     @ ca.horzcat(
+                        #         self.dpos[t-1] @ (B[2*t, :] @ M + E[2*t, :]),
+                        #         *[
+                        #             self.dpos[t-1] @ B[2*t, :] @ K[l][self.mode_map[j][l]] @ E_tv[l][self.mode_map[j][l]][:2*self.N, :]
+                        #             - (int(l == k)) * self.dpos_tvs[k][m][t-1] @ E_tv[k][m][2*t, :]
+                        #             for l in range(self.N_TV)
+                        #         ]
+                        #     )
+                        # ).T
+                        # z parts
+                        ev_rand = self.dpos[t-1] @ (B[2*t, :] @ M + E[2*t, :])
+                        tv_rand = []
+                        for l in range(self.N_TV):
+                            term = self.dpos[t-1] @ B[2*t, :] @ K[l][self.mode_map[j][l]] @ E_tv[l][self.mode_map[j][l]][:2*self.N, :]
+                            if l == k:
+                                term = term - self.dpos_tvs[k][m][t-1] @ E_tv[k][m][2*t, :]
+                            tv_rand.append(term)
+                        z = (base @ ca.hcat([ev_rand] + tv_rand)).T   # one hcat, one @
                         z_norm = self.tight * ca.sqrt(ca.sumsqr(z) + 1e-10)
 
                         y = (
@@ -451,18 +459,42 @@ class SMPC():
         else: 
             #Precompute functions for constraints and variable screening 
             vars_epi = ca.DM.zeros(2*(self.N-1)*self.N_modes[0]*self.N_TV,1) 
-            self.F_fn = ca.Function('F_fn', [self.vars_pol4screening, self.params, self.V_MAX], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_c'](self.vars_pol4screening,self.params,self.V_MAX)),self.vars_pol4screening)]) 
+            self.F_fn = ca.Function('F_fn', [self.vars_pol4screening, self.params, self.V_MAX], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_c'](self.vars_pol4screening,self.params,self.V_MAX)),self.vars_pol4screening)], {'post_expand': True}) 
             self.L_fn = ca.Function('L_fn', [self.vars_pol4screening], [ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_l_i_l1'](self.vars_pol4screening,vars_epi)), self.vars_pol4screening)]) 
             self.C_fn = ca.Function('C_fn',[self.params, self.slack_vec],[ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape))]) 
             C = self.C_fn(np.ones(self.params.shape),ca.DM.zeros(*self.slack_vec.shape)) # Evaluate C_fn to get the shape and non-zero indices 
             self.C_shape = C.shape 
             self.nonzero_inds = np.nonzero(np.ravel(C,order='F'))[0] 
+            
             # Get the row and column indices of the non-zero elements in the sparse matrix 
             self.row_indices, self.col_indices = np.unravel_index(self.nonzero_inds, self.C_shape,order='F') 
             self.nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds] 
-            self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[self.nonzero_vec]) 
-            self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))]) 
+            # self.C_fn_nonzero = ca.Function('C_fn_nonzero',[self.params, self.slack_vec],[self.nonzero_vec]) 
+            self.nonzero_vec = ca.substitute(self.nonzero_vec, self.slack_vec, ca.DM.zeros(*self.slack_vec.shape)) # remove slack dependence
+            # --- build the nonzero-value function with graph expansion (no JIT) ---
+            # (inside the not self.offline block, right after you set self.nonzero_vec)
+            self.C_fn_nonzero = ca.Function(
+                'C_fn_nonzero',
+                [self.params],                      # no slack arg
+                [self.nonzero_vec],
+                {'post_expand': True}                  # <-- important for runtime speed
+            )
+
+            # --- one-time CSR skeleton (perm from (row,col)->CSR order) ---
+            rows = np.asarray(self.row_indices, dtype=np.int32)
+            cols = np.asarray(self.col_indices, dtype=np.int32)
+            nnz  = rows.size
+            coo  = sp.coo_matrix((np.arange(nnz, dtype=np.int32), (rows, cols)), shape=self.C_shape)
+            csr  = coo.tocsr()
+            self._perm_coo2csr = csr.data.copy().astype(np.int32)
+
+            self.C = sp.csr_matrix(
+                (np.zeros(nnz, dtype=float), csr.indices.copy(), csr.indptr.copy()),
+                shape=self.C_shape
+            )            
+            self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))], {'post_expand': True}) 
             Q, p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape)) 
+            
             #Q is constant, p is affine in params
             Q_num, _ = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,ca.DM.ones(*self.params.shape),ca.DM.zeros(*self.slack_vec.shape))
             Q_csc = sp.csc_matrix(Q_num + 1e-8*sp.eye(Q_num.shape[0])) 
@@ -538,11 +570,23 @@ class SMPC():
         print(f"computing f time: {time.time()-st:.4f} seconds")
         
         #construct sparse C matrix 
-        st = time.time()           
-        C = self.C_fn_nonzero(par_val, ca.DM.zeros(*self.slack_vec.shape))
-        self.C = sp.csr_matrix((np.array(C).reshape(-1), (self.row_indices, self.col_indices)), shape=self.C_shape) 
+        # st = time.time()           
+        # C = self.C_fn_nonzero(par_val, ca.DM.zeros(*self.slack_vec.shape))
+        # print(f"computing nonzero C elements time: {time.time()-st:.4f} seconds")
+        # print(f"nonzero C elements: {C.shape[0]} out of {self.C_shape[0]*self.C_shape[1]} total elements")
+        # st = time.time()
+        # self.C = sp.csr_matrix((np.array(C).reshape(-1), (self.row_indices, self.col_indices)), shape=self.C_shape) 
+        # print(f"computing C matrix time: {time.time()-st:.4f} seconds")
+
+        st = time.time()
+        Cvals = np.asarray(self.C_fn_nonzero(par_val)).ravel()
+        self.C.data[:] = Cvals[self._perm_coo2csr]  # reorder to CSR
+        print(f"computing nonzero C elements time: {time.time()-st:.4f} seconds")
+        print(f"nonzero C elements: {Cvals.size} out of {self.C_shape[0]*self.C_shape[1]} total elements")
+
+        st = time.time()
         self.c = self.c_fn(par_val) 
-        print(f"computing C,c time: {time.time()-st:.4f} seconds")
+        print(f"computing c time: {time.time()-st:.4f} seconds")
             
         #Here, ca.hessian outputs hessian, J_grad. #J_grad = Q*theta + p. Thus, if we evaluate J_grad with theta = 0, we get p. Note that hessian is not dependent on theta 
         st = time.time()
@@ -845,6 +889,7 @@ class SMPC():
         self.gap = self._compute_gap_radius(mu, eta, g1)
         print(f"[smpc.py]: Gap Radius is {self.gap:.5f}")
 
+        st = time.time()
         # Unflatten once (existing utility)
         l1_dual_dim = [self.N-1, self.N_modes, self.N_TV]
         ca_dual_dim = [self.N-1, len(self.mode_map), self.N_TV]
@@ -863,6 +908,7 @@ class SMPC():
             for _ in range(self.N_TV)
         ]
 
+        
         # Screening thresholds (keep logic unchanged)
         TOL = 0.3
         M = len(self.mode_map)
@@ -921,7 +967,7 @@ class SMPC():
         self.constr_kept = constr_kept
         print(f"vars:  {vars_kept} out of {g1.shape[0]}, constr: {constr_kept} out of {ca_duals.shape[0]}")
 
-        solve_time = time.time() - st_first
+        solve_time = time.time() - st
         print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
         return mu, eta, g1, self.gap         
 
@@ -1244,12 +1290,12 @@ class SMPC():
         grad_d = [C; F; 2L] Q^{-1} (C^T μ + F^T η + L^T(2g-1) + p) + [-c; f; 0] 
         with eta = 1/largest_eig(Q), sigma = 1/smallest_eig(Q). 
         """ 
+        st = time.time()
         # ---- tiny helper: force 1-D numpy ---- 
         _np1d = lambda v: np.asarray(v, dtype=float).ravel() 
         
         # ---- inputs as 1-D numpy ---- 
         f_mu = _np1d(f_mu) 
-        pdb.set_trace()
         st = time.time() 
         # eta_br = self._eta_best_response_fast(f_mu.reshape(-1,1), f_g.reshape(-1,1)) # or iters=10 for PGD 
         # inside your call site
@@ -1325,6 +1371,7 @@ class SMPC():
         print(np.linalg.norm((dual - proj_dual)[:n_mu]))
         print(np.linalg.norm((dual - proj_dual)[n_mu:n_mu+n_eta]))
         print(np.linalg.norm((dual - proj_dual)[n_mu+n_eta:])) 
+        print('[smpc.py]: Gap radius Computation Time: ', time.time()-st)
         return gap 
 
     def _split_slack_vecfirst(self, s_stack, blocks): 
