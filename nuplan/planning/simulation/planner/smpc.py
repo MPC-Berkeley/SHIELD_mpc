@@ -1257,7 +1257,7 @@ class SMPC():
 
         # ---- NO right-preconditioning and NO damp by default (stability first) ----
         ls_tol = float(self.config.get('ls_tol', 1e-5))
-        ls_max_iter = int(self.config.get('ls_max_iter', 5000))
+        ls_max_iter = int(self.config.get('ls_max_iter', 1000))
         damp = float(self.config.get('lsqr_damp', 0.0))  # 0 by default
 
         # neutral warm-start for g1
