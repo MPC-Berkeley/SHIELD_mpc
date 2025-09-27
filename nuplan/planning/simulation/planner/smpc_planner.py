@@ -421,7 +421,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 st = time.time()
                 l1_logits = self.RAID_NET_infer[0](obs_reshaped)
                 ca_logits = self.RAID_NET_infer[1](obs_reshaped)
-                self.raidnet_query_time = (time.time() - st)/10
+                self.raidnet_query_time = (time.time() - st)
                 print(f'[smpc_planner.py]: RAID-Net Inference Time: {self.raidnet_query_time:.3f} seconds')
 
                 #Classification

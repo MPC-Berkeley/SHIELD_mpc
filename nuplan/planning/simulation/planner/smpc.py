@@ -464,7 +464,20 @@ class SMPC():
             self.nonzero_vec = ca.vec(ca.substitute(ca.jacobian(ca.simplify(ca.vertcat(*self.canon_prob_fn['f_ca_i'](self.vars_pol4screening, self.params))), self.vars_pol4screening), self.vars_pol4screening, ca.DM.zeros(*self.vars_pol4screening.shape)))[self.nonzero_inds] 
             self.nonzero_vec = ca.substitute(self.nonzero_vec, self.slack_vec, ca.DM.zeros(*self.slack_vec.shape)) # remove slack dependence
             self.C_fn_nonzero = ca.Function('C_fn_nonzero', [self.params], [ca.simplify(self.nonzero_vec)], {'post_expand': True})
-
+            
+            # p_sx = ca.SX.sym('p', *self.params.shape)
+            # var_sx = ca.SX.sym('var', *self.vars_pol4screening.shape)
+            # # rebuild the same expression but using SX symbols:
+            # nonzero_vec_sx = ca.substitute(
+            #     ca.vec(ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_ca_i'](var_sx, p_sx)),
+            #                     var_sx)),
+            #     var_sx, ca.DM.zeros(*self.vars_pol4screening.shape)
+            # )
+            
+            # nonzero_vec_sx = nonzero_vec_sx[self.nonzero_inds]  # keep only nnz entries            
+            # self.C_fn_nonzero = ca.Function('C_fn_nonzero', [p_sx], [ca.simplify(nonzero_vec_sx)],{'post_expand':True})
+            
+            # # --- one-time CSR skeleton (perm from (row,col)->CSR order) ---
             rows = np.asarray(self.row_indices, dtype=np.int32)
             cols = np.asarray(self.col_indices, dtype=np.int32)
             nnz  = rows.size
@@ -476,6 +489,40 @@ class SMPC():
                 (np.zeros(nnz, dtype=float), csr.indices.copy(), csr.indptr.copy()),
                 shape=self.C_shape
             )     
+            # Symbols
+            # theta = self.vars_pol4screening          # decision vars
+            # p     = self.params
+
+            # # Constraint vector g(theta, p) you linearize for C = ∂g/∂theta
+            # g = ca.vertcat(*self.canon_prob_fn['f_ca_i'](theta, p))
+
+            # # Sparse Jacobian Function (returns (J, g))
+            # C = ca.jacobian(g, theta)
+            # C_fun = ca.Function('C_fun', [theta, p], [C[self.nonzero_inds]],
+            #                     {'post_expand': True}).expand()
+            
+            # C_full = ca.Function('C_full', [theta, p], [C], {'post_expand': True}).expand()
+
+            # # Freeze theta ≡ 0 so you don’t substitute each time
+            # theta0 = ca.DM.zeros(*theta.shape)
+
+            # # One-time: learn the sparse structure (CSC order)
+            # C0 = J_full(theta0, ca.DM.zeros(*p.shape))
+            # S = C0.sparsity()
+            # rows   = np.asarray(S.row(),    dtype=np.int32)   # nnz
+            # colptr = np.asarray(S.colind(), dtype=np.int32)   # ncol+1
+            # nrows, ncols = S.size1(), S.size2()
+            # nnz = rows.size
+
+            # self.C = sp.csc_matrix(
+            #     (np.zeros(nnz, dtype=float), rows.copy(), colptr.copy()),
+            #     shape=(nrows, ncols)
+            # )
+
+            # # Stash handles
+            # self._C_fun = C_fun
+            # self._theta0 = theta0
+ 
             self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))], {'post_expand': True}) 
             Q, p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape)) 
             
@@ -551,12 +598,12 @@ class SMPC():
         #In online mode, vars_epi is not defined. So, set it to zero 
         par_val = self.opti.value(self.params)
 
-        # st = time.time()
+        st = time.time()
         self.F = self.F_fn(ca.DM.zeros(*self.vars_pol4screening.shape),par_val,self.opti.value(self.V_MAX))
         self.F = sp.csr_matrix(np.array(self.F))
         # print(f"computing F time: {time.time()-st:.4f} seconds")
         
-        # st = time.time()
+        st = time.time()
         self.f = self._f_full
         self.f = (self._f_0
                 + (self._Jf_param @ par_val)
@@ -565,16 +612,21 @@ class SMPC():
         # print(f"computing f time: {time.time()-st:.4f} seconds")
         
         #construct sparse C matrix 
-        # st = time.time()
+        st = time.time()
+        # Evaluate sparse Jacobian at (theta=0, p = par_val)
+        # C_dm  = self._C_fun(self._theta0, par_val)
+        # csc_vals = np.asarray(J_dm).ravel()      # (nnz,)
+        # self.C.data[:] = C_dm.full().reshape(-1)
+
         self.C.data[:] = self.C_fn_nonzero(par_val).full().reshape(-1)  # reorder to CSR
         # print(f"computing C's csr time: {time.time()-st:.4f} seconds")
 
-        # st = time.time()
+        st = time.time()
         self.c = self.c_fn(par_val) 
         # print(f"computing c time: {time.time()-st:.4f} seconds")
             
         #Here, ca.hessian outputs hessian, J_grad. #J_grad = Q*theta + p. Thus, if we evaluate J_grad with theta = 0, we get p. Note that hessian is not dependent on theta 
-        # st = time.time()
+        st = time.time()
         self.p = self._p_full
         self.p[self._p_idx] = self._p_0[self._p_idx] + (self._Jp @ par_val)[self._p_idx]
         self.p = self._np1d(self.p)
@@ -688,8 +740,6 @@ class SMPC():
             gain_keep=[[self.opti.value(self.gain_keep[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
             constr_keep=[[self.opti.value(self.constr_keep[k][m]) for m in range(len(self.mode_map))] for k in range(self.N_TV)] 
             # constr_keep=[[self.constr_keep[k][m] for m in range(len(self.mode_map))] for k in range(self.N_TV)] 
-            # print(f'Gain Keep: {gain_keep}') 
-            # print(f'Constr Keep: {constr_keep}') 
             
             sol_dict['gain_keep'] = gain_keep 
             sol_dict['constr_keep'] = constr_keep 
@@ -836,7 +886,7 @@ class SMPC():
         if l1_duals is None:
             self.gap = None
             print(f"[smpc.py]: Gap Radius is {self.gap}")
-            # st = time.time()
+            st = time.time()
 
             ones_vec = np.ones((self.N - 1, 1), dtype=float)
 
@@ -865,19 +915,19 @@ class SMPC():
         self.num_ca_duals = int(len(ca_duals) / self.mu_dim)
 
         # --- recover duals (unchanged pipeline) ---
-        # st = time.time()
+        st = time.time()
         mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C,
                                                     self.p, self.f, self.c,
                                                     ca_duals, l1_duals)
         # print('[smpc.py]: Dual Approximation Time: ', time.time() - st, ' s')
 
-        # st = time.time()
+        st = time.time()
         self.gap = self._compute_gap_radius(mu, eta, g1)
         print(f"[smpc.py]: Gap Radius is {self.gap:.5f}")
         # print('[smpc.py]: Gap Radius Computation Time: ', time.time() - st, ' s')
 
         # Shapes and helpers
-        # st = time.time()
+        st = time.time()
         num_t = self.N - 1
         M = len(self.mode_map)
         K = self.N_TV
@@ -964,7 +1014,7 @@ class SMPC():
         self.vars_kept = vars_kept
         self.constr_kept = constr_kept
 
-        print(f"vars:  {vars_kept} out of {g1.shape[0]}, constr: {constr_kept} out of {len(ca_duals)}")
+        print(f"vars:  {vars_kept} out of {g1.shape[0]}, constr: {constr_kept} out of {len(ca_duals/self.mu_dim)}")
         # print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', time.time() - st, ' s')
         # Keep your original return signature
         return mu, eta, g1, self.gap
@@ -1061,7 +1111,7 @@ class SMPC():
         eta_proj0 = np.maximum(0.0, inv_sqrtD * (y - 1.25 * gk0))
         pg0 = np.minimum(_vec1(H_mv(eta_proj0)) + b, 0.0)
         if np.linalg.norm(pg0, ord=np.inf) <= tol:
-            return eta_proj0.reshape(-1, 1)
+            return eta_proj0
 
         tau = 1.25
 
@@ -1194,7 +1244,7 @@ class SMPC():
         st_first = time.time()
         n_mu, n_eta, n_g1 = C.shape[0], F.shape[0], L.shape[0]
         m = n_mu + n_eta + n_g1
-        # print(f"[Dual Approx] Dimensions: n_mu={n_mu}, n_eta={n_eta}, n_g1={n_g1}, total={m}")
+        print(f"[Dual Approx] Dimensions: n_mu={n_mu}, n_eta={n_eta}, n_g1={n_g1}, total={m}")
 
         # keep block sizes for SOC projection later
         self.blocks = [self.mu_dim - 1] * self.num_ca_duals
@@ -1208,8 +1258,8 @@ class SMPC():
                             -2.0 * self._np1d(L @ w_b)])
 
         self.time_least_squares_formulation = time.time() - st_first
-        # print(f"[Dual Approximation] Least Squares Formulation Time: {self.time_least_squares_formulation:.6f} s")
-        # st = time.time()
+        print(f"[Dual Approximation] Least Squares Formulation Time: {self.time_least_squares_formulation:.6f} s")
+        st = time.time()
         # ---- A with ONE Q^{-1} per matvec/rmatvec ----
         def A_mv(x):
             x = self._np1d(x)
@@ -1257,7 +1307,7 @@ class SMPC():
 
         # ---- NO right-preconditioning and NO damp by default (stability first) ----
         ls_tol = float(self.config.get('ls_tol', 1e-5))
-        ls_max_iter = int(self.config.get('ls_max_iter', 1000))
+        ls_max_iter = int(self.config.get('ls_max_iter', 5000))
         damp = float(self.config.get('lsqr_damp', 0.0))  # 0 by default
 
         # neutral warm-start for g1
@@ -1270,7 +1320,7 @@ class SMPC():
         else:
             x0[n_mu+n_eta:] = 0.5
 
-        # print(f"[Dual Approx] Time to build A: {time.time() - st:.6f} s")
+        print(f"[Dual Approx] Time to build A: {time.time() - st:.6f} s")
         
         st = time.time()
         x_red, istop, itn, r1norm, r2norm, anorm, acond, arnorm, xnorm, var = lsqr(
@@ -1301,7 +1351,7 @@ class SMPC():
         """ 
         st_first = time.time()
         # ---- inputs as 1-D numpy ---- 
-        # st = time.time() 
+        st = time.time() 
         # inside your call site
         eta_br = self._eta_best_response_fast(
             f_mu, f_g,
@@ -1315,7 +1365,7 @@ class SMPC():
         # print(f'[smpc.py]: Best Response Time: {time.time()-st:.6f} s') 
                 
         # ---- gradient of dual objective (no explicit stacks, use Q^{-1} apply) ---- 
-        # st = time.time() 
+        st = time.time() 
         ones_fg = np.ones_like(f_g)
         temp = (self.C.T @ f_mu) + self.p + (self.F.T @ f_nu) + (self.L.T @ (2.0*f_g - ones_fg))
         # Solve Q u = temp (uses cached factorization)
@@ -1327,7 +1377,7 @@ class SMPC():
         # grad_d = np.concatenate([g1 + self.c, g2 + self.f, g3])
         self.gradient_computation_time = time.time() - st 
         # print(f'[smpc.py]: Dual gradient build time: {self.gradient_computation_time:.6f} s') 
-        # st = time.time()
+        st = time.time()
         # ---- one projected step (alpha=1; equivalent to your proj_dual = dual - grad_d) ---- 
         dual = np.concatenate([f_mu, f_nu, f_g]) 
         # proj_dual = dual - grad_d 
@@ -1346,7 +1396,7 @@ class SMPC():
         proj_dual[n_mu+n_eta:] = np.clip(proj_dual[n_mu+n_eta:], 0.0, 1.0) 
         # print(f'[smpc.py]: Dual projection time: {time.time()-st:.6f} s')
         # ---- gap radius ---- 
-        # st = time.time() 
+        st = time.time() 
         # gap = np.linalg.norm(dual - proj_dual) * (1.0 + self._sigma) / self._eta_inv
         gap = self._norm2_diff_inbuf(dual, proj_dual) * (1.0 + self._sigma) / self._eta_inv
         # print(f'[smpc.py]: Gap norm time: {time.time() - st:.6f} s') 

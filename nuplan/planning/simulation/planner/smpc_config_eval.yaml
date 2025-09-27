@@ -20,7 +20,7 @@ eval_mode: True
 expert_only: False
 save_snapshots: True
 prediction_method: wayformer #['idm', 'wayformer']
-solver: 'gurobi' #['ipopt', 'gurobi']
+solver: 'ipopt' #['ipopt', 'gurobi']
 save_canon_forms: False
 reduced_ls: True
 best_response: True
