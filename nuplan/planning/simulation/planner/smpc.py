@@ -94,7 +94,6 @@ class SMPC():
             self.time_least_squares_solve = np.nan 
         self.p_opts = {'expand': False, 'print_time':0, 'verbose' :False, 'error_on_fail':0} 
         self.s_opts = {'print_level': 0,'tol':1e-4,'max_wall_time': 120.,'constr_viol_tol':1e-4}
-        # if eval_mode: # s_opts.update({'max_wall_time': 15.,'constr_viol_tol':1e-4}) 
         s_opts_grb = {'OutputFlag': 0, 'PSDTol' : 1e-3, 'FeasibilityTol' : 1e-3, 'BarConvTol':1e-3, 'BarQCPConvTol':1e-3, 'LogToConsole': 0}
         p_opts_grb = {'expand': False,'error_on_fail':0, 'verbose':False, 'ad_weight':0} 
         self.solver=solver 
@@ -606,15 +605,10 @@ class SMPC():
                     self.opti.set_initial(self.vars_pol, self.vars_ws) 
                 if self.vars_epi_ws is not None: 
                     self.opti.set_initial(self.vars_epi, self.vars_epi_ws) 
-                else: 
-                    if self.vars_ws is not None: 
-                        self.opti.set_initial(self.vars_pol4screening, self.vars_ws) 
-                    if self.solver == "ipopt": 
-                        if hasattr(self, 'sol'):
-                            try: 
-                                self.opti.set_initial(self.opti.lam_g, self.sol.value(self.opti.lam_g)) 
-                            except: 
-                                pass 
+            else: 
+                if self.vars_ws is not None: 
+                    self.opti.set_initial(self.vars_pol4screening, self.vars_ws)
+
             st = time.time() 
             self.sol = self.opti.solve() 
             solve_time = time.time() - st 
@@ -633,7 +627,7 @@ class SMPC():
             if self.offline and not first_solve: 
                 self.vars_ws , self.vars_epi_ws = self.sol.value(self.vars_pol), self.sol.value(self.vars_epi) 
             elif not self.offline and not first_solve: 
-                self.vars_ws = self.sol.value(self.vars_pol4screening)             
+                self.vars_ws = self.sol.value(self.vars_pol4screening)      
             if self.offline and self.solver=='ipopt':
                 #g1 dual 
                 l1_duals=[[[[self.sol.value(self.opti.dual(self.l1_constr[k][j][t][0]))] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
