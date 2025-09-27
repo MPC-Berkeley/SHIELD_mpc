@@ -162,6 +162,7 @@ class SMPC():
         self._gain_keep_buf = None
         self._prev_constr_keep = None
         self._prev_gain_keep = None
+        
     def _return_policy_class(self):
 
         """
@@ -388,6 +389,9 @@ class SMPC():
                                     self.l1_constr[k][m][t-1]+=[K[k][m][t,2*t:2*(t+1)]<=self.gain_l1[k][m][t-1], -self.gain_l1[k][m][t-1]<=K[k][m][t,2*t:2*(t+1)]]
                                     self.opti.subject_to(self.l1_constr[k][m][t-1][0])
                                     self.opti.subject_to(self.l1_constr[k][m][t-1][1])
+                            else:
+                                 self.lin_ineq_l1+=[K[k][m][t,2*t:2*(t+1)]-self.gain_l1[k][m][t-1]] #only the first constraint: g1
+                                 
                         # Collect the two scalar rows for this t
                         soc_rows.append(y + self.slack[k][m][t-1] - z_norm)
                         soc_rows.append(y + self.slack[k][m][t-1])
@@ -848,134 +852,150 @@ class SMPC():
 
     def update_gain_and_constr_keeps(self, l1_duals=None, ca_duals=None):
         """
-        Faster version (~5-10x): batch updates to CasADi, fewer Python ops.
+        Faster version: vectorized SOC (μ) screening and time-vectorized gain (g1) screening.
         Preserves return values and side effects.
-        """
-        # Fast path: no screening → set all ones in batch and return quickly.
+        """        
+        # ---------------------- NO-SCREENING FAST PATH ----------------------
         if l1_duals is None:
             self.gap = None
             print(f"[smpc.py]: Gap Radius is {self.gap}")
             st = time.time()
 
-            # Build dense ones once
-            ones_vec = np.ones((self.N-1, 1), dtype=float)
+            ones_vec = np.ones((self.N - 1, 1), dtype=float)
 
-            # Gain keeps: shape (N_TV x N_modes[k]) of parameter vectors
+            # Gain keeps
             for k in range(self.N_TV):
                 for j in range(self.N_modes[k]):
                     self.opti.set_value(self.gain_keep[k][j], ones_vec)
 
-            # Constraint keeps: shape (N_TV x len(mode_map)) of parameter vectors
+            # Constraint keeps
             M = len(self.mode_map)
             for k in range(self.N_TV):
                 for m in range(M):
                     self.opti.set_value(self.constr_keep[k][m], ones_vec)
 
-            vars_kept = 2 * (self.N-1) * sum(self.N_modes)  # each gain_keep gives 2 scalars per t
-            constr_kept = (self.N-1) * self.N_TV * M
+            vars_kept = 2 * (self.N - 1) * sum(self.N_modes)  # two gain entries per time if kept
+            constr_kept = (self.N - 1) * self.N_TV * M
             self.vars_kept = vars_kept
             self.constr_kept = constr_kept
 
-            solve_time = time.time() - st
-            print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
+            print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', time.time() - st, ' s')
             return None, None, None, self.gap
 
-        # --- With screening (original behavior) ---
-        self.mu_dim = 2*self.N * (self.N_TV+1) + 1
-        self.num_ca_duals = int(len(ca_duals)/self.mu_dim)
+        # ---------------------- WITH SCREENING ----------------------
+        # Compute dual dimensions
+        self.mu_dim = 2 * self.N * (self.N_TV + 1) + 1
+        self.num_ca_duals = int(len(ca_duals) / self.mu_dim)
 
-        # Recover feasible duals (unchanged call)
+        # --- recover duals (unchanged pipeline) ---
         st = time.time()
-        mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F,self.C, self.p, self.f,self.c,ca_duals, l1_duals)
+        mu, eta, g1 = self.solve_dual_approximation(self.Q, self.L, self.F, self.C,
+                                                    self.p, self.f, self.c,
+                                                    ca_duals, l1_duals)
         print('[smpc.py]: Dual Approximation Time: ', time.time() - st, ' s')
+
         st = time.time()
         self.gap = self._compute_gap_radius(mu, eta, g1)
         print(f"[smpc.py]: Gap Radius is {self.gap:.5f}")
         print('[smpc.py]: Gap Radius Computation Time: ', time.time() - st, ' s')
 
+        # Shapes and helpers
         st = time.time()
-        # Unflatten once (existing utility)
-        l1_dual_dim = [self.N-1, self.N_modes, self.N_TV]
-        ca_dual_dim = [self.N-1, len(self.mode_map), self.N_TV]
-        l1_duals_list, ca_duals_list = unflatten_duals(
+        num_t = self.N - 1
+        M = len(self.mode_map)
+        K = self.N_TV
+        TOL = 0.3  # same as _safe_screen default
+
+        # ---------- VECTORIZE: SOC (μ) SCREENING ----------
+        # μ comes back flat; reshape to (K, M, T, mu_dim) with t as innermost in your build
+        try:
+            mu_mat = mu.reshape(K, M, num_t, self.mu_dim)
+        except ValueError:
+            # Fallback if shape unexpected: treat third dim as T and broadcast K,M=1
+            mu_mat = mu.reshape(1, 1, -1, self.mu_dim)
+            K, M, num_t = mu_mat.shape[0], mu_mat.shape[1], mu_mat.shape[2]
+
+        # Vectorized norm over the μ blocks
+        mu_norm = np.linalg.norm(mu_mat, axis=3)  # (K, M, T)
+
+        # Keep rule: ||μ||_2 + gap >= TOL
+        keep_vec = (mu_norm + self.gap >= TOL)
+
+        # Respect predicted-active ternary from ca_duals (same (k,m,t) order)
+        ca_duals = ca_duals[0:-1:self.mu_dim]
+        ca_act = (np.asarray(ca_duals, dtype=float).reshape(K, M, num_t)) > 0.0
+        keep_vec |= ca_act
+
+        # Push back SOC keeps per (k,m) as (T,1) vectors
+        constr_kept = int(keep_vec.sum())
+        for k in range(K):
+            for m in range(M):
+                self.opti.set_value(self.constr_keep[k][m],
+                                    keep_vec[k, m, :].astype(float).reshape(num_t, 1))
+        # ---------- VECTORIZE: GAIN (g1) SCREENING ----------
+        # Unflatten for quick "always-keep" mask
+        l1_dual_dim = [self.N - 1, self.N_modes, self.N_TV]
+        ca_dual_dim = [self.N - 1, len(self.mode_map), self.N_TV]
+        l1_duals_list, _ = unflatten_duals(
             np.expand_dims(np.concatenate([l1_duals, ca_duals]), axis=0),
             l1_dual_dim=l1_dual_dim, ca_dual_dim=ca_dual_dim
         )
-        # Buffers to batch-set into CasADi (avoid per-scalar set_value)
-        gain_keep_buf = [
-            [np.zeros((self.N-1, 1), dtype=float) for _ in range(self.N_modes[k])]
-            for k in range(self.N_TV)
-        ]
-        constr_keep_buf = [
-            [np.zeros((self.N-1, 1), dtype=float) for _ in range(len(self.mode_map))]
-            for _ in range(self.N_TV)
-        ]
 
-        
-        # Screening thresholds (keep logic unchanged)
-        M = len(self.mode_map)
+        # Precompute prefix sums of modes for indexing into g1
+        # Layout assumption for L rows:
+        #   order by k (TV), then j (local mode), then t, with 2 entries per t
+        modes = np.asarray(self.N_modes, dtype=int)
+        modes_prefix = np.zeros(self.N_TV, dtype=int)
+        if self.N_TV > 1:
+            modes_prefix[1:] = np.cumsum(modes[:-1])
+
         vars_kept = 0
-        constr_kept = 0
+        gap = float(self.gap)
 
-        # We need a running index for each CA constraint's μ-slice inside 'mu'
-        ca_constr_ind_counter = 0
-
-        for k in range(self.N_TV):
-            for m in range(M):
-                j = self.mode_map[m][k]  # local mode index for TV k
-                for t in range(self.N-1):
-                    # ---- L1 gain screening ----
-                    # Original "tertiary" check preserved:
-                    if (0 in l1_duals_list[k][j][t]) or (2 in l1_duals_list[k][j][t]):
-                        gain_keep_val = 1
-                    else:
-                        # slice of g1 for this (k,j,t): two entries
-                        g1_slice = g1[
-                            len(self.mode_map[m][:k])*2*(self.N-1) + j*2*(self.N-1) + 2*t :
-                            len(self.mode_map[m][:k])*2*(self.N-1) + j*2*(self.N-1) + 2*(t+1)
-                        ]
-                        gain_keep_val = self._safe_screen(
-                            g1_slice, gap_radius=self.gap, dual_type='l1_dual'
-                        )
-                    gain_keep_buf[k][j][t, 0] = gain_keep_val
-                    if gain_keep_val:
-                        vars_kept += 2  # two gain entries per time step
-
-                    # ---- CA constraint screening ----
-                    if ca_duals_list[k][j][t][0]:
-                        constr_keep_val = 1
-                    else:
-                        mu_slice = mu[
-                            self.mu_dim * ca_constr_ind_counter :
-                            self.mu_dim * (ca_constr_ind_counter + 1)
-                        ]
-                        constr_keep_val = self._safe_screen(
-                            mu_slice, gap_radius=self.gap, dual_type='ca_dual'
-                        )
-                    ca_constr_ind_counter += 1
-                    constr_keep_buf[k][m][t, 0] = constr_keep_val
-                    constr_kept += constr_keep_val
-
-        # Single set_value per vector parameter (huge win)
         for k in range(self.N_TV):
             for j in range(self.N_modes[k]):
-                self.opti.set_value(self.gain_keep[k][j], gain_keep_buf[k][j])
+                # "always keep" from primal-active duals: (0 in …) or (2 in …)
+                active_mask = np.array(
+                    [(0 in l1_duals_list[k][j][t]) or (2 in l1_duals_list[k][j][t])
+                    for t in range(num_t)], dtype=bool
+                )
 
-        for k in range(self.N_TV):
-            for m in range(M):
-                self.opti.set_value(self.constr_keep[k][m], constr_keep_buf[k][m])
+                keep_t = np.zeros(num_t, dtype=float)
+                keep_t[active_mask] = 1.0
+
+                # Remaining time steps: apply safety screen on g1 2-vectors
+                if not active_mask.all():
+                    base = 2 * num_t * (int(modes_prefix[k]) + int(j))
+                    idx0 = base + 2 * np.arange(num_t)
+                    idx1 = idx0 + 1
+                    g1_pairs = np.vstack([g1[idx0], g1[idx1]]).T  # (T, 2)
+
+                    # Vectorized _safe_screen("l1_dual") logic:
+                    # (gap < 0.3) AND (||·||∞ + gap < 1) AND (min(|·|) - gap > 1e-3) → DROP
+                    cond_drop = (gap < 0.3) & \
+                                ((np.max(np.abs(g1_pairs), axis=1) + gap) < 1.0) & \
+                                ((np.min(np.abs(g1_pairs), axis=1) - gap) > 1e-3)
+
+                    # keep = ~drop for those not already active-kept
+                    upd_mask = ~active_mask
+                    keep_t[upd_mask] = (~cond_drop[upd_mask]).astype(float)
+
+                # Count & push (2 gains per time if kept)
+                vars_kept += int(2 * np.sum(keep_t))
+                self.opti.set_value(self.gain_keep[k][j], keep_t.reshape(num_t, 1))
 
         self.vars_kept = vars_kept
         self.constr_kept = constr_kept
-        print(f"vars:  {vars_kept} out of {g1.shape[0]}, constr: {constr_kept} out of {ca_duals.shape[0]}")
 
-        solve_time = time.time() - st
-        print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', solve_time, ' s')
-        return mu, eta, g1, self.gap         
+        print(f"vars:  {vars_kept} out of {g1.shape[0]}, constr: {constr_kept} out of {len(ca_duals)}")
+        print('[smpc.py]: Update Gain and Constraint Setting Keep Time: ', time.time() - st, ' s')
+        # Keep your original return signature
+        return mu, eta, g1, self.gap
 
+       
     def _eta_best_response_fast(
         self, mu, g, *,
-        iters: int = 3,            # tiny; usually enough with warm-start
+        iters: int = 3,            # small; usually enough with warm-start
         tol: float = 8e-4,
         rho: float = 3e-3,         # small proximal ridge on H
         precond_probes: int = 4,   # Hutchinson probes for diag(H)
@@ -984,42 +1004,57 @@ class SMPC():
         armijo_beta: float = 0.6,  # backtracking shrink
         armijo_sigma: float = 5e-5,# sufficient decrease
         polish: bool = True,       # tiny active-set NNLS polish
+        max_armijo_tries: int = 2, # cap backtracking work
     ):
         """
-        Fast projected solver for:  min_{eta >= 0} 0.5*eta^T H eta + b^T eta,
-        where H = F Q^{-1} F^T (+ rho I),  b = F Q^{-1}(p + C^T mu + L^T(2g-1)) + f.
+        Solve: min_{eta >= 0} 0.5*eta^T H eta + b^T eta
+        with H = F Q^{-1} F^T (+ rho I),  b = F Q^{-1}(p + C^T mu + L^T(2g-1)) + f.
 
         Returns:
             eta : (n_eta, 1) nonnegative vector (column)
         """
-        # --- handles / inputs as 1-D numpy ---
-        mu = mu
-        g  = g
+        import numpy as np
 
-        # --- build b once ---
-        a = self.p + (self.C.T @ mu) + (self.L.T @ (2.0 * g - 1.0))
-        b = (self.F @ self._solve_Q(a)) + self.f
-        n = self.F.shape[0]
+        # --- helpers: force 1-D float64 ---
+        _vec1 = lambda x: np.asarray(x, dtype=np.float64).reshape(-1)
 
-        # --- H*x = F Q^{-1} F^T x (+ rho x) ---
-        def H_mv(x):
-            return self.F @ self._solve_Q(self.F.T @ x) + rho * x
+        # Shapes
+        n_eta = int(self.F.shape[0])
 
-        # --- Hutchinson diag preconditioner (EMA cached) ---
-        need_reset = (not hasattr(self, "_diagH")) or (getattr(self, "_diagH", None) is None) \
-                    or (self._diagH.shape[0] != n) or (getattr(self, "_diagH_age", 1e9) > 20)
+        # --- inputs as 1-D ---
+        mu = _vec1(mu)
+        g  = _vec1(g)
+
+        # --- build b (strict 1-D) ---
+        a = _vec1(self.p) + _vec1(self.C.T @ mu) + _vec1(self.L.T @ (2.0 * g - 1.0))
+        w = _vec1(self._solve_Q(a))
+        b = _vec1(self.F @ w) + _vec1(self.f)
+
+        # --- H*x = F Q^{-1} F^T x (+ rho x) with fused, bufferized matvec if available ---
+        if hasattr(self, "_make_H_mv"):
+            H_mv = self._make_H_mv(rho=rho)
+        else:
+            # fallback (slower, but correct)
+            Ft = self.F.T
+            def H_mv(x):
+                return _vec1(self.F @ self._solve_Q(_vec1(Ft @ _vec1(x)))) + rho * _vec1(x)
+
+        # --- Hutchinson diag preconditioner (EMA) ---
+        need_reset = (not hasattr(self, "_diagH")) or (self._diagH is None) \
+                    or (self._diagH.shape[0] != n_eta) or (getattr(self, "_diagH_age", 1e9) > 20)
+
         if need_reset:
-            diag_est = np.zeros(n)
+            diag_est = np.zeros(n_eta, dtype=np.float64)
             for _ in range(precond_probes):
-                z = np.random.randn(n)
-                Hz = H_mv(z)
+                z = np.random.randn(n_eta).astype(np.float64)
+                Hz = _vec1(H_mv(z))
                 diag_est += Hz * z
             diag_est = np.abs(diag_est) / max(1, precond_probes)
             self._diagH = np.maximum(diag_est, 1e-9)
             self._diagH_age = 0
         else:
-            z = np.random.randn(n)
-            Hz = H_mv(z)
+            z = np.random.randn(n_eta).astype(np.float64)
+            Hz = _vec1(H_mv(z))
             refresh = np.maximum(np.abs(Hz * z), 1e-9)
             self._diagH = precond_decay * self._diagH + (1.0 - precond_decay) * refresh
             self._diagH_age += 1
@@ -1034,33 +1069,27 @@ class SMPC():
         # map to y-space: eta = D^{-1/2} y  <=>  y = D^{1/2} eta
         y = sqrtD * eta
         y_prev = y.copy()
-        t_mom = 1.0
+        t_mom  = 1.0
 
-        # objective in y for Armijo
-        def phi_y(yv):
-            et = inv_sqrtD * yv
-            Het = H_mv(et)
-            return 0.5 * float(et @ Het) + float(b @ et)
+        # one-shot objective + gradient in y-space (each call uses exactly one H_mv)
+        def phi_and_grad_y(yv):
+            et  = inv_sqrtD * yv
+            Het = _vec1(H_mv(et))
+            phi = 0.5 * float(et @ Het) + float(b @ et)
+            gy  = inv_sqrtD * (Het + b)  # ∇φ(y) = D^{-1/2}(H eta + b)
+            return phi, gy
 
-        # gradient in y-space
-        def grad_y(yv):
-            et = inv_sqrtD * yv
-            return inv_sqrtD * (H_mv(et) + b)
-
-        # try a slightly aggressive initial step; backtracking will fix if too big
-        tau = 1.25
-
-        # quick early-exit check
-        gk0 = grad_y(y)
-        # projected direction in eta-space (R_+^n)
-        eta_proj0 = np.maximum(0.0, inv_sqrtD * (y - tau * gk0))
-        pg0 = np.minimum(H_mv(eta_proj0) + b, 0.0)
+        # early exit
+        phi0, gk0 = phi_and_grad_y(y)
+        eta_proj0 = np.maximum(0.0, inv_sqrtD * (y - 1.25 * gk0))
+        pg0 = np.minimum(_vec1(H_mv(eta_proj0)) + b, 0.0)
         if np.linalg.norm(pg0, ord=np.inf) <= tol:
             return eta_proj0.reshape(-1, 1)
 
-        # main loop
+        tau = 1.25
+
         for _ in range(iters):
-            # Nesterov extrapolation (optional)
+            # optional Nesterov extrapolation
             if use_nesterov:
                 t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_mom * t_mom))
                 beta  = (t_mom - 1.0) / t_new
@@ -1068,30 +1097,31 @@ class SMPC():
             else:
                 y_ex  = y
 
-            gk = grad_y(y_ex)
+            phi_ex, gk = phi_and_grad_y(y_ex)
 
-            # Armijo backtracking with projection to eta >= 0
             tau_k = tau
+            tries = 0
             while True:
-                y_trial  = y_ex - tau_k * gk
-                eta_tr   = np.maximum(0.0, inv_sqrtD * y_trial)
-                y_proj   = sqrtD * eta_tr
+                # trial + projection to eta >= 0
+                y_trial = y_ex - tau_k * gk
+                eta_tr  = np.maximum(0.0, inv_sqrtD * y_trial)
+                y_proj  = sqrtD * eta_tr
 
-                # sufficient decrease on phi_y
-                # phi(y_proj) <= phi(y_ex) - sigma * ||y_proj - y_ex||^2 / tau_k
+                # one eval for the trial
+                phi_tr, _ = phi_and_grad_y(y_proj)
+
                 dy = y_proj - y_ex
-                phi_ex = phi_y(y_ex)
-                phi_tr = phi_y(y_proj)
                 if phi_tr <= (phi_ex - armijo_sigma * float(dy @ dy) / max(tau_k, 1e-12)):
                     y_next = y_proj
                     break
 
                 tau_k *= armijo_beta
-                if tau_k < 1e-6:  # bail out if step gets too tiny
+                tries += 1
+                if tries >= max_armijo_tries or tau_k < 1e-6:
                     y_next = y_proj
                     break
 
-            # momentum update
+            # momentum housekeeping
             if use_nesterov and np.dot(y_next - y, y - y_prev) > 0.0:
                 t_mom = 1.0
                 y_prev = y.copy()
@@ -1102,21 +1132,22 @@ class SMPC():
 
             y = y_next
 
-            # projected gradient in eta-space
+            # projected-gradient∞ stop (one H_mv)
             eta = inv_sqrtD * y
-            pg = np.minimum(H_mv(eta) + b, 0.0)
+            pg = np.minimum(_vec1(H_mv(eta)) + b, 0.0)
             if np.linalg.norm(pg, ord=np.inf) <= tol:
                 break
 
         # final eta (ensure nonnegativity numerically)
         eta = np.maximum(0.0, inv_sqrtD * y)
 
-        # tiny active-set NNLS polish (very cheap)
-        if polish:
-            eta = self._polish_eta_active_set(eta, b, H_mv, k_top=24, cg_iters=3).ravel()
+        # tiny active-set NNLS polish
+        if polish and hasattr(self, "_polish_eta_active_set"):
+            eta = _vec1(self._polish_eta_active_set(eta, b, H_mv, k_top=24, cg_iters=3))
             eta = np.maximum(0.0, eta)
 
         return eta
+
 
     
     def _polish_eta_active_set(self, eta, b, H_mv, *,
@@ -1279,8 +1310,9 @@ class SMPC():
         x_full[idx] = x_red
 
         # If you later reduce g1, remember to set dropped entries to 0.5 (neutral).
-        mu = self._proj_soc_dual_stacked_np(x_full[:n_mu], self.blocks).flatten()
-        eta, g1 = x_full[n_mu:n_mu+n_eta], x_full[n_mu+n_eta:]
+        st = time.time()
+        # mu = self._proj_soc_dual_stacked_np(x_full[:n_mu], self.blocks).flatten()
+        mu, eta, g1 = x_full[:n_mu], x_full[n_mu:n_mu+n_eta], x_full[n_mu+n_eta:]
         return mu, eta, g1
 
         
@@ -1315,13 +1347,14 @@ class SMPC():
         g1 = (self.C @ u)
         g2 = self.F @ u
         g3 = 2*(self.L @ u)
-        grad_d = np.concatenate([g1 + self.c, g2 + self.f, g3])
+        # grad_d = np.concatenate([g1 + self.c, g2 + self.f, g3])
         self.gradient_computation_time = time.time() - st 
         print(f'[smpc.py]: Dual gradient build time: {self.gradient_computation_time:.6f} s') 
-        
+        st = time.time()
         # ---- one projected step (alpha=1; equivalent to your proj_dual = dual - grad_d) ---- 
         dual = np.concatenate([f_mu, f_nu, f_g]) 
-        proj_dual = dual - grad_d 
+        # proj_dual = dual - grad_d 
+        proj_dual = np.concatenate([f_mu - (g1 + self.c), f_nu - (g2 + self.f), f_g - g3])
         
         # ---- projection to dual feasible set ---- 
         n_mu = self.C.shape[0] 
@@ -1329,33 +1362,21 @@ class SMPC():
         # μ ∈ SOC* (blockwise) 
         # self.blocks should be [self.mu_dim - 1] * self.num_ca_duals (set earlier). 
         # proj_dual[:n_mu] = self._proj_soc_dual_stacked_np(proj_dual[:n_mu], self.blocks).flatten() 
-        st = time.time()
-        # proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(proj_dual[:n_mu], -(g1-self.c), self.blocks, tol=1e-9).flatten() 
-        # proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(
-        #     proj_dual[:n_mu],
-        #     -(g1 - self.c),
-        #     self.blocks,
-        #     tol=1e-9
-        # ).ravel()
-
         proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(proj_dual[:n_mu],-(g1 - self.c),self.blocks,tol=1e-9).ravel()
-
-        print(f'[smpc.py]: SOC dual projection time: {time.time()-st:.6f} s')
         # η ≥ 0 
         proj_dual[n_mu:n_mu+n_eta] = np.maximum(proj_dual[n_mu:n_mu+n_eta], 0.0) 
         # 0 ≤ g ≤ 1
         proj_dual[n_mu+n_eta:] = np.clip(proj_dual[n_mu+n_eta:], 0.0, 1.0) 
-        
+        print(f'[smpc.py]: Dual projection time: {time.time()-st:.6f} s')
         # ---- gap radius ---- 
         st = time.time() 
         # gap = np.linalg.norm(dual - proj_dual) * (1.0 + self._sigma) / self._eta_inv
         gap = self._norm2_diff_inbuf(dual, proj_dual) * (1.0 + self._sigma) / self._eta_inv
-
         print(f'[smpc.py]: Gap norm time: {time.time() - st:.6f} s') 
         
-        print(np.linalg.norm((dual - proj_dual)[:n_mu]))
-        print(np.linalg.norm((dual - proj_dual)[n_mu:n_mu+n_eta]))
-        print(np.linalg.norm((dual - proj_dual)[n_mu+n_eta:])) 
+        # print(np.linalg.norm((dual - proj_dual)[:n_mu]))
+        # print(np.linalg.norm((dual - proj_dual)[n_mu:n_mu+n_eta]))
+        # print(np.linalg.norm((dual - proj_dual)[n_mu+n_eta:])) 
         return gap 
 
     def _split_slack_vecfirst(self, s_stack, blocks): 

@@ -300,7 +300,18 @@ class SMPCPlanner(AbstractIDMPlanner):
                 ca_policy.to('cpu')
                 l1_policy.eval()
                 ca_policy.eval()
+                l1_policy = th.compile(l1_policy,mode='reduce-overhead')
+                ca_policy = th.compile(ca_policy,mode='reduce-overhead')
+                
+                @th.inference_mode()   # lower-overhead than no_grad
+                def l1_raid_infer(x: th.Tensor) -> th.Tensor:
+                    return l1_policy(x)
+                @th.inference_mode()   # lower-overhead than no_grad
+                def ca_raid_infer(x: th.Tensor) -> th.Tensor:
+                    return ca_policy(x)
+
                 self.RAID_NET = [l1_policy,ca_policy]
+                self.RAID_NET_infer = [l1_raid_infer, ca_raid_infer]
 
                 #Load the feature mean and covariance for normalizing the input features
                 feature_stat = np.load(self.raidnet_config['feature_stat_path']) #open npz file
@@ -395,7 +406,6 @@ class SMPCPlanner(AbstractIDMPlanner):
         update_dict.update({'speed_limit':min(self._policy.target_velocity,ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()+self.config['N']*self.config['a_max']*0.1),'ego_sim_initial_state':self.x0,'red_light': self.red_light_leading_idm_agent(ego_state,observations,current_input)})
         if self.config['eval_mode']:
             #update canonical form matrices
-            # update_dict.update({'canon_prob':self.canon_prob})
             update_dict.update({'canon_prob':1}) #canon_prob form is provided in the initialization of the SMPC Planner
 
             #RAID-Net Inference
@@ -409,9 +419,9 @@ class SMPCPlanner(AbstractIDMPlanner):
                 
                 # RAIDNET Inference
                 st = time.time()
-                l1_logits = self.RAID_NET[0](obs_reshaped)
-                ca_logits = self.RAID_NET[1](obs_reshaped)
-                self.raidnet_query_time = time.time() - st
+                l1_logits = self.RAID_NET_infer[0](obs_reshaped)
+                ca_logits = self.RAID_NET_infer[1](obs_reshaped)
+                self.raidnet_query_time = (time.time() - st)
                 print(f'[smpc_planner.py]: RAID-Net Inference Time: {self.raidnet_query_time:.3f} seconds')
 
                 #Classification
@@ -420,16 +430,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 print(f'[smpc_planner.py]: RAID-Net L1 Duals: {l1_duals_raidnet}, CA Duals: {ca_duals_raidnet}')
                 self.raidnet_classifications.append([l1_duals_raidnet,ca_duals_raidnet])
                 self.expert_dagger_obs.append(obs_norm) #append the observation for expert dagger
-
-                #TODO (Check functionality) Check if the RAIDNET output is more than 50% active
                 ca_duals_raidnet4recall = ca_duals_raidnet
-                # ca_duals_raidnet = None if (np.sum(ca_duals_raidnet)/self.RAID_NET[1].output_dim) > 0.5 else ca_duals_raidnet #if no CA duals are active, set to None
-                # if ca_duals_raidnet is None:
-                #     l1_duals_raidnet = None
-                #     print('[smpc_planner.py]: Ignoring RAID-Net Output')
-                # else:
-                #     if not self.config['expert_only']:
-                #         print('[smpc_planner.py]: Using RAID-Net Output...')
 
             else:
                 l1_duals_raidnet = None
