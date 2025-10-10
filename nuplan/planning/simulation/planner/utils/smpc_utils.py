@@ -349,7 +349,8 @@ def get_preds(current_input, preds_list: Union[List[IDMAgent],List[Agent],np.nda
         #tv length and width
         tv_params = [[tv_lengths[k], tv_widths[k]] for k in range(params['N_TV'])]
     except:
-        pdb.set_trace()
+        pass
+        # pdb.set_trace()
     return x, x_glob, dx_glob, mm_o_glob, mm_u_tvs, mm_routes, mm_do_glob, mm_Qs, mm_tv_psi, tv_params, o0
 
 def s_arr_monotonic(s_arr):

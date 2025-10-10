@@ -10,6 +10,8 @@ normalize: True
 optimizer: Adam
 joint_dual_pred: False
 l1_pred_mode: tertiary #['binary', 'tertiary']
+l1_num: 156
+ca_num: 312
 pretrain: False
 num_heads: 2
 N: 14
@@ -25,5 +27,4 @@ model_save_dir: nn_models/
 l1_model_path: /home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_L1_100.pt
 ca_model_path: /home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_CA_100.pt
 feature_stat_path: /home/mpc/nuplan-devkit/nuplan/nn_models/nuplan_expert_data_N14_wayformer_affine_training_stats.npz
-# eval_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_training_processed.pkl.gz
-eval_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_evaluation_processed_.pkl.gz
+eval_data_dir: /home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_evaluation_processed.pkl.gz

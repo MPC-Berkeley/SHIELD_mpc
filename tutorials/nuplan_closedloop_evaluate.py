@@ -56,20 +56,23 @@ scenario_types=[
 print('total log list length:',len(log_list))
 # log_list = log_list[59:] # 2021.10.06.17.43.07_veh-28_00508_00877 for 08ee9351335b5c9a
 # scenario_types = ['starting_unprotected_cross_turn'] #for 08ee9351335b5c9a
-# num_scenarios = 30 #float: fraction, int: number of scenarios to use from the log
+# num_scenarios = 30 #float: fraction, int: number of scenarios to use from the log #for 08ee9351335b5c9a
 
 # log_list = [log_list[7]] #for 23b782750976520b
 # scenario_types = ['high_magnitude_speed'] #for 23b782750976520b
 # num_scenarios = 0.99 #for 23b782750976520b
-# log_list = log_list[1:] 
-num_scenarios = 10
+# Also, go to simulation_builder.py to turn on the filter for this specific scenario
+
+#General Case
+log_list = log_list[12:]
+num_scenarios = 3
 
 num_scenarios_per_type = 1
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
     # it += 59
     # it += 7
-    # it += 1
+    it += 12
     if True:
         try:
             print(f'[Iter:{it}] Collecting data from log: ', log)

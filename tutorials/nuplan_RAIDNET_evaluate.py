@@ -65,7 +65,7 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     expert_data['observation'] = [obs for obs in expert_data['observation'] if len(obs)>0]
     expert_data['optimal_duals'] = [acs for acs in expert_data['optimal_duals'] if len(acs)>0]
     expert_data['dual_class'] = [acs for acs in expert_data['dual_class'] if len(acs)>0]
-
+    
     observation = np.squeeze(np.concatenate([obs for obs in expert_data["observation"]]),axis=1)
     optimal_duals = np.concatenate([acs for acs in expert_data["optimal_duals"]])
 
@@ -162,20 +162,44 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
         # sample_target_l1 = th.ones(policy[0].output_dim).to(logits_l1.device)
         # Multi-class classification cross-entropy loss
         # max_loss_l1 = np.log(logits_l1.shape[-1]) #Cross-entropy loss for a random guess is log(C) where C is the number of classes
-        loss = th.nn.functional.cross_entropy(logits_l1.reshape(-1,logits_l1.shape[-1]), targets_l1.flatten().long(),reduction='none').cpu()
-        loss_hist_l1, loss_bin_edges_l1 = np.histogram(loss, bins=np.linspace(0, 1, nbins))
-        if other_models:
-            logits_l1_mlp = other_models['mlp'][0](obs)
-            loss_l1_mlp = th.nn.functional.cross_entropy(logits_l1_mlp.reshape(-1,logits_l1_mlp.shape[-1]), targets_l1.flatten().long(),reduction='none').cpu()
-            lost_hist_l1_mlp = np.histogram(loss_l1_mlp, bins=np.linspace(0, 1, nbins))
+        C = logits_l1.size(-1)                         # 3 classes
+        # per-position CE -> (B, P)
+        loss_pos = th.nn.functional.cross_entropy(
+            logits_l1.reshape(-1, C),
+            targets_l1.flatten().long(),
+            reduction='none'
+        ).view(logits_l1.size(0), -1)
 
-            #Running out of memory because obs_reshape batch size it too big
-            # --- usage ---
-            logits_l1_raidnet_v1 = forward_in_batches(other_models['RAIDNET_V1'][0], obs_reshaped, batch_size=1024,return_device='cuda:0')
-            # logits_l1_raidnet_v1 = other_models['RAIDNET_V1'][0](obs_reshaped)
-            loss_l1_raidnet_v1 = th.nn.functional.cross_entropy(logits_l1_raidnet_v1.reshape(-1,logits_l1_raidnet_v1.shape[-1]), targets_l1.flatten().long(),reduction='none').cpu()
-            lost_hist_l1_raidnet_v1 = np.histogram(loss_l1_raidnet_v1, bins=np.linspace(0, 1, nbins))
-            
+        # aggregate to per-sample loss -> (B,)
+        loss_per_sample = loss_pos.mean(dim=1)         # or .sum(dim=1)
+
+        # normalize to [0,1] by max CE = log(C)
+        loss_per_sample_norm = (loss_per_sample / np.log(C)).cpu().numpy()
+
+        loss_hist_l1, loss_bin_edges_l1 = np.histogram(
+            loss_per_sample_norm, bins=np.linspace(0, 1, nbins)
+        )
+        if other_models:
+            # MLP
+            logits_l1_mlp = other_models['mlp'][0](obs)
+            loss_pos_mlp = th.nn.functional.cross_entropy(
+                logits_l1_mlp.reshape(-1, C),
+                targets_l1.flatten().long(),
+                reduction='none'
+            ).view(B, -1)
+            loss_smpl_mlp = (loss_pos_mlp.mean(dim=1) / np.log(C)).cpu().numpy()
+            lost_hist_l1_mlp = np.histogram(loss_smpl_mlp, bins=np.linspace(0, 1, nbins))
+
+            # RAID-Net V1
+            logits_l1_v1 = forward_in_batches(other_models['RAIDNET_V1'][0], obs_reshaped, batch_size=1024, return_device='cuda:0')
+            loss_pos_v1 = th.nn.functional.cross_entropy(
+                logits_l1_v1.reshape(-1, C),
+                targets_l1.flatten().long(),
+                reduction='none'
+            ).view(B, -1)
+            loss_smpl_v1 = (loss_pos_v1.mean(dim=1) / np.log(C)).cpu().numpy()
+            lost_hist_l1_raidnet_v1 = np.histogram(loss_smpl_v1, bins=np.linspace(0, 1, nbins))
+ 
         #Compute max possible loss
         l1_loss_per_sample  = 1
 
@@ -443,7 +467,7 @@ def print_and_plot_metrics(metrics: dict, baselines: dict = None):
                                figsize=(6.8, 8))
 
         l1_series = [metrics['l1_loss_hist']]
-        l1_labels = [r'$\pi^{\text{RAIDN V2}}$']
+        l1_labels = [r'$\pi^{\text{class}}$']
         l1_colors = ['#355C7D']
 
         if baselines:
@@ -453,7 +477,7 @@ def print_and_plot_metrics(metrics: dict, baselines: dict = None):
                 l1_colors.append('#E67E22')
             if 'l1_loss_hist_raidnet_v1' in baselines:
                 l1_series.append(baselines['l1_loss_hist_raidnet_v1'])
-                l1_labels.append(r'$\pi^{\text{RAIDN V1}}$')
+                l1_labels.append(r'$\pi^{\text{RAIDN}}$')
                 l1_colors.append('#27AE60')
 
         overlay_histograms(
@@ -468,7 +492,7 @@ def print_and_plot_metrics(metrics: dict, baselines: dict = None):
                        metrics['l1_loss_bin_edges'][-1])
         ymax_l1 = max(s.max() for s in l1_series)
         ax[0].set_ylim(0, max(1, int(ymax_l1 * 1.12)))
-        ax[0].legend(frameon=False)
+        ax[0].legend(frameon=False,loc='upper center')
 
         metrics['l1_confusion_matrix'].plot(ax=ax[1], cmap='Blues',
                                             im_kw={'vmax': 1.},
@@ -483,7 +507,7 @@ def print_and_plot_metrics(metrics: dict, baselines: dict = None):
                                figsize=(6.8, 8))
 
         ca_series = [metrics['ca_loss_hist']]
-        ca_labels = [r'$\pi^{\text{RAIDN V2}}$']
+        ca_labels = [r'$\pi^{\text{class}}$']
         ca_colors = ['#355C7D']
 
         if baselines:
@@ -493,7 +517,7 @@ def print_and_plot_metrics(metrics: dict, baselines: dict = None):
                 ca_colors.append('#E67E22')
             if 'ca_loss_hist_raidnet_v1' in baselines:
                 ca_series.append(baselines['ca_loss_hist_raidnet_v1'])
-                ca_labels.append(r'$\pi^{\text{RAIDN V1}}$')
+                ca_labels.append(r'$\pi^{\text{RAIDN}}$')
                 ca_colors.append('#27AE60')
 
         overlay_histograms(
@@ -597,7 +621,7 @@ def main(smpc_config,config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--smpc_config', required=False,type=str, default='/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml')
+    parser.add_argument('--smpc_config', required=False,type=str, default='/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config_eval.yaml')
     parser.add_argument('--config', required=False,type=str, default='/home/mpc/nuplan-devkit/tutorials/training_config.yaml')
     args = parser.parse_args()
     with open(args.smpc_config, 'r') as f:

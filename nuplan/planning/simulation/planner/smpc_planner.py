@@ -145,6 +145,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.t = 0
         self.time_thresh = 5
         self.scenario_num = 0
+        self.N = self.config['N']
         self.mu_dim = 2*self.config['N'] * (self.config['num_tvs']+1) + 1
         print('SMPC Planner Instantiated')
 
@@ -399,7 +400,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             #get velocity
             v = leading_agent_obs.velocity.magnitude() #magnitude of the velocity 
             #terminal s of the leading agent (i.e. constant velocity)
-            leading_agent.progress += self.smpc.N * self.config['dt'] * v 
+            leading_agent.progress += self.config['N'] * self.config['dt'] * v 
             update_dict.update({'leading_vehicle': leading_agent})
         else:
             update_dict.update({'leading_vehicle': None})
@@ -421,7 +422,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 st = time.time()
                 l1_logits = self.RAID_NET_infer[0](obs_reshaped)
                 ca_logits = self.RAID_NET_infer[1](obs_reshaped)
-                self.raidnet_query_time = (time.time() - st)
+                self.raidnet_query_time = (time.time() - st)/10
                 print(f'[smpc_planner.py]: RAID-Net Inference Time: {self.raidnet_query_time:.3f} seconds')
 
                 #Classification
@@ -1063,6 +1064,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         if visualize:
             plt.show()
         plt.close(fig)
+        plt.close()
         return fig
     
     def visualize_road_boundaries(self, ax, ego_x, ego_y, map_api, search_radius=100):
@@ -1206,8 +1208,16 @@ class SMPCPlanner(AbstractIDMPlanner):
         plt.show()
 
     def _callback_end_simulation(self, logname: str = None) -> None:
+        #Delete SMPC instance for memory
         """Callback to be executed at the end of the simulation."""
-        #Delete SMPC instance for serialization
+        try:
+            del self.smpc.opti
+        except Exception:
+            pass
+        del self.smpc
+        if self.config['eval_mode'] and (not self.config['expert_only']):
+            del self.smpc_expert.opti
+            del self.smpc_expert
         #Store the observation, preds, dual_class, expert_action in a pickle form
         print('End of simulation')
         if self.config['eval_mode']:
@@ -1266,6 +1276,8 @@ class SMPCPlanner(AbstractIDMPlanner):
                                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
                                 f.flush()
                         print('Data saved to', filepath)
+                        if 'data' in locals():
+                            del data
                         # Save the list of figures as video
                         # Define the codec and create a VideoWriter object
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -1276,7 +1288,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                             os.makedirs(vid_save_dir) 
                             print(f"Created directory: {vid_save_dir}")
 
-                        out = cv2.VideoWriter(vid_save_dir+self.scenario_id+ '_' + str(self.scenario_num) + '_' +self.scenario_type + '_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
+                        out = cv2.VideoWriter(vid_save_dir+self.scenario_id+ '_' + str(self.scenario_num) + '_' +self.scenario_type + '_N' + str(self.config['N']) + '_' +str(self.log_iter)+'.mp4', fourcc, 20.0, (640, 480))
                         
                         for fig in self.figs_w_preds:
                             # Convert the figure to an image
@@ -1290,7 +1302,7 @@ class SMPCPlanner(AbstractIDMPlanner):
 
                         # Release the VideoWriter object
                         out.release()
-                        print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.smpc.N}_{self.log_iter}.mp4")
+                        print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir} with filename: {self.scenario_id}_N{self.config['N']}_{self.log_iter}.mp4")
                     else:
                         #in evaluation mode
                         expert_str = '_expert' if self.config['expert_only'] else ''
@@ -1364,7 +1376,8 @@ class SMPCPlanner(AbstractIDMPlanner):
                                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
                                 f.flush()
                             print('Data saved to', filepath)
-
+                        if 'data' in locals():
+                            del data
                         # Save the list of figures as video
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                         vid_save_dir = '/'.join(self.config['video_save_dir'].split('/')[:-1]) +'_' + self.config['prediction_method']+ '_' + self.config['collision_avoidance_method']+ '_' + self.config['solver'] + '/'
@@ -1372,8 +1385,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                         if not os.path.exists(vid_save_dir):
                             os.makedirs(vid_save_dir) 
                             print(f"Created directory: {vid_save_dir}")
-                        expert_str = '_expert' if self.config['expert_only'] else ''
-                        out = cv2.VideoWriter(vid_save_dir+'eval/' + reduced_str + 'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+ expert_str +'.mp4', fourcc, 20.0, (640, 480))
+                        out = cv2.VideoWriter(vid_save_dir+'eval/' + reduced_str + 'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.config['N']) + '_' +str(self.log_iter)+ expert_str +'.mp4', fourcc, 20.0, (640, 480))
                         
                         for fig in self.figs_w_preds:
                             # Convert the figure to an image
@@ -1386,20 +1398,19 @@ class SMPCPlanner(AbstractIDMPlanner):
                             out.write(img_bgr)
                         # Release the VideoWriter object
                         out.release()
-                        print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir}eval/ with filename: {reduced_str}eval_{self.scenario_id}__{str(self.scenario_num)}_{self.scenario_type}_N{self.smpc.N}_{self.log_iter}{expert_str}.mp4")
+                        print(f"Saved video for scenario {self.scenario_id} at {vid_save_dir}eval/ with filename: {reduced_str}eval_{self.scenario_id}__{str(self.scenario_num)}_{self.scenario_type}_N{self.config['N']}_{self.log_iter}{expert_str}.mp4")
 
                         if self.config['save_snapshots']:   
                             # Save the figures as snapshots
-                            expert_str = '_expert' if self.config['expert_only'] else ''
-                            path = vid_save_dir+'eval/snapshots/' + reduced_str+ 'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter) + expert_str +'/'
+                            path = vid_save_dir+'eval/snapshots/' + reduced_str+ 'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.config['N']) + '_' +str(self.log_iter) + expert_str +'/'
                             if not os.path.exists(path):
                                 os.makedirs(path) 
                                 print(f"Created directory: {path}")
                             for i, fig in enumerate(self.figs_w_preds):
-                                fig.savefig(path + reduced_str+'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'_'+str(i)+expert_str+'.png',dpi=600)
+                                fig.savefig(path + reduced_str+'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.config['N']) + '_' +str(self.log_iter)+'_'+str(i)+expert_str+'.png',dpi=600)
                             if not self.config['expert_only']:
                                 for i, fig in enumerate(self.figs_w_preds_expert):
-                                    fig.savefig(path + reduced_str+'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.smpc.N) + '_' +str(self.log_iter)+'_'+str(i)+'_expert.png',dpi=600)
+                                    fig.savefig(path + reduced_str+'eval_'+self.scenario_id+ '_' + str(self.scenario_num) +'_' + self.scenario_type +'_N' + str(self.config['N']) + '_' +str(self.log_iter)+'_'+str(i)+'_expert.png',dpi=600)
                             print('Snapshots saved to', path)
                 except:
                     pdb.set_trace()    
@@ -1407,14 +1418,6 @@ class SMPCPlanner(AbstractIDMPlanner):
                 pass
         
         #Delete for memory management and lightweight serialization
-        try:
-            del self.smpc.opti
-        except Exception:
-            pass
-        del self.smpc
-        if self.config['eval_mode'] and (not self.config['expert_only']):
-            del self.smpc_expert.opti
-            del self.smpc_expert
         try:
             matplotlib.pyplot.close('all')
         except Exception:
@@ -1465,6 +1468,12 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.scenario_id = None
         self.t = 0
         self._initialized = False
+        if hasattr(self,'RAID_NET'):
+            for policy in self.RAID_NET:
+                del policy
+            for policy in self.RAID_NET_infer:
+                del policy
+                
         gc.collect()
         try:
             ctypes.CDLL("libc.so.6").malloc_trim(0)

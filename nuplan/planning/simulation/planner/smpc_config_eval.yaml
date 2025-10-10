@@ -20,9 +20,9 @@ eval_mode: True
 expert_only: False
 save_snapshots: True
 prediction_method: wayformer #['idm', 'wayformer']
-solver: 'ipopt' #['ipopt', 'gurobi']
+solver: 'gurobi' #['ipopt', 'gurobi']
 save_canon_forms: False
-reduced_ls: True
+reduced_ls: False
 best_response: True
 
 # Directories

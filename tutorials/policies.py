@@ -146,11 +146,10 @@ class RAID_NET(nn.Module):
           attn=self.add_norm(x+attn)
           h=self.add_norm(attn+self.pred_d(attn)) #shape: (n_batch, n_tv + 1, embed_dim
           duals = self._clip(self.project(th.flatten(h,start_dim=1))) #shape: (n_batch, lambda_dim + mu_dim)
-          x_o, h_o = self.rnn_d(x, th.stack([th.flatten(h,start_dim=1)]))
-          # h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
-          # x, h = self.rnn_d(x, h)
+          x_o, h_o = self.rnn_d(x.view(batch_size,1,-1), th.stack([th.flatten(h,start_dim=1)]))
+
           h = h_o[0,:,:].view(batch_size, self.n_tv, -1)
-          x = x_o[:,:,:self.embed_dim]
+          x = x_o.view(batch_size,self.n_tv,-1)
 
           l1_duals.append(duals[:,:self.clip_lmbd_dim])
           ca_duals.append(duals[:,self.clip_lmbd_dim:])
@@ -169,13 +168,9 @@ class RAID_NET(nn.Module):
           if self.pred_mode[0] == 'l1' and self.pred_mode[1] == 'tertiary':
              temp = dual.view(batch_size,int(self.output_dim/self.N),3)   
              dual = self.log_softmax(temp)  #shape: (N_batch, l1_dim/N, 3)    
-
           x_o, h_o = self.rnn_d(x.view(batch_size,1,-1), th.stack([th.flatten(h,start_dim=1)]))
-          # h = h_o[0,:,:].view(batch_size, n_tv+1, -1)
-          # x, h = self.rnn_d(x, h)
 
           h = h_o[0,:,:].view(batch_size, self.n_tv, -1) #reshape h for next iteration of multi-head attention
-          # x = x_o[:,:,:self.embed_dim]
           x = x_o.view(batch_size,self.n_tv,-1)
           duals.append(dual[:,:self.clip_lmbd_dim])
         return th.hstack(duals) if self.pred_mode[0] == 'l1' and self.pred_mode[1] == 'tertiary' else th.hstack(duals).flatten(start_dim=1)

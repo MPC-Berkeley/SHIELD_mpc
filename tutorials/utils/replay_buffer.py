@@ -71,12 +71,21 @@ class ReplayBuffer(th.utils.data.Dataset):
         # self.acs[:,:l1_dim] = 1.0*np.logical_or((1-(self.acs[:,:l1_dim]<(l1_lmbd-1e-3)*np.ones_like(self.acs[:,:l1_dim]))), 
         #               (1-(self.acs[:,:l1_dim]>1e-3*np.ones_like(self.acs[:,:l1_dim]))))
         if l1_pred_mode == 'binary':
-            l1_duals = self.acs[:,:l1_dim]
-            # l1_class = np.where(l1_duals<1e-3,2*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where(l1_duals>l1_lmbd - 1e-3,3*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where((1e-3 <= l1_duals) & (l1_duals <= l1_lmbd - 1e-3),np.ones_like(l1_duals),np.zeros_like(l1_duals))
-            l1_class = (l1_duals>1e-3).astype(int)
-            l1_class += (l1_duals > (self.policy[0].lmbd_ubd*0.99)).astype(int)
-            # assert not 0 in l1_class
-            self.acs[:,:l1_dim] = (l1_class - np.ones_like(l1_class) > 1e-3)
+            l1_duals = self.acs[:, :l1_dim]
+            eps = 1e-3
+
+            # --- classic tertiary classes in {0,1,2} ---
+            # 0: ~0, 1: (eps, lmbd-eps], 2: ~lmbd
+            l1_lmbd = 100
+            lmbd = float(l1_lmbd)  # prefer the function arg
+            l1_class_tern = (l1_duals > eps).astype(np.int32) \
+                            + (l1_duals > (lmbd - eps)).astype(np.int32)
+
+            # --- map to binary: 2->0, 1->1, 0->0 ---
+            l1_bin = (l1_class_tern == 1).astype(np.float32)  # or np.int32 if you prefer ints
+
+            # store back as the L1 targets
+            self.acs[:, :l1_dim] = l1_bin
 
         #Save feature mean and cov for unnormalization in the policy
         if self.training_dataset:
@@ -88,12 +97,21 @@ class ReplayBuffer(th.utils.data.Dataset):
         self.acs[:,l1_dim:] = 1.*(self.acs[:,l1_dim:] > 1e-3)
         self.obs = np.real(la.solve(np.real(la.sqrtm(feature_cov)), (self.obs - feature_mean).T, assume_a='pos').T)
         if l1_pred_mode == 'binary':
-            l1_duals = self.acs[:,:l1_dim]
-            # l1_class = np.where(l1_duals<1e-3,2*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where(l1_duals>l1_lmbd - 1e-3,3*np.ones_like(l1_duals),np.zeros_like(l1_duals)) + np.where((1e-3 <= l1_duals) & (l1_duals <= l1_lmbd - 1e-3),np.ones_like(l1_duals),np.zeros_like(l1_duals))
-            l1_class = (l1_duals>1e-3).astype(int)
-            l1_class += (l1_duals > (self.policy[0].lmbd_ubd*0.99)).astype(int)
-            # assert not 0 in l1_class
-            self.acs[:,:l1_dim] = (l1_class - np.ones_like(l1_class) > 1e-3)
+            l1_duals = self.acs[:, :l1_dim]
+            eps = 1e-3
+
+            # --- classic tertiary classes in {0,1,2} ---
+            # 0: ~0, 1: (eps, lmbd-eps], 2: ~lmbd
+            l1_lmbd = 100
+            lmbd = float(l1_lmbd)  # prefer the function arg
+            l1_class_tern = (l1_duals > eps).astype(np.int32) \
+                            + (l1_duals > (lmbd - eps)).astype(np.int32)
+
+            # --- map to binary: 2->0, 1->1, 0->0 ---
+            l1_bin = (l1_class_tern == 1).astype(np.float32)  # or np.int32 if you prefer ints
+
+            # store back as the L1 targets
+            self.acs[:, :l1_dim] = l1_bin
 
     def set_weights(self):
         

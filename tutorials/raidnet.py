@@ -154,5 +154,7 @@ class RAID_NET_V2(nn.Module):
         elif self.pred_mode[1] == 'binary' and self.pred_mode[0] == 'ca':
             return th.stack(outputs, dim=1).permute(0,2,3,1).reshape(x.shape[0],-1)
             # return th.stack(outputs, dim=1)  # Shape: (batch_size, N, V, M^V or [M,2,3]) varies by duals (ca dual and l1 dual respectively)
+        elif self.pred_mode[0] == 'both duals':
+            return th.stack(outputs, dim=1).permute(0,2,3,1).reshape(x.shape[0],-1)
         else:
             raise NotImplementedError(f"Prediction mode {self.pred_mode[1]} not implemented.")

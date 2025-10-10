@@ -23,8 +23,8 @@ def main(filename):
     expert_collision_count = 0
     reduced_collision_count = 0
     for i in range(n):
-        reduced_collision_count += np.any(data['reduced_collisions'])
-        expert_collision_count += np.any(data['expert_collisions'])
+        reduced_collision_count += np.any(data['reduced_collisions'][i])
+        expert_collision_count += np.any(data['expert_collisions'][i])
     reduced_collision_rate = reduced_collision_count/n
     expert_collision_rate = expert_collision_count/n
     print(f"Total scenarios: {n}")
@@ -45,8 +45,8 @@ def main(filename):
     expert_compt_time_arr = []
     comp_time_keys = list(data['reduced_computation_time'][0][0].keys())
     steps = 0
-    for i in range(1,2):
-        for t in range(len(data['expert_optimal'][i])):
+    for i in range(n):
+        for t in range(1,len(data['expert_optimal'][i])):
             if data['expert_optimal'][i][t] and data['reduced_smpc_optimal'][i][t]:
                 '''
                 Optimal Cost
@@ -111,16 +111,52 @@ def main(filename):
     print(f"Average reduced SMPC raidnet query time over {steps} steps: {np.mean(reduced_raidnet_query_time):.4f} \pm {np.std(reduced_raidnet_query_time):.4f} seconds")
     print(f"Average reduced SMPC safety screening time over {steps} steps: {np.mean(reduced_safety_screening_time):.4f} \pm {np.std(reduced_safety_screening_time):.4f} seconds")
     print(f"Average reduced SMPC least squares solve time over {steps} steps: {np.mean(reduced_time_least_squares_solve_time):.4f} \pm {np.std(reduced_time_least_squares_solve_time):.4f} seconds")
-
+    def hist_with_stats(ax, x, bins=30, label=None,option=False, **hist_kwargs):
+        # draw histogram
+        counts, edges, patches= ax.hist(x, bins=bins, alpha=1, label=label,  **hist_kwargs)
+        # stats
+        mu  = np.mean(x)
+        sig = np.std(x, ddof=1)
+        # vertical mean line
+        ax.axvline(mu, linestyle='--', linewidth=2, color='k')
+        # 1σ band
+        ax.axvspan(mu - sig, mu + sig, alpha=0.15, color='grey')
+        # annotation (place slightly above the tallest bar)
+        y = (counts.max() * 1.03) if len(counts) else 0
+        txt = f'μ={mu:.3g}, σ={sig:.3g}'
+        if option:
+            txt_option = 'w/o outliers: \n'+f'μ={0.164:.3g}, σ={0.0151:.3g}'
+        # find tallest bar to anchor the text
+        k = int(np.argmax(counts))
+        bar = patches[k]
+        bx  = bar.get_x()
+        bw  = bar.get_width()
+        bh  = bar.get_height()
+        x_text = bx + bw + 0.01 * (edges[-1] - edges[0])   # small horizontal offset
+        y_text = 5000                                        # align with top of the bar
+        ax.text(x_text, y_text, txt, ha='left', va='bottom', fontsize=12,
+                bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='none', alpha=0.8),
+                color='k')
+        if option:
+           ax.text(x_text, 1500, txt_option, ha='left', va='bottom', fontsize=12,
+                bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='none', alpha=0.8),
+                color='k')         
+        return mu, sig
+    
     #Plot a histogram of computation time
-    plt.figure(figsize=(10,6))
-    plt.hist(expert_compt_time_arr, bins=30, alpha=0.5, label='Expert SMPC', color='blue')
-    plt.hist(reduced_compt_time_arr, bins=30, alpha=0.5, label='Reduced SMPC', color='orange')
-    plt.xlabel('Computation Time (seconds)')
-    plt.ylabel('Frequency')
-    plt.title(f'Computation Time Distribution: {"IPOPT" if "ipopt" in filename else "Gurobi"} Solver')
-    plt.legend()
-    plt.show()
+    #outlier removal
+    # reduced_opt_solve_time  = np.array(reduced_opt_solve_time)
+    # idx = np.where(reduced_opt_solve_time<0.2)
+    # print(np.mean(reduced_opt_solve_time[idx]),np.std(reduced_opt_solve_time[idx]))
+    # print(reduced_compt_time_arr[idx].shape,reduced_compt_time_arr.shape)
+    fig, ax = plt.subplots()
+    hist_with_stats(ax, np.array(expert_compt_time_arr), bins=100, label='Full MPC',color='red')
+    hist_with_stats(ax, reduced_compt_time_arr, bins=100, label='Reduced MPC',color='green',option=True)
+    ax.legend()
+    plt.xlim(0, 30)
+    ax.set_xlabel('Computation Time (s)'); 
+    ax.set_ylabel('Count')
+    plt.show() 
 
     plt.figure(figsize=(10,6))
     plt.hist(reduced_opt_solve_time, bins=30, alpha=0.7, color='green')
@@ -141,7 +177,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--filename",
         type=str,
-        default="nuplan_evaluation_N14_wayformer_affine_wayformer_gurobi.pkl.gz",
+        default="reduced_nuplan_evaluation_N14_wayformer_affine_wayformer_gurobi.pkl.gz",
         help="Path to the evaluation data file",
     )
     main(parser.parse_args().filename)

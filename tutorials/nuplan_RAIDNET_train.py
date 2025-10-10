@@ -119,27 +119,20 @@ def main(smpc_config,config):
 
     raidnet_config = {'num_tvs': smpc_config['num_tvs'], 'num_heads': config['num_heads'],'dropout_prob':config['dropout_prob']}
     #Initialize RAIDNET
-    policy_type = 'RAIDNET_V2'
-    if config['joint_dual_pred']:
-        print('Joint Dual Pred: True')
-        pred_mode = ['both duals','tertiary','binary']
-        policy=RAID_NET(raidnet_config,observation_dim, 2*observation_dim, l1_num+ca_num, config['N']-1, num_layers, hidden_dim, lambda_dim=l1_num,lambda_ubd = smpc_config['l1_lmbd'])
-        device=th.device("cuda:0" if th.cuda.is_available() else "cpu")
-        policy.to(device)
+    policy_type = 'RAIDNET_V1'
+    pred_mode = ['both duals','tertiary','binary']
+    if policy_type == 'RAIDNET_V1':
+        l1_policy = RAID_NET(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, l1_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
+        ca_policy = RAID_NET(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, ca_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
+    elif policy_type == 'RAIDNET_V2':
+        l1_policy = RAID_NET_V2(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, l1_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
+        ca_policy = RAID_NET_V2(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, ca_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
     else:
-        pred_mode = ['both duals','tertiary','binary']
-        if policy_type == 'RAIDNET_V1':
-            l1_policy = RAID_NET(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, l1_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
-            ca_policy = RAID_NET(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, ca_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
-        elif policy_type == 'RAIDNET_V2':
-            l1_policy = RAID_NET_V2(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, l1_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=l1_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['l1','tertiary','binary'])
-            ca_policy = RAID_NET_V2(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, ca_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
-        else:
-            raise NotImplementedError(f'Policy type {policy_type} not implemented.')
-        device=th.device("cuda:0" if th.cuda.is_available() else "cpu")
-        l1_policy.to(device)
-        ca_policy.to(device)
-        policy = [l1_policy, ca_policy]
+        raise NotImplementedError(f'Policy type {policy_type} not implemented.')
+    device=th.device("cuda:0" if th.cuda.is_available() else "cpu")
+    l1_policy.to(device)
+    ca_policy.to(device)
+    policy = [l1_policy, ca_policy]
     print(l1_num,ca_num)
     trainable_params = sum(p.numel() for p in l1_policy.parameters() if p.requires_grad)
     print(f"Number of trainable parameters (L1): {trainable_params}")
