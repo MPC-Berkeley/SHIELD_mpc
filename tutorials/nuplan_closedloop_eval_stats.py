@@ -144,7 +144,7 @@ def main(filename):
         return mu, sig
     
     #Plot a histogram of computation time
-    #outlier removal
+    # outlier removal
     # reduced_opt_solve_time  = np.array(reduced_opt_solve_time)
     # idx = np.where(reduced_opt_solve_time<0.2)
     # print(np.mean(reduced_opt_solve_time[idx]),np.std(reduced_opt_solve_time[idx]))

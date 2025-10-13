@@ -225,8 +225,8 @@ def plot_joint_metrics(metrics: dict):
     # order + styles
     order = [k for k in ['V2', 'V1', 'MLP'] if k in histograms]
     labels = {
-        'V2':  r'$\pi^{\text{RAIDN-V2}}$',
-        'V1':  r'$\pi^{\text{RAIDN-V1}}$',
+        'V2':  r'$\pi^{\text{class}}$',
+        'V1':  r'$\pi^{\text{RAIDN}}$',
         'MLP': r'$\pi^{\text{MLP}}$',
     }
     colors = {

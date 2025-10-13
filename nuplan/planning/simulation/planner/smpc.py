@@ -643,7 +643,7 @@ class SMPC():
             else: 
                 if self.vars_ws is not None: 
                     self.opti.set_initial(self.vars_pol4screening, self.vars_ws)
-
+            print(self.opti)
             st = time.time() 
             self.sol = self.opti.solve() 
             solve_time = time.time() - st 

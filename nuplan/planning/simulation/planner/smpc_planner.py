@@ -107,6 +107,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.ego_planned_trajs = []
         self.figs_w_preds = []
         self.ego_opt_sols_full_state = []
+        self.ego_opt_sols_control = []
         self.pred_agent_params = []
         self.smpc_params = []
         self.l1_active = []
@@ -559,6 +560,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.cl_ego_traj.append(ego_state)
             self.ego_planned_trajs.append(self.s2xy(sol['nom_z'][0,1:]))
             self.ego_opt_sols_full_state.append(self.get_ego_full_state())
+            self.ego_opt_sols_control.append(sol['u_control'])
             self.smpc_params.append(self.smpc.opti.value(self.smpc.params))
 
             if leading_vehicle is not None and leading_vehicle_key not in preds_dict['tv_track_tokens']:
@@ -568,6 +570,8 @@ class SMPCPlanner(AbstractIDMPlanner):
                 fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"], info["l1_duals"]) 
             else:
                 if self.t > self.time_thresh and not self.config['expert_only']:
+                    print('Reduced SMPC')
+                    self.visualize_scene(current_input, pred, 0, sol["constr_keep"], sol['gain_keep'],visualized=True) #reduced smpc
                     fig = self.visualize_scene(current_input, pred, 0, sol["constr_keep"], sol['gain_keep']) #reduced smpc
                 elif self.t > self.time_thresh and self.config['expert_only']:
                     if self.smpc.solver == 'ipopt':
@@ -613,6 +617,8 @@ class SMPCPlanner(AbstractIDMPlanner):
             # self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
         if (self.t > self.time_thresh) and self.config['eval_mode'] and (not self.config['expert_only']) and expert_optimal:
             if self.smpc_expert.solver == 'ipopt':
+                print('Expert')
+                self.visualize_scene(current_input, pred, 0, expert_sol["ca_duals"], expert_sol['l1_duals'],visualize=True) #expert smpc
                 fig_expert = self.visualize_scene(current_input, pred, 0, expert_sol["ca_duals"], expert_sol['l1_duals']) #expert smpc
             else:
                 fig_expert = self.visualize_scene(current_input, pred, 0) #expert smpc
@@ -1243,6 +1249,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                                             'logname': [logname], 
                                             'scenario_id': [self.scenario_id], 
                                             'ego_opt_sol':[self.ego_opt_sols_full_state], 
+                                            'ego_opt_control':[self.ego_opt_sols_full_control],
                                             'ego_cl_traj': [self.cl_ego_traj], 
                                             'ego_planned_trajs':[self.ego_planned_trajs],
                                             'iteration_data': [self.iteration_data], 
@@ -1263,6 +1270,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                             data['dual_class'].append(self.dual_class)
                             data['ego_cl_traj'].append(self.cl_ego_traj)
                             data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
+                            data['ego_opt_control'].append(self.ego_opt_sols_full_control)
                             data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
                             data['preds'].append(self.preds)
                             data['l1_active'].append(self.l1_active)
@@ -1317,6 +1325,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                                             'scenario_type':[self.scenario_type],
                                             'scenario_id': [self.scenario_id], 
                                             'ego_opt_sol':[self.ego_opt_sols_full_state], 
+                                            'ego_opt_control':[self.ego_opt_sols_full_control],
                                             'ego_cl_traj': [self.cl_ego_traj], 
                                             'ego_planned_trajs':[self.ego_planned_trajs],
                                             'iteration_data': [self.iteration_data],
@@ -1348,6 +1357,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                             data['iteration_data'].append(self.iteration_data)
                             data['ego_cl_traj'].append(self.cl_ego_traj)
                             data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
+                            data['ego_opt_control'].append(self.ego_opt_sols_full_control)
                             data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
                             data['preds'].append(self.preds)
                             data['agent_params'].append(self.pred_agent_params)
@@ -1443,6 +1453,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         self.preds = []
         self.pred_agent_params = []
         self.ego_opt_sols_full_state = []
+        self.ego_opt_sols_control = []
         self.figs_w_preds = []
         self.figs_w_preds_expert = []
         self.raidnet_classifications = []
