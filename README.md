@@ -1,7 +1,6 @@
 # SHIELD MPC
 <div align="center">
 <img src="assets/main.png" width="500">
-</div>
 This repository contains the implementation of a Safe Hierarchical Inference for Lightweight
 Duality-Screened MPC (SHIELD) algorithm. 
 
@@ -11,7 +10,7 @@ Duality-Screened MPC (SHIELD) algorithm.
 <a href='arxiv_link_here'><img src='https://img.shields.io/badge/Paper-Arxiv-red'></a>
 
 We propose a hierarchical learning-and-verification architecture that rethinks how learning interacts with optimization. Instead of learning to predict the entire optimizer, our approach learns to predict the relevant structure of the optimization problem itself. A deep neural network (DNN) maps the current system state and environmental features to a reduced set of constraints and decision variables that are likely to be active or influential for the current control step. This yields a smaller, problem-specific MPC instance (SHIELD MPC) that captures only the essential local dynamics. Leveraging strong duality and convex sensitivity analysis, we derive a priori screening conditions that guarantee when such DNN-based eliminations are safe—that is, when removing a constraint or decision variable does not change the optimal cost or feasibility beyond a user-specified tolerance. 
-
+</div>
 
 # Example Simulation Results
 <div align="center">
