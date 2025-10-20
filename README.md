@@ -8,7 +8,7 @@
    <table style="border:none;">
         <tr>
             <td style="border: none;" align="center">
-                <img src="hhttps://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_08ee9351335b5c9a_29_starting_unprotected_cross_turn_N14_59.gif" width="400" />
+                <img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_08ee9351335b5c9a_29_starting_unprotected_cross_turn_N14_59.gif" width="400" />
                 <div>Proposed: SHIELD MPC</div>
             </td>
             <td style="border: none;" align="center">
