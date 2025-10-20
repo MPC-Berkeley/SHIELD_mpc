@@ -1,6 +1,6 @@
 # SHIELD MPC
 <div align="center">
-<img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/main.png" width="500">
+<img src="assets/main.png" width="500">
 </div>
 
 # Example Simulation Results
@@ -8,11 +8,11 @@
    <table style="border:none;">
         <tr>
             <td style="border: none;" align="center">
-                <img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_08ee9351335b5c9a_29_starting_unprotected_cross_turn_N14_59.gif" width="400" />
+                <img src="assets/final_eval_08ee9351335b5c9a_29_starting_unprotected_cross_turn_N14_59.gif" width="400" />
                 <div>Proposed: SHIELD MPC</div>
             </td>
             <td style="border: none;" align="center">
-                <img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_08ee9351335b5c9a_29_starting_unprotected_cross_turn_N14_59_expert.gif" width="400">
+                <img src="assets/final_eval_08ee9351335b5c9a_29_starting_unprotected_cross_turn_N14_59_expert.gif" width="400">
                 <div>Baseline: Full MPC</div>
             </td>
         </tr>
@@ -21,17 +21,17 @@
    <table style="border:none;">
         <tr>
             <td style="border: none;" align="center">
-                <img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_23b782750976520b_0_high_magnitude_speed_N14_7.gif" width="400" />
+                <img src="assets/final_eval_23b782750976520b_0_high_magnitude_speed_N14_7.gif" width="400" />
                 <div>Proposed: SHIELD MPC</div>
             </td>
             <td style="border: none;" align="center">
-                <img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_23b782750976520b_0_high_magnitude_speed_N14_7_expert.gif" width="400">
+                <img src="assets/final_eval_23b782750976520b_0_high_magnitude_speed_N14_7_expert.gif" width="400">
                 <div>Baseline: Full MPC</div>
             </td>
         </tr>
     </table>
 
-<img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/results_table.png" width="500">
+<img src="assets/results_table.png" width="500">
 
 <strong>> x35 Improvement in the total computation time!</strong>
 
