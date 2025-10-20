@@ -1,3 +1,43 @@
+# SHIELD MPC
+<div align="center">
+<img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/main.png" width="500">
+</div>
+
+# Example Simulation Results
+<div align="center">
+   <table style="border:none;">
+        <tr>
+            <td style="border: none;" align="center">
+                <img src="hhttps://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_08ee9351335b5c9a_29_starting_unprotected_cross_turn_N14_59.gif" width="400" />
+                <div>Proposed: SHIELD MPC</div>
+            </td>
+            <td style="border: none;" align="center">
+                <img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_08ee9351335b5c9a_29_starting_unprotected_cross_turn_N14_59_expert.gif" width="400">
+                <div>Baseline: Full MPC</div>
+            </td>
+        </tr>
+    </table>
+
+   <table style="border:none;">
+        <tr>
+            <td style="border: none;" align="center">
+                <img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_23b782750976520b_0_high_magnitude_speed_N14_7.gif" width="400" />
+                <div>Proposed: SHIELD MPC</div>
+            </td>
+            <td style="border: none;" align="center">
+                <img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/final_eval_23b782750976520b_0_high_magnitude_speed_N14_7_expert.gif" width="400">
+                <div>Baseline: Full MPC</div>
+            </td>
+        </tr>
+    </table>
+
+<img src="https://github.com/MPC-Berkeley/SHIELD_mpc/assets/results_table.png" width="500">
+
+<strong>> x35 Improvement in the total computation time!</strong>
+
+</div>
+
+
 # Downloading nuPlan mini v1.1 Dataset:
 1) Go to https://www.nuscenes.org/nuplan and download nuPlan mini v1.1 dataset.
 2) Follow the instructions in [nuplan-devkit](https://nuplan-devkit.readthedocs.io/en/latest/dataset_setup.html) to set up the dataset
