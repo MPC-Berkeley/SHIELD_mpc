@@ -22,7 +22,6 @@ _ext
 *.o
 *.out
 *.pdf
-*.png
 .project
 *.pth.tar
 *.pyc
