@@ -113,11 +113,6 @@ class RAID_NET_V2(nn.Module):
       
   def forward(self, x: th.Tensor) -> th.Tensor:
         ### Encoder ####
-        #Divide x into sequence of temporal inputs
-        # encoder_outputs = []
-        # for t in range(1,self.N+1):
-            # encoder_outputs.append(self.encoder(th.cat((x[:,:,:2],x[:,:,2+3*(t)*2:2+3*(t+1)*2]),dim=-1)))
-        
         #Original
         x_embed = self.input_embedding(x)
         encoder_output = self.encoder(x_embed)
@@ -153,7 +148,6 @@ class RAID_NET_V2(nn.Module):
             return th.stack(outputs, dim=1).permute(0,2,3,1,4).reshape(x.shape[0],-1)
         elif self.pred_mode[1] == 'binary' and self.pred_mode[0] == 'ca':
             return th.stack(outputs, dim=1).permute(0,2,3,1).reshape(x.shape[0],-1)
-            # return th.stack(outputs, dim=1)  # Shape: (batch_size, N, V, M^V or [M,2,3]) varies by duals (ca dual and l1 dual respectively)
         elif self.pred_mode[0] == 'both duals':
             return th.stack(outputs, dim=1).permute(0,2,3,1).reshape(x.shape[0],-1)
         else:

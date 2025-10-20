@@ -17,12 +17,12 @@ a_lat: 3.2 #m/s^2 used for lane chance mode prediction of the TVs
 # Evaluation parameters
 eval_mode_category: 0 #0: closed-loop with IDMAgent observation, 1: open-loop (TVs do not react to EV) using logged trajectories 
 eval_mode: True 
-expert_only: True
+expert_only: False
 save_snapshots: True
 prediction_method: wayformer #['idm', 'wayformer']
 solver: 'gurobi' #['ipopt', 'gurobi']
 save_canon_forms: False
-reduced_ls: False
+reduced_ls: True
 best_response: True
 
 # Directories

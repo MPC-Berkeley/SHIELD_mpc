@@ -72,6 +72,10 @@ def build_simulations(
 
     scenario_names = [sc.scenario_name for sc in scenarios]
     print(scenario_names)
+    
+    '''
+    Filter for specific scenario for debugging
+    '''
     # '23b782750976520b', '08ee9351335b5c9a'
     # if '23b782750976520b' in scenario_names:
     #     print('FOUND IT'.center(50, '!'))

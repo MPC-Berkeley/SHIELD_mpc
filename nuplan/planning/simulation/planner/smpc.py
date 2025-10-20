@@ -47,11 +47,9 @@ class SMPC():
                 preds = List, 
                 canon_prob_fn=None, 
                 config=None, ): 
-        # self.routes=routes 
         self.ev=ev 
         self.N=N 
         self.V_MIN=V_MIN 
-        # self.V_MAX=V_MAX 
         self.A_MAX=A_MAX 
         self.A_MIN=A_MIN 
         self.ev_length = ev_length 
@@ -69,7 +67,7 @@ class SMPC():
                 self.N_modes=[self.config['num_modes'] for _ in range(self.N_TV)] 
         else: 
             self.N_modes=[1 for _ in range(self.N_TV)] #Assume, single mode per vehicles 
-        # Maps a mode, say 10, to the modes of the TVs, like (0,1,1,3,3) 
+        # Maps a scenario (m) to the modes of the TVs (j), like (0,1,1,3,3) 
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
 
         self.tight=2.3 
@@ -139,7 +137,6 @@ class SMPC():
             #Parameters for constraint and gain screening 
             self.gain_keep=[[self.opti.parameter(self.N-1,1) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
             self.constr_keep=[[self.opti.parameter(self.N-1,1) for m in range(len(self.mode_map))] for k in range(self.N_TV)] 
-            # self.constr_keep=[[np.zeros((self.N-1)) for m in range(len(self.mode_map))] for k in range(self.N_TV)] 
         self.params = ca.vertcat(*_flatten2ca(self.params))
         self.policy=self._return_policy_class() 
         self._add_constraints_and_cost() 
@@ -183,9 +180,7 @@ class SMPC():
         else:
             if not self.offline: #evaluation mode (online)
                 K4screening=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
-                # K=[[[ca.if_else(self.gain_keep[k][j][t], K4screening[k][j][t], ca.MX.zeros(1, 2)) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
                 K=[[[self.gain_keep[k][j][t]*K4screening[k][j][t] for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
-                # K = K4screening
                 self.gain_l1=[[[ca.if_else(self.gain_keep[k][j][t], self.opti.variable(1,2), ca.MX.zeros(1, 2)) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)]
             else: 
                 K=[[[self.opti.variable(1,2) for t in range(self.N-1)] for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
@@ -281,7 +276,6 @@ class SMPC():
         #Cost initialization 
         cost = 0 
         # #State and input constraints 
-        # self.opti.subject_to(self.opti.bounded(self.V_MIN, A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h, self.V_MAX)) 
         self.opti.subject_to(self.V_MIN<=A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h) 
         self.opti.subject_to(A[[t*2+1 for t in range(1,self.N+1)],:]@self.z_curr+B[[t*2+1 for t in range(1,self.N+1)],:]@h <= self.V_MAX + self.slack[0][0][0]) 
         self.opti.subject_to(self.opti.bounded(self.A_MIN, h, self.A_MAX))
@@ -295,7 +289,6 @@ class SMPC():
         #collision avoidance with the lead vehicle (added because wayformer doesn't detect objects that doesn't move by some threshold) 
         self.lead_vehicle_constr = nom_s[-1]<= self.lead_vehicle_s-self.s0 - self.ev_length*2 - 1 +self.slack[0][0][0] #s_{N|t} <= s_{lead|t} - 2*ev_length - 1 + slack 
         self.opti.subject_to(self.lead_vehicle_constr) #s_{N|t} <= s_{lead|t} 
-        # cost+=-2.7*self.Q_cost*ca.sum1(nom_s) +2.*self.Q_cost*nom_z_diff.T@nom_z_diff# penalizes slow progress (was -2.5, 2) 
         self.multiplier = 0.1 
         cost += -0.1*self.multiplier*10*self.Q_cost[0,0]*ca.sum1(nom_s) + self.multiplier*5.56*nom_z_diff.T@ca.kron(ca.DM.eye(self.N),self.Q_cost)@nom_z_diff# penalizes slow progress (was -4, 3.5) 
         cost += self.multiplier*0.01*self.R_cost*ca.diff(ca.vertcat(self.u_prev,h),1,0).T@ca.diff(ca.vertcat(self.u_prev,h),1,0) # penalizes large input rates  
@@ -465,18 +458,6 @@ class SMPC():
             self.nonzero_vec = ca.substitute(self.nonzero_vec, self.slack_vec, ca.DM.zeros(*self.slack_vec.shape)) # remove slack dependence
             self.C_fn_nonzero = ca.Function('C_fn_nonzero', [self.params], [ca.simplify(self.nonzero_vec)], {'post_expand': True})
             
-            # p_sx = ca.SX.sym('p', *self.params.shape)
-            # var_sx = ca.SX.sym('var', *self.vars_pol4screening.shape)
-            # # rebuild the same expression but using SX symbols:
-            # nonzero_vec_sx = ca.substitute(
-            #     ca.vec(ca.jacobian(ca.vertcat(*self.canon_prob_fn['f_ca_i'](var_sx, p_sx)),
-            #                     var_sx)),
-            #     var_sx, ca.DM.zeros(*self.vars_pol4screening.shape)
-            # )
-            
-            # nonzero_vec_sx = nonzero_vec_sx[self.nonzero_inds]  # keep only nnz entries            
-            # self.C_fn_nonzero = ca.Function('C_fn_nonzero', [p_sx], [ca.simplify(nonzero_vec_sx)],{'post_expand':True})
-            
             # # --- one-time CSR skeleton (perm from (row,col)->CSR order) ---
             rows = np.asarray(self.row_indices, dtype=np.int32)
             cols = np.asarray(self.col_indices, dtype=np.int32)
@@ -489,39 +470,6 @@ class SMPC():
                 (np.zeros(nnz, dtype=float), csr.indices.copy(), csr.indptr.copy()),
                 shape=self.C_shape
             )     
-            # Symbols
-            # theta = self.vars_pol4screening          # decision vars
-            # p     = self.params
-
-            # # Constraint vector g(theta, p) you linearize for C = ∂g/∂theta
-            # g = ca.vertcat(*self.canon_prob_fn['f_ca_i'](theta, p))
-
-            # # Sparse Jacobian Function (returns (J, g))
-            # C = ca.jacobian(g, theta)
-            # C_fun = ca.Function('C_fun', [theta, p], [C[self.nonzero_inds]],
-            #                     {'post_expand': True}).expand()
-            
-            # C_full = ca.Function('C_full', [theta, p], [C], {'post_expand': True}).expand()
-
-            # # Freeze theta ≡ 0 so you don’t substitute each time
-            # theta0 = ca.DM.zeros(*theta.shape)
-
-            # # One-time: learn the sparse structure (CSC order)
-            # C0 = J_full(theta0, ca.DM.zeros(*p.shape))
-            # S = C0.sparsity()
-            # rows   = np.asarray(S.row(),    dtype=np.int32)   # nnz
-            # colptr = np.asarray(S.colind(), dtype=np.int32)   # ncol+1
-            # nrows, ncols = S.size1(), S.size2()
-            # nnz = rows.size
-
-            # self.C = sp.csc_matrix(
-            #     (np.zeros(nnz, dtype=float), rows.copy(), colptr.copy()),
-            #     shape=(nrows, ncols)
-            # )
-
-            # # Stash handles
-            # self._C_fun = C_fun
-            # self._theta0 = theta0
  
             self.c_fn = ca.Function('c_fn',[self.params],[ca.vertcat(*self.canon_prob_fn['f_ca_i'](ca.DM.zeros(*self.vars_pol4screening.shape), self.params))], {'post_expand': True}) 
             Q, p = self.canon_prob_fn['f_hessian'](ca.DM.zeros(*self.vars_pol4screening.shape),vars_epi,self.params,ca.DM.zeros(*self.slack_vec.shape)) 
@@ -613,11 +561,6 @@ class SMPC():
         
         #construct sparse C matrix 
         st = time.time()
-        # Evaluate sparse Jacobian at (theta=0, p = par_val)
-        # C_dm  = self._C_fun(self._theta0, par_val)
-        # csc_vals = np.asarray(J_dm).ravel()      # (nnz,)
-        # self.C.data[:] = C_dm.full().reshape(-1)
-
         self.C.data[:] = self.C_fn_nonzero(par_val).full().reshape(-1)  # reorder to CSR
         # print(f"computing C's csr time: {time.time()-st:.4f} seconds")
 
@@ -643,7 +586,6 @@ class SMPC():
             else: 
                 if self.vars_ws is not None: 
                     self.opti.set_initial(self.vars_pol4screening, self.vars_ws)
-            print(self.opti)
             st = time.time() 
             self.sol = self.opti.solve() 
             solve_time = time.time() - st 
@@ -708,7 +650,6 @@ class SMPC():
             leading_vehicle_active = False 
         t_proc_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_proc'))
         t_wall_sum = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall')) 
-        # solve_time = sum(value for key, value in self.opti.stats().items() if key.startswith('t_wall_solver')) if self.solver == 'grb' else t_wall_sum 
         sol_dict = {} 
         sol_dict['nom_z'] = nom_z # nominal state predictions 
         sol_dict['u_control'] = u_control # control input to apply based on solution 
@@ -739,7 +680,6 @@ class SMPC():
         if not self.offline: 
             gain_keep=[[self.opti.value(self.gain_keep[k][j]) for j in range(self.N_modes[k])] for k in range(self.N_TV)] 
             constr_keep=[[self.opti.value(self.constr_keep[k][m]) for m in range(len(self.mode_map))] for k in range(self.N_TV)] 
-            # constr_keep=[[self.constr_keep[k][m] for m in range(len(self.mode_map))] for k in range(self.N_TV)] 
             
             sol_dict['gain_keep'] = gain_keep 
             sol_dict['constr_keep'] = constr_keep 
@@ -931,7 +871,7 @@ class SMPC():
         num_t = self.N - 1
         M = len(self.mode_map)
         K = self.N_TV
-        TOL = 0.3  # same as _safe_screen default
+        TOL = 0.01 #eps
 
         # ---------- VECTORIZE: SOC (μ) SCREENING ----------
         # μ comes back flat; reshape to (K, M, T, mu_dim) with t as innermost in your build
@@ -1338,7 +1278,6 @@ class SMPC():
 
         # If you later reduce g1, remember to set dropped entries to 0.5 (neutral).
         st = time.time()
-        # mu = self._proj_soc_dual_stacked_np(x_full[:n_mu], self.blocks).flatten()
         mu, eta, g1 = x_full[:n_mu], x_full[n_mu:n_mu+n_eta], x_full[n_mu+n_eta:]
         return mu, eta, g1
 
@@ -1374,13 +1313,11 @@ class SMPC():
         g1 = (self.C @ u)
         g2 = self.F @ u
         g3 = 2*(self.L @ u)
-        # grad_d = np.concatenate([g1 + self.c, g2 + self.f, g3])
         self.gradient_computation_time = time.time() - st 
         # print(f'[smpc.py]: Dual gradient build time: {self.gradient_computation_time:.6f} s') 
         st = time.time()
         # ---- one projected step (alpha=1; equivalent to your proj_dual = dual - grad_d) ---- 
         dual = np.concatenate([f_mu, f_nu, f_g]) 
-        # proj_dual = dual - grad_d 
         proj_dual = np.concatenate([f_mu - (g1 + self.c), f_nu - (g2 + self.f), f_g - g3])
         
         # ---- projection to dual feasible set ---- 
@@ -1388,7 +1325,6 @@ class SMPC():
         n_eta = self.F.shape[0] 
         # μ ∈ SOC* (blockwise) 
         # self.blocks should be [self.mu_dim - 1] * self.num_ca_duals (set earlier). 
-        # proj_dual[:n_mu] = self._proj_soc_dual_stacked_np(proj_dual[:n_mu], self.blocks).flatten() 
         proj_dual[:n_mu] = self._proj_normal_soc_stacked_vecfirst(proj_dual[:n_mu],-(g1 - self.c),self.blocks,tol=1e-9).ravel()
         # η ≥ 0 
         proj_dual[n_mu:n_mu+n_eta] = np.maximum(proj_dual[n_mu:n_mu+n_eta], 0.0) 
@@ -1397,13 +1333,9 @@ class SMPC():
         # print(f'[smpc.py]: Dual projection time: {time.time()-st:.6f} s')
         # ---- gap radius ---- 
         st = time.time() 
-        # gap = np.linalg.norm(dual - proj_dual) * (1.0 + self._sigma) / self._eta_inv
         gap = self._norm2_diff_inbuf(dual, proj_dual) * (1.0 + self._sigma) / self._eta_inv
         # print(f'[smpc.py]: Gap norm time: {time.time() - st:.6f} s') 
-        
-        # print(np.linalg.norm((dual - proj_dual)[:n_mu]))
-        # print(np.linalg.norm((dual - proj_dual)[n_mu:n_mu+n_eta]))
-        # print(np.linalg.norm((dual - proj_dual)[n_mu+n_eta:])) 
+
         return gap 
 
     def _split_slack_vecfirst(self, s_stack, blocks): 

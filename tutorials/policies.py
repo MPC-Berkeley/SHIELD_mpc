@@ -14,8 +14,7 @@ class RAID_NET(nn.Module):
         super(RAID_NET ,self).__init__()
         self.pred_mode = pred_mode
         self.eps = eps
-        # self.Q_dim = [6,4]   # num_vs x [state, mode]
-        # self.lift=nn.Linear(self.Q_dim[1], embed_dim)
+
         self.norm = nn.BatchNorm2d(3)  # input, key, value are the features
         self.num_heads = config['num_heads']
         self.mh_attn=nn.MultiheadAttention(embed_dim, num_heads=self.num_heads)
@@ -40,8 +39,6 @@ class RAID_NET(nn.Module):
         self.pred = nn.Sequential(self.fc_in,self.fc_hidden,self.fc_out)
 
         self.dim_encoding = 3 #self.Q_dim[0]
-
-        # self.drop= th.nn.Dropout( p = 0.2)
 
         # Decoder architecture (attn)
         self.N=horizon # should be SMPC.N-1       
@@ -126,11 +123,8 @@ class RAID_NET(nn.Module):
       batch_size=x.shape[0]
 
       Q=th.stack([self._get_Q(x[i],self.n_tv) for i in range(batch_size)])
-      # Q_n = self.norm(th.stack([Q,Q,Q], dim=1))
-      # Q = Q_n[:,0,:,:]
       attn, _ =self.mh_attn(Q,Q,Q)
 
-      # attn = self.drop(attn)
       x=self.add_norm(Q+attn)
       x=self.add_norm(x+self.pred(x))
 

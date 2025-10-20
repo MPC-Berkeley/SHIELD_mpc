@@ -1,4 +1,4 @@
-name: nuplan
+name: shield
 channels:
   - conda-forge
   - https://conda.anaconda.org/gurobi

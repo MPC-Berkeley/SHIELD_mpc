@@ -22,7 +22,7 @@ except ImportError:
 
 from contextlib import contextmanager
 
-
+NUPLAN_ROOT_DIR = os.environ['NUPLAN_ROOT_DIR']
 # ============================ Utilities ============================
 
 def forward_in_batches(model, x, batch_size=1024, device=None, return_device='cpu'):
@@ -362,15 +362,15 @@ def main(smpc_config, config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--smpc_config', required=False, type=str,
-                        default='/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config_eval.yaml')
+                        default=NUPLAN_ROOT_DIR +'/nuplan/planning/simulation/planner/smpc_config_eval.yaml')
     parser.add_argument('--config', required=False, type=str,
-                        default='/home/mpc/nuplan-devkit/tutorials/training_config.yaml')
+                        default=NUPLAN_ROOT_DIR +'/tutorials/training_config.yaml')
     args = parser.parse_args()
     with open(args.smpc_config, 'r') as f:
         smpc_config = yaml.load(f, Loader=yaml.FullLoader)
     with open(args.config, 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
-    config['v2_joint_ckpt'] = '/home/mpc/nuplan-devkit/nuplan/nn_models/results/RAIDNET_V2_JOINT_NuPlan_N14_N_TV3_10-10-2025_02-25-31_JOINT_300.pt'
-    config['v1_joint_ckpt'] = '/home/mpc/nuplan-devkit/nuplan/nn_models/results/RAIDNET_V1_NuPlan_N14_N_TV3_10-10-2025_03-06-17_JOINT_300.pt'
-    config['mlp_joint_ckpt'] = '/home/mpc/nuplan-devkit/nuplan/nn_models/results/MLP_NuPlan_N14_N_TV3_10-10-2025_03-05-45_JOINT_300.pt'
+    config['v2_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/results/RAIDNET_V2_JOINT_NuPlan_N14_N_TV3_10-10-2025_02-25-31_JOINT_300.pt'
+    config['v1_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/results/RAIDNET_V1_NuPlan_N14_N_TV3_10-10-2025_03-06-17_JOINT_300.pt'
+    config['mlp_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/results/MLP_NuPlan_N14_N_TV3_10-10-2025_03-05-45_JOINT_300.pt'
     main(smpc_config, config)

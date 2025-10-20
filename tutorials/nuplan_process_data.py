@@ -2,6 +2,7 @@ import gzip
 import pickle
 import pdb
 import numpy as np
+import argparse
 
 def open_pickle(file_path):
     with gzip.open(file_path, 'rb') as f:
@@ -64,6 +65,7 @@ def main(file_path):
     print(f'Processed data saved to {out_filename}')
 
 if __name__ == "__main__":
-    filepath = '/home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine_training.pkl.gz'
-    # filepath = '/home/mpc/nuplan-devkit/nuplan/expert_data/nuplan_expert_data_N14_wayformer_affine (another copy).pkl.gz'
-    main(filepath)
+    parser = argparse.ArgumentParser(description='Process nuPlan expert data for RAIDNET training.')
+    parser.add_argument('--filepath', type=str, help='Path to the nuPlan expert data pickle file')
+    args = parser.parse_args()
+    main(args.filepath)

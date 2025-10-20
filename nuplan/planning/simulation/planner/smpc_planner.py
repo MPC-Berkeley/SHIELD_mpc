@@ -39,11 +39,12 @@ from shapely.geometry import Point
 import scipy.linalg as la
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.planner.smpc import SMPC
-# from nuplan.planning.simulation.planner.smpc_nlp import SMPC
 
 from nuplan.planning.simulation.planner.utils.smpc_utils import flatten, get_preds, make_ca_fun, make_jac_fun, filter_preds
 logger = logging.getLogger(__name__)
 faulthandler.enable()
+
+NUPLAN_ROOT_DIR = os.environ['NUPLAN_ROOT_DIR']
 
 class SMPCPlanner(AbstractIDMPlanner):
     """
@@ -74,10 +75,10 @@ class SMPCPlanner(AbstractIDMPlanner):
         :param occupancy_map_radius: [m] The range around the ego to add objects to be considered.
         """
         if not evaluation_mode:
-            with open("/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml") as f:
+            with open(NUPLAN_ROOT_DIR + "/nuplan/planning/simulation/planner/smpc_config.yaml") as f:
                 self.config = yaml.load(f, Loader=yaml.FullLoader)
         else:
-            with open("/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config_eval.yaml") as f:
+            with open(NUPLAN_ROOT_DIR + "/nuplan/planning/simulation/planner/smpc_config_eval.yaml") as f:
                 self.config = yaml.load(f, Loader=yaml.FullLoader)         
 
         super(SMPCPlanner, self).__init__(
@@ -135,10 +136,10 @@ class SMPCPlanner(AbstractIDMPlanner):
             self.reduced_infeasibility = []
             self.reduced_collisions = []
 
-            with open('/home/mpc/nuplan-devkit/tutorials/training_config.yaml') as f:
+            with open(NUPLAN_ROOT_DIR + '/tutorials/training_config.yaml') as f:
                 self.raidnet_config = yaml.load(f, Loader=yaml.SafeLoader)
             self.N = self.config['N']
-            with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{self.N}_canon_form_N_TV'+ str(self.config['num_tvs']) + '_M' + str(self.config['num_modes']) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'rb') as f:
+            with open(NUPLAN_ROOT_DIR + f'/nuplan/planning/simulation/planner/smpc_N{self.N}_canon_form_N_TV'+ str(self.config['num_tvs']) + '_M' + str(self.config['num_modes']) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'rb') as f:
                 canon_prob = pickle.load(f)
                 print(f'[smpc_planner.py] Loaded Canonical Form smpc_N{self.N}_canon_form_N_TV'+ str(self.config['num_tvs']) + '_M' + str(self.config['num_modes']) +'_'+ self.config['collision_avoidance_method'] + '.pkl')
             self.canon_prob = canon_prob
@@ -362,6 +363,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                     ev_length=ego_state.car_footprint.vehicle_parameters.length,
                     offline_mode= True,
                     solver=self.config['solver'],
+                    # solver = 'ipopt', 
                     open_loop = False,
                     eval_mode = False, #only affects the solver settings
                     is_mm_preds=self.config['is_mm_preds'],
@@ -423,7 +425,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 st = time.time()
                 l1_logits = self.RAID_NET_infer[0](obs_reshaped)
                 ca_logits = self.RAID_NET_infer[1](obs_reshaped)
-                self.raidnet_query_time = (time.time() - st)/10
+                self.raidnet_query_time = (time.time() - st)
                 print(f'[smpc_planner.py]: RAID-Net Inference Time: {self.raidnet_query_time:.3f} seconds')
 
                 #Classification
@@ -570,8 +572,6 @@ class SMPCPlanner(AbstractIDMPlanner):
                 fig = self.visualize_scene(current_input, pred, 0, info["ca_duals"], info["l1_duals"]) 
             else:
                 if self.t > self.time_thresh and not self.config['expert_only']:
-                    print('Reduced SMPC')
-                    self.visualize_scene(current_input, pred, 0, sol["constr_keep"], sol['gain_keep'],visualized=True) #reduced smpc
                     fig = self.visualize_scene(current_input, pred, 0, sol["constr_keep"], sol['gain_keep']) #reduced smpc
                 elif self.t > self.time_thresh and self.config['expert_only']:
                     if self.smpc.solver == 'ipopt':
@@ -586,12 +586,12 @@ class SMPCPlanner(AbstractIDMPlanner):
             if self.smpc.offline and self.t == self.time_thresh and self.config['save_canon_forms']: #run once
                 # canon_prob = self.smpc._get_canon_form_mats() #Output is in dict
                 canon_prob_fn = self.smpc._get_canon_form_fns() 
-                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
+                with open(fNUPLAN_ROOT_DIR + '/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn, f)
                 print(f'[Offline Mode] Canonical form saved')
             elif not self.smpc.offline and self.t == self.time_thresh and self.config['save_canon_forms']: #run once
                 canon_prob_fn_precomputed = self.smpc._get_canon_form_fns_precomputed()
-                with open(f'/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
+                with open(fNUPLAN_ROOT_DIR + '/nuplan/planning/simulation/planner/smpc_N{str(self.smpc.N)}_canon_form_precomputed_N_TV' + str(self.smpc.N_TV) + '_M' + str(self.smpc.N_modes[0]) +'_'+ self.config['collision_avoidance_method'] + '.pkl', 'wb') as f:
                     pickle.dump(canon_prob_fn_precomputed, f)
                 print(f'[Eval Mode] Canonical form saved')  
         else:
@@ -612,13 +612,8 @@ class SMPCPlanner(AbstractIDMPlanner):
                 self.reduced_infeasibility.append(1)
                 self.reduced_collisions.append(0) #assume no collision as long as nuPlan is running. collision is detected by nuPlan's own metrics 
 
-            # self.visualize_scene(current_input, pred, 0,visualize=True)
-            # self.visualize_scene(current_input, pred, 0,info["ca_duals"],visualize=True)
-            # self.visualize_observations(ego_state, observations.tracked_objects.tracked_objects)
         if (self.t > self.time_thresh) and self.config['eval_mode'] and (not self.config['expert_only']) and expert_optimal:
             if self.smpc_expert.solver == 'ipopt':
-                print('Expert')
-                self.visualize_scene(current_input, pred, 0, expert_sol["ca_duals"], expert_sol['l1_duals'],visualize=True) #expert smpc
                 fig_expert = self.visualize_scene(current_input, pred, 0, expert_sol["ca_duals"], expert_sol['l1_duals']) #expert smpc
             else:
                 fig_expert = self.visualize_scene(current_input, pred, 0) #expert smpc
@@ -722,10 +717,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                 ind = vh_track_tokens.index(predictions['tv_track_tokens'][i])
                 obs[:,5+4*i:5+4*(i+1)] = np.array([observations.tracked_objects.tracked_objects[ind].box.center.x,observations.tracked_objects.tracked_objects[ind].box.center.y,observations.tracked_objects.tracked_objects[ind].velocity.magnitude(),observations.tracked_objects.tracked_objects[ind].box.center.heading]) #TV's current states 
             obs[:,5+4*i:5+4*(i+1)] -= obs[:,:4]
-            # if self.is_mm_preds and isinstance(predictions[i],List):
-            #     obs[:,5+4*self.config['num_tvs']+i] = 1 if len(predictions[i]) > 1 else 0
-            # else:
-            #     obs[:,5+4*self.config['num_tvs']+i] = 0
+
         return obs
 
     def get_observation_for_inference(self, current_input, predictions, tv_params):
@@ -1102,7 +1094,7 @@ class SMPCPlanner(AbstractIDMPlanner):
         route_plan, _ = self._breadth_first_search(ego_state)
         ego_speed = ego_state.dynamic_car_state.rear_axle_velocity_2d.magnitude()
         speed_limit = route_plan[0].speed_limit_mps or self._policy.target_velocity
-        print(f"Route plan speed limit: {speed_limit} m/s, Ego speed: {ego_speed} m/s")
+        print(f"[smpc_planner.py] Route plan speed limit: {speed_limit} m/s, Ego speed: {ego_speed} m/s")
         self._policy.target_velocity = speed_limit if speed_limit > ego_speed else ego_speed
         discrete_path = []
         for edge in route_plan:
@@ -1230,7 +1222,7 @@ class SMPCPlanner(AbstractIDMPlanner):
             eval_str = '_eval'
         else:
             eval_str = ''
-        viddir = '/home/mpc/nuplan-devkit/nuplan/expert_data/video/N'+str(self.config['N'])+'_' + str(self.config['prediction_method']) + '_' + str(self.config['collision_avoidance_method']) + eval_str + '/'
+        viddir = NUPLAN_ROOT_DIR + '/nuplan/expert_data/video/N'+str(self.config['N'])+'_' + str(self.config['prediction_method']) + '_' + str(self.config['collision_avoidance_method']) + eval_str + '/'
         duplicate_scenario = False
         for di in viddir:
             if logname in di:
@@ -1249,7 +1241,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                                             'logname': [logname], 
                                             'scenario_id': [self.scenario_id], 
                                             'ego_opt_sol':[self.ego_opt_sols_full_state], 
-                                            'ego_opt_control':[self.ego_opt_sols_full_control],
+                                            'ego_opt_control':[self.ego_opt_sols_control],
                                             'ego_cl_traj': [self.cl_ego_traj], 
                                             'ego_planned_trajs':[self.ego_planned_trajs],
                                             'iteration_data': [self.iteration_data], 
@@ -1270,7 +1262,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                             data['dual_class'].append(self.dual_class)
                             data['ego_cl_traj'].append(self.cl_ego_traj)
                             data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
-                            data['ego_opt_control'].append(self.ego_opt_sols_full_control)
+                            data['ego_opt_control'].append(self.ego_opt_sols_control)
                             data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
                             data['preds'].append(self.preds)
                             data['l1_active'].append(self.l1_active)
@@ -1325,7 +1317,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                                             'scenario_type':[self.scenario_type],
                                             'scenario_id': [self.scenario_id], 
                                             'ego_opt_sol':[self.ego_opt_sols_full_state], 
-                                            'ego_opt_control':[self.ego_opt_sols_full_control],
+                                            'ego_opt_control':[self.ego_opt_sols_control],
                                             'ego_cl_traj': [self.cl_ego_traj], 
                                             'ego_planned_trajs':[self.ego_planned_trajs],
                                             'iteration_data': [self.iteration_data],
@@ -1357,7 +1349,7 @@ class SMPCPlanner(AbstractIDMPlanner):
                             data['iteration_data'].append(self.iteration_data)
                             data['ego_cl_traj'].append(self.cl_ego_traj)
                             data['ego_opt_sol'].append(self.ego_opt_sols_full_state)
-                            data['ego_opt_control'].append(self.ego_opt_sols_full_control)
+                            data['ego_opt_control'].append(self.ego_opt_sols_control)
                             data['ego_planned_trajs'].append(self.ego_planned_trajs) #[s,v]
                             data['preds'].append(self.preds)
                             data['agent_params'].append(self.pred_agent_params)

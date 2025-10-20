@@ -54,9 +54,9 @@ scenario_types=[
     ]
 
 print('total log list length:',len(log_list))
-log_list = log_list[59:] # 2021.10.06.17.43.07_veh-28_00508_00877 for 08ee9351335b5c9a
-scenario_types = ['starting_unprotected_cross_turn'] #for 08ee9351335b5c9a
-num_scenarios = 30 #float: fraction, int: number of scenarios to use from the log #for 08ee9351335b5c9a
+# log_list = log_list[59:] # 2021.10.06.17.43.07_veh-28_00508_00877 for 08ee9351335b5c9a
+# scenario_types = ['starting_unprotected_cross_turn'] #for 08ee9351335b5c9a
+# num_scenarios = 30 #float: fraction, int: number of scenarios to use from the log #for 08ee9351335b5c9a
 
 # log_list = [log_list[7]] #for 23b782750976520b
 # scenario_types = ['high_magnitude_speed'] #for 23b782750976520b
@@ -64,67 +64,66 @@ num_scenarios = 30 #float: fraction, int: number of scenarios to use from the lo
 # Also, go to simulation_builder.py to turn on the filter for this specific scenario
 
 #General Case
-# log_list = log_list[12:]
-# num_scenarios = 3
+log_list = log_list
+num_scenarios = 3
 
 num_scenarios_per_type = 1
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
-    it += 59
+    # it += 59
     # it += 7
     # it += 12
-    if True:
-        try:
-            print(f'[Iter:{it}] Collecting data from log: ', log)
-            EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
-            # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
-            OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
-            DATASET_PARAMS = [
-                'scenario_builder=nuplan_mini',  # [nuplan, nuplan_mini] use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
-                f"scenario_filter.log_names=[{str(log)}]",
-                f'scenario_filter.scenario_types={scenario_types}', 
-                # f'scenario_filter.num_scenarios_per_type={num_scenarios_per_type}',  # use n scenarios per type
-                f'scenario_filter.limit_total_scenarios={num_scenarios}',  # use n total scenarios
-                'scenario_filter.remove_invalid_goals=true',  
-            ]
+    try:
+        print(f'[Iter:{it}] Collecting data from log: ', log)
+        EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
+        # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
+        OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
+        DATASET_PARAMS = [
+            'scenario_builder=nuplan_mini',  # [nuplan, nuplan_mini] use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
+            f"scenario_filter.log_names=[{str(log)}]",
+            f'scenario_filter.scenario_types={scenario_types}', 
+            # f'scenario_filter.num_scenarios_per_type={num_scenarios_per_type}',  # use n scenarios per type
+            f'scenario_filter.limit_total_scenarios={num_scenarios}',  # use n total scenarios
+            'scenario_filter.remove_invalid_goals=true',  
+        ]
 
-            # Initialize configuration management system
-            hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
-            hydra.initialize(config_path=simulation_hydra_paths.config_path)
+        # Initialize configuration management system
+        hydra.core.global_hydra.GlobalHydra.instance().clear()  # reinitialize hydra if already initialized
+        hydra.initialize(config_path=simulation_hydra_paths.config_path)
 
-            # Compose the configuration
-            cfg = hydra.compose(config_name=simulation_hydra_paths.config_name, overrides=[
-                f'group={SAVE_DIR}',
-                f'experiment_name=smpc_expert_trajectory',
-                f'job_name=data_collection', 
-                'experiment=${experiment_name}/${job_name}',
-                'worker=sequential',
-                f'ego_controller={EGO_CONTROLLER}',
-                f'observation={OBSERVATION}',
-                f'hydra.searchpath=[{simulation_hydra_paths.common_dir}, {simulation_hydra_paths.experiment_dir}]',
-                'output_dir=${group}/${experiment}',
-                *DATASET_PARAMS,
-            ])
+        # Compose the configuration
+        cfg = hydra.compose(config_name=simulation_hydra_paths.config_name, overrides=[
+            f'group={SAVE_DIR}',
+            f'experiment_name=smpc_expert_trajectory',
+            f'job_name=data_collection', 
+            'experiment=${experiment_name}/${job_name}',
+            'worker=sequential',
+            f'ego_controller={EGO_CONTROLLER}',
+            f'observation={OBSERVATION}',
+            f'hydra.searchpath=[{simulation_hydra_paths.common_dir}, {simulation_hydra_paths.experiment_dir}]',
+            'output_dir=${group}/${experiment}',
+            *DATASET_PARAMS,
+        ])
 
-            '''
-            Initilize the planner
-            '''
-            # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
+        '''
+        Initilize the planner
+        '''
+        # planner = SimplePlanner(horizon_seconds=10.0, sampling_time=0.2, acceleration=[0.0, 0.0])
 
-            if smpc_config['collision_avoidance_method'] == 'obca':
-                #OBCA constraints
-                ev_noise_std=[0.01,0.01]
-                tv_noise_std=[0.05, 0.05]
-            else:
-                #Affine CA constraints
-                ev_noise_std=[0.01,0.01]
-                tv_noise_std=[0.2, 0.2]
+        if smpc_config['collision_avoidance_method'] == 'obca':
+            #OBCA constraints
+            ev_noise_std=[0.01,0.01]
+            tv_noise_std=[0.05, 0.05]
+        else:
+            #Affine CA constraints
+            ev_noise_std=[0.01,0.01]
+            tv_noise_std=[0.2, 0.2]
 
-            print('Initializing the SMPC Planner...')
-            planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std, iter=it, evaluation_mode = True)
+        print('Initializing the SMPC Planner...')
+        planner = SMPCPlanner(ev_noise_std=ev_noise_std, tv_noise_std=tv_noise_std, iter=it, evaluation_mode = True)
 
-            # Run the simulation loop (real-time visualization not yet supported, see next section for visualization)
-            main_simulation(cfg, planner)
-        except:
-            print(f'Error occurred while running NuPlan for log: {log}')
-            continue
+        # Run the simulation loop (real-time visualization not yet supported, see next section for visualization)
+        main_simulation(cfg, planner)
+    except:
+        print(f'Error occurred while running NuPlan for log: {log}')
+        continue

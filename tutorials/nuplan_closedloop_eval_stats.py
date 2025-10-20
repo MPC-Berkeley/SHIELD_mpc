@@ -5,10 +5,13 @@ import pdb
 import numpy as np
 from nuplan.planning.simulation.planner.utils.smpc_utils import flatten
 import matplotlib.pyplot as plt
+import os
 
+
+NUPLAN_ROOT_DIR = os.environ['NUPLAN_ROOT_DIR']
 def main(filename):
     #Load the evaluation dataset
-    with gzip.open('../nuplan/expert_data/' + filename,'rb') as file:
+    with gzip.open(NUPLAN_ROOT_DIR + '/nuplan/expert_data/' + filename,'rb') as file:
         data = pickle.load(file)
     keys = list(data.keys())
     print("The data contains the following keys:")

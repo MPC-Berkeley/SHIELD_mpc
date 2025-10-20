@@ -17,6 +17,7 @@ from tutorials.utils.logger import Logger
 import pickle
 import gzip
 
+NUPLAN_ROOT_DIR = os.environ['NUPLAN_ROOT_DIR']
 
 def Train_BC(smpc_config, config, policy, device, policy_type,
              l1_dual_dim, ca_dual_dim, l1_num, pred_mode):
@@ -254,9 +255,9 @@ def main(smpc_config, config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--smpc_config', required=False, type=str,
-                        default='/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml')
+                        default=NUPLAN_ROOT_DIR +'/nuplan/planning/simulation/planner/smpc_config.yaml')
     parser.add_argument('--config', required=False, type=str,
-                        default='/home/mpc/nuplan-devkit/tutorials/training_config.yaml')
+                        default=NUPLAN_ROOT_DIR +'/tutorials/training_config.yaml')
     parser.add_argument('--policy_type', required=False, type=str,
                         default=None, help='RAIDNET_V1_JOINT | RAIDNET_V2_JOINT | MLP_JOINT')
     args = parser.parse_args()

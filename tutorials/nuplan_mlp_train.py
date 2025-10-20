@@ -122,8 +122,8 @@ def main(smpc_config,config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--smpc_config', required=False,type=str, default='/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml')
-    parser.add_argument('--config', required=False,type=str, default='/home/mpc/nuplan-devkit/tutorials/mlp_training_config.yaml')
+    parser.add_argument('--smpc_config', required=False,type=str, default=os.getcwd()+'/nuplan/planning/simulation/planner/smpc_config.yaml')
+    parser.add_argument('--config', required=False,type=str, default=os.getcwd()+'/tutorials/mlp_training_config.yaml')
     args = parser.parse_args()
     with open(args.smpc_config, 'r') as f:
         smpc_config = yaml.load(f,Loader=yaml.FullLoader)

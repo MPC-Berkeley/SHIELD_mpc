@@ -22,7 +22,7 @@ except ImportError:
 
 from contextlib import contextmanager
 
-
+NUPLAN_ROOT_DIR = os.envrion['NUPLAN_ROOT_DIR']
 # ============================ Utilities ============================
 
 def forward_in_batches(model, x, batch_size=1024, device=None, return_device='cpu'):
@@ -175,8 +175,8 @@ def evaluate(smpc_config, config, policy, device, policy_type,
 
     # ---- load weights ----
     print('Loading pretrained model...')
-    l1_ckpt = th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_L1_100.pt')
-    ca_ckpt = th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_CA_100.pt')
+    l1_ckpt = th.load('../nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_L1_100.pt')
+    ca_ckpt = th.load('../nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_CA_100.pt')
     policy[0].load_state_dict(l1_ckpt['model_state_dict'])
     policy[1].load_state_dict(ca_ckpt['model_state_dict'])
 
@@ -503,7 +503,7 @@ def main(smpc_config, config):
 
     # Baselines
     if eval_other_models:
-        with open('/home/mpc/nuplan-devkit/tutorials/mlp_training_config.yaml', 'r') as f:
+        with open('mlp_training_config.yaml', 'r') as f:
             mlp_config = yaml.load(f, Loader=yaml.FullLoader)
         l1_policy_mlp = MLP(observation_dim, l1_num,
                             hidden_layers=mlp_config['num_layers'],
@@ -516,8 +516,8 @@ def main(smpc_config, config):
         l1_policy_mlp.to(device); ca_policy_mlp.to(device)
 
         ckpt = []
-        ckpt.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_L1_100.pt'))
-        ckpt.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_CA_100.pt'))
+        ckpt.append(th.load(NUPLAN_ROOT_DIR+'/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_L1_100.pt'))
+        ckpt.append(th.load(NUPLAN_ROOT_DIR+'/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_CA_100.pt'))
         l1_policy_mlp.load_state_dict(ckpt[0]['model_state_dict'])
         ca_policy_mlp.load_state_dict(ckpt[1]['model_state_dict'])
 
@@ -534,8 +534,8 @@ def main(smpc_config, config):
         l1_policy_v1.to(device); ca_policy_v1.to(device)
 
         ckpt = []
-        ckpt.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_L1_4.pt'))
-        ckpt.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_CA_4.pt'))
+        ckpt.append(th.load(NUPLAN_ROOT_DIR+'/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_L1_4.pt'))
+        ckpt.append(th.load(NUPLAN_ROOT_DIR+'/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_CA_4.pt'))
         l1_policy_v1.load_state_dict(ckpt[0]['model_state_dict'])
         ca_policy_v1.load_state_dict(ckpt[1]['model_state_dict'])
 
@@ -554,9 +554,9 @@ def main(smpc_config, config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--smpc_config', required=False, type=str,
-                        default='/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config_eval.yaml')
+                        default=NUPLAN_ROOT_DIR+'/nuplan/planning/simulation/planner/smpc_config_eval.yaml')
     parser.add_argument('--config', required=False, type=str,
-                        default='/home/mpc/nuplan-devkit/tutorials/training_config.yaml')
+                        default=NUPLAN_ROOT_DIR+'/tutorials/training_config.yaml')
     args = parser.parse_args()
     with open(args.smpc_config, 'r') as f:
         smpc_config = yaml.load(f, Loader=yaml.FullLoader)

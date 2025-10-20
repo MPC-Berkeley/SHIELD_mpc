@@ -2,6 +2,9 @@ from nuplan.planning.simulation.planner.utils.smpc_utils import *
 from collections import Counter
 import torch as th
 import scipy.linalg as la
+import os
+
+NUPLAN_ROOT_DIR = os.environ['NUPLAN_ROOT_DIR']
 
 class ReplayBuffer(th.utils.data.Dataset):
 
@@ -89,8 +92,8 @@ class ReplayBuffer(th.utils.data.Dataset):
 
         #Save feature mean and cov for unnormalization in the policy
         if self.training_dataset:
-            np.savez('/home/mpc/nuplan-devkit/nuplan/nn_models/'+policy_type+'_'+'nuplan_expert_data_N14_wayformer_affine_training_stats.npz', feature_mean=self.feature_mean, feature_cov=self.feature_cov, feature_cov_inv =la.inv(self.feature_cov), target_mean=self.target_mean, target_cov=self.target_cov)
-            print('Normalization done! Feature mean and cov saved to /home/mpc/nuplan-devkit/nuplan/nn_models/'+policy_type+'_'+'nuplan_expert_data_N14_wayformer_affine_training_stats.npz')
+            np.savez(NUPLAN_ROOT_DIR+'/nuplan/nn_models/'+policy_type+'_'+'nuplan_expert_data_N14_wayformer_affine_training_stats.npz', feature_mean=self.feature_mean, feature_cov=self.feature_cov, feature_cov_inv =la.inv(self.feature_cov), target_mean=self.target_mean, target_cov=self.target_cov)
+            print('Normalization done! Feature mean and cov saved to ../nuplan-devkit/nuplan/nn_models/'+policy_type+'_'+'nuplan_expert_data_N14_wayformer_affine_training_stats.npz')
     
     def normalize4evaluation(self, l1_dim, feature_mean=None, feature_cov=None, target_mean=None, target_cov=None,l1_pred_mode='tertiary'):
         assert feature_mean is not None, 'Feature mean must be provided for evaluation normalization!'

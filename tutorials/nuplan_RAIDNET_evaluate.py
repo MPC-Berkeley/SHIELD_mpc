@@ -26,7 +26,7 @@ except ImportError:
 
 import shutil
 from contextlib import contextmanager
-
+NUPLAN_ROOT_DIR = os.envrion['NUPLAN_ROOT_DIR']
 def forward_in_batches(model, x, batch_size=1024, device=None, return_device='cpu'):
     """
     Run `model(x)` in smaller batches to avoid OOM and concatenate outputs along dim=0.
@@ -84,8 +84,8 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
 
     print('Loading pretrained model...')
     checkpoint = []
-    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_L1_100.pt'))
-    checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_CA_100.pt'))
+    checkpoint.append(th.load(os.getcwd()+'/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_L1_100.pt'))
+    checkpoint.append(th.load(os.getcwd()+'/nuplan/nn_models/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06/RAIDNET_V2_NuPlan_N14_N_TV3_15-09-2025_11-26-06_CA_100.pt'))
     #L1
     policy[0].load_state_dict(checkpoint[0]['model_state_dict'])
     #CA
@@ -94,8 +94,6 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     print('EVALUATION STARTED'.center(80,'*'))
     bc_learner = BC(policy=policy, optimizer=config['optimizer'], optim_lr=config['lr'], demonstrations=replay_buffer, rng=np.random.default_rng(0), device=device, batch_size=config['batch_size'], logger=None, normalize=False, config=config, normalize_obs=False, l1_dual_dim=l1_dual_dim, ca_dual_dim=ca_dual_dim, joint_dual_pred=config['joint_dual_pred'])
     metrics = {}
-
-    #TODO: Evaluate the policy on the evaluation_data (single pass on the entire dataset. no minibatch)
     
     #We can use the BC learner's helper functions such as l1_target, per_class_accuracy, loss functions, etc to help us compute the following 
     # L1 Duals:
@@ -157,9 +155,6 @@ def evaluate(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
 
         loss_l1 = bc_learner.ldam(logits_l1[mask], targets_l1[mask].long())
         #Compute normalized loss per sample
-        # wrong_pred_l1 = th.zeros(policy[0].output_dim,logits_l1.shape[-1]).to(logits_l1.device)
-        # wrong_pred_l1[:,1] = 1.0
-        # sample_target_l1 = th.ones(policy[0].output_dim).to(logits_l1.device)
         # Multi-class classification cross-entropy loss
         # max_loss_l1 = np.log(logits_l1.shape[-1]) #Cross-entropy loss for a random guess is log(C) where C is the number of classes
         C = logits_l1.size(-1)                         # 3 classes
@@ -458,8 +453,8 @@ def print_and_plot_metrics(metrics: dict, baselines: dict = None):
         print('RAID-Net V1 Baseline CA Accuracy:', baselines['ca_acc_raidnet_v1'])
 
     # Save confusion matrices
-    _ = metrics['l1_confusion_matrix'].figure_.savefig('../nuplan/evaluation/l1_confusion_matrix.png')
-    _ = metrics['ca_confusion_matrix'].figure_.savefig('../nuplan/evaluation/ca_confusion_matrix.png')
+    _ = metrics['l1_confusion_matrix'].figure_.savefig(os.getcwd()+'/nuplan/evaluation/l1_confusion_matrix.png')
+    _ = metrics['ca_confusion_matrix'].figure_.savefig(os.getcwd()+'/nuplan/evaluation/ca_confusion_matrix.png')
 
     # ----------------- L1 HISTOGRAM -----------------
     with classy_mathtext():
@@ -498,7 +493,7 @@ def print_and_plot_metrics(metrics: dict, baselines: dict = None):
                                             im_kw={'vmax': 1.},
                                             values_format='.3g')
         plt.tight_layout()
-        plt.savefig('../nuplan/evaluation/l1_metrics.png')
+        plt.savefig(os.getcwd()+'/nuplan/evaluation/l1_metrics.png')
         plt.show()
 
     # ----------------- CA HISTOGRAM -----------------
@@ -550,7 +545,7 @@ def print_and_plot_metrics(metrics: dict, baselines: dict = None):
                                             im_kw={'vmax': 1.},
                                             values_format='.3g')
         plt.tight_layout()
-        plt.savefig('../nuplan/evaluation/ca_metrics.png')
+        plt.savefig(os.getcwd()+'/nuplan/evaluation/ca_metrics.png')
         plt.show()
 
 
@@ -578,7 +573,7 @@ def main(smpc_config,config):
     ca_policy = RAID_NET_V2(raidnet_config,int(observation_dim/(smpc_config['num_tvs'])), observation_dim, ca_num, config['N']-1, smpc_config['num_tvs'], num_layers//2, hidden_dim//2,lambda_dim=ca_num, lambda_ubd=smpc_config['l1_lmbd'], pred_mode=['ca','binary','binary'])
 
     if eval_other_models: 
-        with open('/home/mpc/nuplan-devkit/tutorials/mlp_training_config.yaml', 'r') as f:
+        with open('mlp_training_config.yaml', 'r') as f:
             mlp_config = yaml.load(f,Loader=yaml.FullLoader)
         l1_policy_mlp = MLP(observation_dim, l1_num, hidden_layers=mlp_config['num_layers'], hidden_size=mlp_config['hidden_dim'],device=device,tertiary=True)
         ca_policy_mlp = MLP(observation_dim, ca_num, hidden_layers=mlp_config['num_layers'], hidden_size=mlp_config['hidden_dim'],device=device)
@@ -586,8 +581,8 @@ def main(smpc_config,config):
         ca_policy_mlp.to(device)
 
         checkpoint = []
-        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_L1_100.pt'))
-        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_CA_100.pt'))
+        checkpoint.append(th.load(os.getcwd()+'/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_L1_100.pt'))
+        checkpoint.append(th.load(os.getcwd()+'/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_CA_100.pt'))
         #L1
         l1_policy_mlp.load_state_dict(checkpoint[0]['model_state_dict'])
         #CA
@@ -599,8 +594,8 @@ def main(smpc_config,config):
         ca_policy_raidnet_v1.to(device)
 
         checkpoint = []
-        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_L1_4.pt'))
-        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_CA_4.pt'))
+        checkpoint.append(th.load(os.getcwd()+'/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_L1_4.pt'))
+        checkpoint.append(th.load(os.getcwd()+'/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_CA_4.pt'))
         #L1
         l1_policy_raidnet_v1.load_state_dict(checkpoint[0]['model_state_dict'])
         #CA
@@ -621,8 +616,8 @@ def main(smpc_config,config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--smpc_config', required=False,type=str, default='/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config_eval.yaml')
-    parser.add_argument('--config', required=False,type=str, default='/home/mpc/nuplan-devkit/tutorials/training_config.yaml')
+    parser.add_argument('--smpc_config', required=False,type=str, default=os.getcwd()+'/nuplan/planning/simulation/planner/smpc_config_eval.yaml')
+    parser.add_argument('--config', required=False,type=str, default=os.getcwd()+'/tutorials/training_config.yaml')
     args = parser.parse_args()
     with open(args.smpc_config, 'r') as f:
         smpc_config = yaml.load(f,Loader=yaml.FullLoader)

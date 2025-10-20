@@ -13,6 +13,7 @@ from tutorials.utils.BC import BC
 from tutorials.utils.logger import Logger
 import pickle
 import gzip
+NUPLAN_ROOT_DIR = os.envrion['NUPLAN_ROOT_DIR']
 
 def Train_BC(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_dim,l1_num,pred_mode):
     #Initiate logger
@@ -84,8 +85,8 @@ def Train_BC(smpc_config,config,policy,device,policy_type,l1_dual_dim,ca_dual_di
     if config['pretrain']:
         print('Loading pretrained model...')
         checkpoint = []
-        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11_L1_100.pt'))
-        checkpoint.append(th.load('/home/mpc/nuplan-devkit/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11_CA_100.pt'))
+        checkpoint.append(th.load(NUPLAN_ROOT_DIR +'/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11_L1_100.pt'))
+        checkpoint.append(th.load(NUPLAN_ROOT_DIR +'/nuplan/nn_models/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11/RAIDNET_NuPlan_N14_N_TV3_12-08-2025_19-07-11_CA_100.pt'))
         #L1
         bc_learner.optimizer[0].load_state_dict(checkpoint[0]['optimizer_state_dict'])
         bc_learner.policy[0].load_state_dict(checkpoint[0]['model_state_dict'])
@@ -144,8 +145,8 @@ def main(smpc_config,config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--smpc_config', required=False,type=str, default='/home/mpc/nuplan-devkit/nuplan/planning/simulation/planner/smpc_config.yaml')
-    parser.add_argument('--config', required=False,type=str, default='/home/mpc/nuplan-devkit/tutorials/training_config.yaml')
+    parser.add_argument('--smpc_config', required=False,type=str, default=NUPLAN_ROOT_DIR +'/nuplan/planning/simulation/planner/smpc_config.yaml')
+    parser.add_argument('--config', required=False,type=str, default=NUPLAN_ROOT_DIR +'/tutorials/training_config.yaml')
     args = parser.parse_args()
     with open(args.smpc_config, 'r') as f:
         smpc_config = yaml.load(f,Loader=yaml.FullLoader)
