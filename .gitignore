@@ -36,7 +36,5 @@ _ext
 docs/_build/
 nuplan/dataset/
 nuplan/expert_data/
-nuplan/nn_models/
-nuplan/nn_training_logs/
 
 docs/generated/

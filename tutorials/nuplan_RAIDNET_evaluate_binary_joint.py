@@ -370,7 +370,7 @@ if __name__ == '__main__':
         smpc_config = yaml.load(f, Loader=yaml.FullLoader)
     with open(args.config, 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
-    config['v2_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/results/RAIDNET_V2_JOINT_NuPlan_N14_N_TV3_10-10-2025_02-25-31_JOINT_300.pt'
-    config['v1_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/results/RAIDNET_V1_NuPlan_N14_N_TV3_10-10-2025_03-06-17_JOINT_300.pt'
-    config['mlp_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/results/MLP_NuPlan_N14_N_TV3_10-10-2025_03-05-45_JOINT_300.pt'
+    config['v2_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/RAIDNET_V2_JOINT_NuPlan_N14_N_TV3_10-10-2025_02-25-31/RAIDNET_V2_JOINT_NuPlan_N14_N_TV3_10-10-2025_02-25-31_JOINT_100.pt'
+    config['v1_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40/RAIDNET_V1_NuPlan_N14_N_TV3_15-09-2025_11-48-40_L1_300.pt'
+    config['mlp_joint_ckpt'] = NUPLAN_ROOT_DIR +'/nuplan/nn_models/MLP_NuPlan_N14_N_TV3_512_3_15-09-2025_10-43-29/MLP_NuPlan_N14_N_TV3_15-09-2025_10-43-29_L1_300.pt'
     main(smpc_config, config)
