@@ -1,6 +1,7 @@
 # SHIELD MPC
 <div align="center">
 <img src="assets/main.png" width="500">
+
 This repository contains the implementation of a Safe Hierarchical Inference for Lightweight
 Duality-Screened MPC (SHIELD) algorithm. 
 
