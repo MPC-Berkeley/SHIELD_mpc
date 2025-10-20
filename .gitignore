@@ -35,5 +35,6 @@ _ext
 docs/_build/
 nuplan/dataset/
 nuplan/expert_data/
+nuplan/evaluation/
 
 docs/generated/
