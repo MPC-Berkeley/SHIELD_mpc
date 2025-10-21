@@ -48,6 +48,8 @@ Scenario 2: Lane Merge
 
 </div>
 
+# Acknowledgement:
+This implementation is built on <a href="https://github.com/motional/nuplan-devkit">nuPlan</a> for simulation. Furthermore, for uncertain, multi-modal forecast generation, we use the opensource Wayformer implementation by <a href="https://github.com/vita-epfl/UniTraj">UniTraj</a>.
 
 # Downloading nuPlan mini v1.1 Dataset:
 1) Go to https://www.nuscenes.org/nuplan and download nuPlan mini v1.1 dataset.
