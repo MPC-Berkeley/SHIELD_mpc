@@ -89,7 +89,7 @@ def build_simulations(
     #     print('23b782750976520b not found in the scenarios list')
     #     raise ValueError('Scenario with id 23b782750976520b not found in the scenarios list')
     # only run '23b782750976520b' scenario
-    # scenarios = [sc for sc in scenarios if sc.scenario_name in ['23b782750976520b', '08ee9351335c9a']]
+    # scenarios = [sc for sc in scenarios if sc.scenario_name in ['23b782750976520b']]
     metric_engines_map = {}
     if cfg.run_metric:
         logger.info('Building metric engines...')

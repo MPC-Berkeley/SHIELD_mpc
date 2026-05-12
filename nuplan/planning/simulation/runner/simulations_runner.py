@@ -174,7 +174,7 @@ class SimulationRunner(AbstractRunner):
         if debug:
             self.plot_gaussian_modes_over_time(pred,planner_input)
 
-        pred_filtered, prob_filtered, tv_params, tv_track_tokens, idx = self.filter_predictions(pred, prob, planner_input, x)
+        pred_filtered, prob_filtered, tv_params, tv_track_tokens, idx, pred_all_filtered = self.filter_predictions(pred, prob, planner_input, x)
         center_objects_world_filtered = center_objects_world[idx,:]
         tv_psi, anomaly_heading_idx = self.get_heading_wayformer(pred_filtered,center_objects_world_filtered[:,[6]].repeat(1,pred_filtered.shape[1]))
         if anomaly_heading_idx:
@@ -184,7 +184,7 @@ class SimulationRunner(AbstractRunner):
                 # logger.warning(f"Anomaly heading detected for vehicle index {i} at time {t}. Setting to initial heading.")
         # if planner_input.iteration.index >= 26:
         #     pdb.set_trace()
-        return pred_filtered.numpy(), prob_filtered.numpy(), tv_params, tv_psi.numpy(), tv_track_tokens
+        return pred_filtered.numpy(), prob_filtered.numpy(), tv_params, tv_psi.numpy(), tv_track_tokens, pred_all_filtered.numpy()
 
     def filter_predictions(self, pred, prob, planner_input, wayformerinput):
         """
@@ -225,9 +225,12 @@ class SimulationRunner(AbstractRunner):
         if closest_vehicles_indices.shape[0] == 0:
             # If no vehicles are found, use dummy vehicles (same heading as ego, x and y really far away)
             # This is a fallback mechanism and should rarely happen
-            pred_output = pred.repeat(V,1,1,1)
+            pred_output = pred_gathered.repeat(V,1,1,1)
             pred_output[:,:,:,0] += 1000.0 #x
             pred_output[:,:,:,1] += 1000.0 #y
+            pred_all_output = pred.repeat(V,1,1,1)
+            pred_all_output[:,:,:,0] += 1000.0
+            pred_all_output[:,:,:,1] += 1000.0
             prob_output = prob.repeat(V,1)
             tv_params = [(4, 2)] * V #arbitrary length and width
             tv_track_tokens = ['dummy'] * V
@@ -284,6 +287,7 @@ class SimulationRunner(AbstractRunner):
                 #Fill with a dummy vehicle
                 closest_vehicles_indices = torch.cat([closest_vehicles_indices, torch.tensor([closest_vehicles_indices[-1]] * (V - closest_vehicles_indices.shape[0]))])
             pred_output = pred_gathered[closest_vehicles_indices]
+            pred_all_output = pred[closest_vehicles_indices]  # all 6 modes, for visualization
             prob_output = torch.gather(prob[closest_vehicles_indices], dim = 1, index = pred_M_ind[closest_vehicles_indices])
             
             for i in range(V):
@@ -302,7 +306,7 @@ class SimulationRunner(AbstractRunner):
                     print(f"Vehicle with token {wayformerinput[ind]['center_objects_id']} not found in tracked objects.")
                 filtered_idx.append(ind.item())
 
-        return pred_output, prob_output, tv_params, tv_track_tokens, filtered_idx
+        return pred_output, prob_output, tv_params, tv_track_tokens, filtered_idx, pred_all_output
     
     def get_heading_wayformer(self, pred_filtered, init_psi):
         """
@@ -464,7 +468,7 @@ class SimulationRunner(AbstractRunner):
                 self._simulation.callback.on_planner_start(self.simulation.setup, self.planner)
 
                 # Get predictions for planner
-                pred, prob, tv_params, tv_psi, tv_track_tokens = self.wayformer_inference(planner_input)
+                pred, prob, tv_params, tv_psi, tv_track_tokens, pred_all = self.wayformer_inference(planner_input)
                 if isinstance(self.planner, SMPCPlanner):             
                     #Get IDM predictions for planner
                     time_controller_copy = copy.deepcopy(self.simulation._time_controller)
@@ -487,7 +491,7 @@ class SimulationRunner(AbstractRunner):
                         #use Wayformer predictions
                         tv_paths_se2 = None
                         scenario_type = self.simulation.scenario.scenario_type
-                        preds = (pred, prob, tv_params, tv_psi, tv_track_tokens, scenario_type)
+                        preds = (pred, prob, tv_params, tv_psi, tv_track_tokens, scenario_type, pred_all)
                         if self.simulation._time_controller.get_iteration().index == 0:
                             ego_traj = list(self.simulation.scenario.get_expert_ego_trajectory())
                             self.planner.ego_traj = ego_traj[:self.planner.config['N']+1]

@@ -5,6 +5,9 @@ is_mm_preds: True
 num_tvs: 3
 num_modes: 2
 l1_lmbd: 100
+eps: 0.01
+tightening: 2.3
+sensitivity_tag: ''
 collision_avoidance_method: 'affine' #['obca','affine']
 
 # state and input constraints
@@ -19,6 +22,7 @@ eval_mode_category: 0 #0: closed-loop with IDMAgent observation, 1: open-loop (T
 eval_mode: True 
 expert_only: False
 save_snapshots: True
+visualize_all_modes: False  # show all 6 Wayformer modes (faded gray) behind top-2 in snapshots
 prediction_method: wayformer #['idm', 'wayformer']
 solver: 'gurobi' #['ipopt', 'gurobi']
 save_canon_forms: False

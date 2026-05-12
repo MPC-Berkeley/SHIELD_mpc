@@ -21,7 +21,11 @@ def run_metric_engine(
     Run the metric engine.
     """
     logger.debug("Starting metrics computation...")
-    metric_files = metric_engine.compute(history, scenario=scenario, planner_name=planner_name)
+    try:
+        metric_files = metric_engine.compute(history, scenario=scenario, planner_name=planner_name)
+    except Exception as e:
+        logger.warning(f"Metrics computation skipped: {e}")
+        return
     logger.debug("Finished metrics computation!")
     logger.debug("Saving metric statistics!")
     metric_engine.write_to_files(metric_files)

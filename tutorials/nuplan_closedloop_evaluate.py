@@ -54,23 +54,42 @@ scenario_types=[
     ]
 
 print('total log list length:',len(log_list))
-# log_list = log_list[59:] # 2021.10.06.17.43.07_veh-28_00508_00877 for 08ee9351335b5c9a
-# scenario_types = ['starting_unprotected_cross_turn'] #for 08ee9351335b5c9a
-# num_scenarios = 30 #float: fraction, int: number of scenarios to use from the log #for 08ee9351335b5c9a
 
-# log_list = [log_list[7]] #for 23b782750976520b
-# scenario_types = ['high_magnitude_speed'] #for 23b782750976520b
-# num_scenarios = 0.99 #for 23b782750976520b
-# Also, go to simulation_builder.py to turn on the filter for this specific scenario
+# ── Sensitivity sweep mode (activated by SENSITIVITY_TAG env var) ─────────────
+import os as _os
+_sensitivity_tag = _os.environ.get('SENSITIVITY_TAG', '')
+_scenario_token_override = None
+if _sensitivity_tag:
+    # Use first 5 logs with diverse scenario types, 20 scenarios total
+    log_list = log_list[:5]
+    scenario_types = [
+        'starting_unprotected_cross_turn',
+        'changing_lane',
+        'near_multiple_vehicles',
+        'high_magnitude_speed',
+        'traversing_intersection',
+    ]
+    num_scenarios = 20
+    print(f'[sensitivity] tag={_sensitivity_tag}, logs={len(log_list)}, scenarios={num_scenarios}')
+else:
+    # log_list = [log_list[59]] # 2021.10.06.17.43.07_veh-28_00508_00877 for 08ee9351335b5c9a
+    # scenario_types = ['starting_unprotected_cross_turn'] #for 08ee9351335b5c9a
+    # num_scenarios = 1 #for 08ee9351335b5c9a
+
+    log_list = [log_list[7]] #for 23b782750976520b
+    scenario_types = ['high_magnitude_speed'] #for 23b
+    num_scenarios = 100 #for 23b
+    # Also, go to simulation_builder.py to turn on the filter for this specific scenario
+    _scenario_token_override = '23b782750976520b'
 
 #General Case
-log_list = log_list
-num_scenarios = 3
+# log_list = log_list
+# num_scenarios = 3
 
 num_scenarios_per_type = 1
 for it, log in enumerate(log_list):
     print('#'.center(50, '#'))
-    # it += 59
+    it += 7 if not _sensitivity_tag else it
     # it += 7
     # it += 12
     try:
@@ -78,13 +97,15 @@ for it, log in enumerate(log_list):
         EGO_CONTROLLER = 'perfect_tracking_controller'  # [log_play_back_controller, perfect_tracking_controller]
         # OBSERVATION = 'box_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
         OBSERVATION = 'idm_agents_observation'  # [box_observation, idm_agents_observation, lidar_pc_observation]
+        token_params = [f"scenario_filter.scenario_tokens=[{_scenario_token_override}]"] if _scenario_token_override else []
         DATASET_PARAMS = [
             'scenario_builder=nuplan_mini',  # [nuplan, nuplan_mini] use nuplan mini database (2.5h of 8 autolabeled logs i n Las Vegas)
             f"scenario_filter.log_names=[{str(log)}]",
-            f'scenario_filter.scenario_types={scenario_types}', 
+            f'scenario_filter.scenario_types={scenario_types}',
+            *token_params,
             # f'scenario_filter.num_scenarios_per_type={num_scenarios_per_type}',  # use n scenarios per type
             f'scenario_filter.limit_total_scenarios={num_scenarios}',  # use n total scenarios
-            'scenario_filter.remove_invalid_goals=true',  
+            'scenario_filter.remove_invalid_goals=true',
         ]
 
         # Initialize configuration management system
@@ -124,6 +145,7 @@ for it, log in enumerate(log_list):
 
         # Run the simulation loop (real-time visualization not yet supported, see next section for visualization)
         main_simulation(cfg, planner)
-    except:
+    except Exception as e:
+        import traceback; traceback.print_exc()
         print(f'Error occurred while running NuPlan for log: {log}')
         continue

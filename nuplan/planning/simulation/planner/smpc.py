@@ -70,7 +70,7 @@ class SMPC():
         # Maps a scenario (m) to the modes of the TVs (j), like (0,1,1,3,3) 
         self.mode_map = dict(enumerate(product(*[range(self.N_modes[k]) for k in range(self.N_TV)])))
 
-        self.tight=2.3 
+        self.tight = self.config.get('tightening', 2.3)
 
         self.ev_n_std = EV_NOISE_STD 
         self.tv_n_std = [TV_NOISE_STD for _ in range(self.N_TV)] 
@@ -871,7 +871,7 @@ class SMPC():
         num_t = self.N - 1
         M = len(self.mode_map)
         K = self.N_TV
-        TOL = 0.01 #eps
+        TOL = self.config.get('eps', 0.01)
 
         # ---------- VECTORIZE: SOC (μ) SCREENING ----------
         # μ comes back flat; reshape to (K, M, T, mu_dim) with t as innermost in your build
